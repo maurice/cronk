@@ -18,6 +18,7 @@ struct Colors {
     red: Color,
     cyan: Color,
     purple: Color,
+    pending: Color,
 }
 
 impl Colors {
@@ -55,6 +56,12 @@ impl Colors {
             red: Color::hex_u24(values[8]),
             cyan: Color::hex_u24(values[9]),
             purple: Color::hex_u24(values[10]),
+            // A darker neutral keeps the light theme readable without using a warning color.
+            pending: Color::hex_u24(if config.theme == "light" {
+                0x626262
+            } else {
+                0xc7c7c7
+            }),
         }
     }
 
@@ -96,10 +103,10 @@ impl Colors {
     fn status(self, status: &str) -> (char, Color) {
         match status {
             "opened" | "success" | "passed" | "resolved" => ('●', self.green),
-            "running" => ('●', self.cyan),
+            "running" => ('◐', self.cyan),
             "failed" | "error" | "unresolved" => ('●', self.red),
             "merged" => ('●', self.purple),
-            "pending" | "created" | "waiting_for_resource" | "preparing" => ('○', self.yellow),
+            "pending" | "created" | "waiting_for_resource" | "preparing" => ('○', self.pending),
             "manual" | "scheduled" => ('○', self.accent),
             _ => ('○', self.muted),
         }
@@ -1116,12 +1123,12 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element 
     content.push(
         rich(
             vec![
-                Span::new(format!("● {} running   ", count("running"))).fg(colors.cyan),
+                Span::new(format!("◐ {} running   ", count("running"))).fg(colors.cyan),
                 Span::new(format!(
                     "○ {} pending   ",
                     count("pending") + count("created")
                 ))
-                .fg(colors.yellow),
+                .fg(colors.pending),
                 Span::new(format!("● {} passed   ", count("success"))).fg(colors.green),
                 Span::new(format!("● {} failed   ", count("failed"))).fg(colors.red),
                 Span::new(format!("{} total", details.jobs.len())).fg(colors.muted),
@@ -1231,7 +1238,7 @@ fn job_panel(
             }
             panel = panel.child(line(
                 if job.running() {
-                    "  ● LIVE · trailing output"
+                    "  ◐ LIVE · trailing output"
                 } else if trace.finished {
                     "  End of trace"
                 } else {
@@ -1967,6 +1974,23 @@ const HELP: &str = "\
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_and_pending_status_styles_in_every_theme() {
+        for theme in ["midnight", "dracula", "light"] {
+            let colors = Colors::new(&Config {
+                theme: theme.into(),
+                ..Config::default()
+            });
+            assert_eq!(colors.status("running"), ('◐', colors.cyan));
+            let neutral = Color::hex_u24(if theme == "light" { 0x626262 } else { 0xc7c7c7 });
+            for status in ["pending", "created", "waiting_for_resource", "preparing"] {
+                assert_eq!(colors.status(status), ('○', neutral));
+                let span = status_span(status, colors);
+                assert_eq!(span.style.fg, Some(neutral.into()));
+            }
+        }
+    }
 
     #[test]
     fn gitlab_label_colors_are_exact_and_selection_exempt() {

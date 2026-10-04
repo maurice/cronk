@@ -521,6 +521,28 @@ impl Component for Cronk {
                 ctx.state.content_offset = offset;
                 return Update::none();
             }
+            Msg::ListScroll(_) | Msg::ListViewportChanged => {
+                if ctx.state.scope != Scope::List {
+                    return Update::none();
+                }
+                let previous = ctx.state.scroll.clone();
+                if let Msg::ListScroll(offset) = msg {
+                    let len = if ctx.state.config.active_tab == 1 {
+                        ctx.state.config.projects.len()
+                    } else {
+                        ctx.state.visible_items().len()
+                    };
+                    let height = list_height(ctx.viewport().h);
+                    ctx.state.scroll.scroll_to(offset / 3, len, height);
+                } else {
+                    // Layout changes preserve the cursor; only mouse scrolling owns the viewport.
+                    self.normalize(ctx);
+                }
+                if ctx.state.scroll == previous {
+                    return Update::none();
+                }
+                self.persist(ctx);
+            }
             Msg::ToggleProject => {
                 if ctx.state.config.active_tab == 1
                     && let Some(project) =
@@ -556,6 +578,14 @@ impl Component for Cronk {
             ),
             Msg::CloseDialog => self.close_dialog(ctx),
             Msg::Submit => return self.submit(ctx),
+            Msg::DialogScrolled => {
+                if let Some(d) = &mut ctx.state.dialog {
+                    if !d.reveal_selection {
+                        return Update::none();
+                    }
+                    d.reveal_selection = false;
+                }
+            }
             Msg::DialogSelect(index) => {
                 if let Some(d) = &mut ctx.state.dialog {
                     d.selected = index;
@@ -566,11 +596,13 @@ impl Component for Cronk {
                     && index < d.fields.len()
                 {
                     d.selected = index;
+                    d.reveal_selection = true;
                     ctx.request_focus(format!("dialog-field-{index}"));
                 }
             }
             Msg::Input(index, event) => {
                 if let Some(d) = &mut ctx.state.dialog {
+                    d.reveal_selection = true;
                     if let Some(f) = d.fields.get_mut(index) {
                         let previous = f.input.text().to_owned();
                         event.apply_to(&mut f.input);
@@ -583,6 +615,7 @@ impl Component for Cronk {
             }
             Msg::Editor(index, event) => {
                 if let Some(d) = &mut ctx.state.dialog {
+                    d.reveal_selection = true;
                     if let Some(f) = d.fields.get_mut(index) {
                         event.apply_to(&mut f.editor);
                     }
@@ -941,6 +974,7 @@ impl Cronk {
             help: help.into(),
             fields,
             selected: 0,
+            reveal_selection: true,
             error: None,
         });
         ctx.request_focus("dialog-field-0");
@@ -980,6 +1014,7 @@ impl Cronk {
             ctx.state.dialog.as_ref().map_or(0, |d| d.fields.len())
         };
         if let Some(d) = &mut ctx.state.dialog {
+            d.reveal_selection = true;
             d.selected = d
                 .selected
                 .saturating_add_signed(delta)

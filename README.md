@@ -54,6 +54,7 @@ Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTT
 | `Esc` from a list | No action; the list remains active |
 | `Home` / `End`, `PageUp` / `PageDown` | Move through a list/document |
 | Mouse click / wheel | Open rows, choose tabs/sections, select fields, scroll |
+| Scrollbar track click / thumb drag | Scroll the corresponding viewport without activating its contents |
 | `Space` in Projects | Include/hide the selected project in other lists |
 | `Ctrl+P` or `:` | Searchable command palette |
 | `/` | Edit the current list's filter |
@@ -71,6 +72,8 @@ Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTT
 Each tab's list is active as soon as you switch to it; there is no separate tab-navigation mode. Arrow keys never switch tabs, including Ctrl+arrows. The built-in tab initials are underlined, saved tabs display their number shortcuts, and the bottom gutter repeats the hints. Tab shortcuts are inactive inside dialogs/editors. More than ten saved views remain accessible by mouse; the tab strip scrolls horizontally when necessary.
 
 Lists use a quarter-viewport boundary: the cursor moves to the lower/upper quarter margin, the viewport follows further movement, then the cursor reaches the actual final/first row. No wraparound. Three terminal rows form one list item; the margin rounds down to whole items.
+
+Overflowing lists, detail panes, dialogs, and multiline editors show a theme-colored scrollbar at their right edge. The thumb indicates the visible fraction and current position; click the track or drag the thumb to scroll. Split panes scroll independently. Mouse scrolling keeps list selection visible, keyboard navigation continues from there, and unchanged refreshes do not pull the viewport back. Scrollbars disappear when content fits.
 
 The Dashboard shows your open authored, assigned, or requested-review work. It orders failed pipelines, unresolved discussions, passing non-draft review candidates, other MRs, then issues. A review candidate is a hint, **not** a claim that approvals, mergeability, or company policy checks are satisfied. Enter opens the real detail while preserving the Dashboard as the return destination.
 
@@ -174,5 +177,6 @@ Module layout:
 - `src/ui/view.rs`: declarative views, themes, exact label styling, live panels.
 - `src/demo.rs`: deterministic fictional fixtures.
 - `tests/ui.rs`: keyboard, mouse, route/persistence, and async-result regression tests.
+- `tests/scrollbars.rs`: scrollbar geometry, dragging, scrolling, resize/refresh, and dialog-focus regression tests.
 
 Licensed under Apache-2.0. tui-lipan is a separate MPL-2.0 dependency; using it does not change this application's license.

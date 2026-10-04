@@ -106,6 +106,25 @@ impl Colors {
     }
 }
 
+fn vertical_scrollbar(colors: Colors) -> ScrollbarConfig {
+    ScrollbarConfig::new()
+        .variant(ScrollbarVariant::Standalone)
+        .gap(1)
+        .thumb('█')
+        .thumb_style(Style::new().fg(colors.accent).bg(colors.surface))
+        .thumb_focus_style(Style::new().fg(colors.accent).bg(colors.surface))
+        .track_style(Style::new().fg(colors.muted).bg(colors.surface))
+}
+
+fn content_padding(left: u16) -> Padding {
+    Padding {
+        left,
+        right: 0,
+        top: 0,
+        bottom: 0,
+    }
+}
+
 fn parse_color(value: &str) -> Option<Color> {
     let hex = value.strip_prefix('#').unwrap_or(value);
     if hex.len() != 6 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
@@ -441,34 +460,26 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
             rows.push(work_row(ctx, item, index, scroll.selected == index, colors));
         }
     }
-    let selected = scroll.selected;
     let offset = scroll.offset;
-    let visible = slots.min(len);
-    let link = ctx.link().clone();
     let list = ScrollView::new()
         .height(Length::Px((slots * 3).min(u16::MAX as usize) as u16))
         .offset(offset * 3)
         .scroll_keys(ScrollKeymap::NONE)
         .focusable(false)
         .tab_stop(false)
-        .scrollbar(false)
+        .scrollbar(true)
+        .scrollbar_config(vertical_scrollbar(colors))
         .scroll_wheel_multiplier(3)
         .smooth_wheel_scroll(false)
         .estimated_child_height(3)
-        .on_scroll(ctx.link().callback(move |event: ScrollEvent| {
-            // Place the cursor on the approached quarter boundary so normalization preserves
-            // the wheel's viewport, rather than leaving an uncontrolled widget-only offset.
-            let next = event.offset / 3;
-            let margin = visible / 4;
-            let cursor = if next > offset {
-                next + visible - margin - 1
-            } else {
-                next + margin
-            }
-            .min(len - 1);
-            link.send(Msg::Select(selected));
-            Msg::Move(cursor as isize - selected as isize)
-        }))
+        .on_scroll(
+            ctx.link()
+                .callback(|event: ScrollEvent| Msg::ListScroll(event.offset)),
+        )
+        .on_viewport_change(
+            ctx.link()
+                .callback(|_: ScrollViewportEvent| Msg::ListViewportChanged),
+        )
         .children(rows);
     VStack::new()
         .child(Element::from(list).key(format!("main-list-{}", state.config.active_tab)))
@@ -629,16 +640,23 @@ fn scroll_content(
 ) -> Element {
     Element::from(
         ScrollView::new()
+            // Measure variable-height content before dragging so the thumb's range stays accurate.
+            .virtualize(false)
             .offset(ctx.state.content_offset)
             .scroll_keys(ScrollKeymap::NONE)
             .focusable(false)
             .tab_stop(false)
             .scrollbar(true)
+            .scrollbar_config(vertical_scrollbar(colors))
             .scroll_wheel_multiplier(3)
             .smooth_wheel_scroll(false)
-            .padding((0, 2))
+            .padding(content_padding(2))
             .style(colors.base())
             .on_scroll_to(ctx.link().callback(Msg::ContentScroll))
+            .on_viewport_change(
+                ctx.link()
+                    .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
+            )
             .children(children),
     )
     .key(key)
@@ -667,18 +685,18 @@ fn markdown(value: &str, colors: Colors) -> DocumentView {
 }
 
 fn section_document(ctx: &Context<Cronk>, value: &str, key: String, colors: Colors) -> Element {
-    Element::from(
-        markdown(value, colors)
-            .height(Length::Flex(1))
-            .padding((0, 2))
-            .scrollbar(true)
-            .scroll_offset(ctx.state.content_offset)
-            .on_scroll(
-                ctx.link()
-                    .callback(|event: ScrollEvent| Msg::ContentScroll(event.offset)),
-            ),
+    scroll_content(
+        ctx,
+        key,
+        vec![
+            markdown(value, colors)
+                .height(Length::Auto)
+                .scrollbar(false)
+                .scroll_wheel(false)
+                .into(),
+        ],
+        colors,
     )
-    .key(key)
 }
 
 fn detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
@@ -925,10 +943,12 @@ fn overview(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element 
                 ScrollView::new()
                     .width(Length::Px(23))
                     .reveal_key(format!("overview-section-{}", state.section_cursor))
-                    .padding((0, 1))
+                    .padding(content_padding(1))
                     .scroll_keys(ScrollKeymap::NONE)
                     .focusable(false)
                     .tab_stop(false)
+                    .scrollbar(true)
+                    .scrollbar_config(vertical_scrollbar(colors))
                     .gap(1)
                     .children(navigation),
             )
@@ -1005,15 +1025,21 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
     content.push(metadata("Web URL", details.item.web_url.clone(), colors));
     Element::from(
         ScrollView::new()
+            .virtualize(false)
             .offset(ctx.state.content_offset)
             .reveal_key(format!("edit-field-{}", ctx.state.config.field))
             .scroll_keys(ScrollKeymap::NONE)
             .focusable(false)
             .tab_stop(false)
             .scrollbar(true)
-            .padding((0, 2))
+            .scrollbar_config(vertical_scrollbar(colors))
+            .padding(content_padding(2))
             .smooth_wheel_scroll(false)
             .on_scroll_to(ctx.link().callback(Msg::ContentScroll))
+            .on_viewport_change(
+                ctx.link()
+                    .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
+            )
             .children(content),
     )
     .key(format!("fields-{}", item_key(&details.item.key)))
@@ -1265,14 +1291,20 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
         content.push(blank());
     }
     let mut scroll = ScrollView::new()
+        .virtualize(false)
         .offset(ctx.state.content_offset)
         .scroll_keys(ScrollKeymap::NONE)
         .focusable(false)
         .tab_stop(false)
         .scrollbar(true)
-        .padding((0, 2))
+        .scrollbar_config(vertical_scrollbar(colors))
+        .padding(content_padding(2))
         .smooth_wheel_scroll(false)
         .on_scroll_to(ctx.link().callback(Msg::ContentScroll))
+        .on_viewport_change(
+            ctx.link()
+                .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
+        )
         .children(content);
     if let Some(job) = details.jobs.get(ctx.state.config.field) {
         scroll = scroll.reveal_key(format!("job-{}", job.id));
@@ -1355,7 +1387,9 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Eleme
         .scroll_keys(ScrollKeymap::NONE)
         .focusable(false)
         .tab_stop(false)
-        .padding((0, 1))
+        .padding(content_padding(1))
+        .scrollbar(true)
+        .scrollbar_config(vertical_scrollbar(colors))
         .reveal_key(format!("discussion-{}", details.discussions[selected].id))
         .children(summaries);
     if ctx.viewport().w >= 100 {
@@ -1528,31 +1562,21 @@ fn dialog_key(
 
 fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element {
     let commands = matches!(dialog.kind, DialogKind::Commands);
-    let mut body = VStack::new()
+    // Keep reveal targets in separate child subtrees so keyboard focus can scroll to each one.
+    let mut body = ScrollView::new()
         .height(Length::Auto)
-        .gap(1)
         .style(Style::new().fg(colors.foreground).bg(colors.surface));
-    if dialog.fields.is_empty() {
-        body = body.child(
-            KeyCapture::new()
-                .on_key(ctx.link().key_handler(|key| match key.code {
-                    KeyCode::Enter => Some(Msg::Submit),
-                    KeyCode::Esc => Some(Msg::CloseDialog),
-                    KeyCode::Down | KeyCode::Tab if !key.mods.shift => Some(Msg::Move(1)),
-                    KeyCode::Up | KeyCode::Tab | KeyCode::BackTab => Some(Msg::Move(-1)),
-                    _ => None,
-                }))
-                .key("dialog-actions"),
-        );
-    }
+
     if !dialog.help.is_empty() {
-        body = body.child(
-            Text::new(dialog.help.clone())
-                .width(Length::Flex(1))
-                .height(Length::Auto)
-                .overflow(Overflow::Wrap)
-                .style(Style::new().fg(colors.muted)),
-        );
+        body = body
+            .child(
+                Text::new(dialog.help.clone())
+                    .width(Length::Flex(1))
+                    .height(Length::Auto)
+                    .overflow(Overflow::Wrap)
+                    .style(Style::new().fg(colors.muted)),
+            )
+            .child(blank());
     }
     for (index, field) in dialog.fields.iter().enumerate() {
         let selected = dialog.selected;
@@ -1567,7 +1591,9 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             TextArea::bound(&field.editor)
                 .height(Length::Px((ctx.viewport().h / 5).clamp(3, 8)))
                 .border(false)
-                .padding((0, 1))
+                .padding(content_padding(1))
+                .scrollbar(true)
+                .scrollbar_config(vertical_scrollbar(colors))
                 .line_numbers(false)
                 .wrap(true)
                 .style(normal)
@@ -1595,33 +1621,29 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                 .on_change(ctx.link().callback(move |event| Msg::Input(index, event)))
                 .into()
         };
-        body = body.child(
-            VStack::new()
-                .height(Length::Auto)
-                .child(line(
-                    field.label.clone(),
-                    Style::new().fg(if commands || selected == index {
-                        colors.accent
-                    } else {
-                        colors.muted
-                    }),
-                ))
-                .child(editor.key(format!("dialog-field-{index}"))),
-        );
+        body = body
+            .child(
+                VStack::new()
+                    .height(Length::Auto)
+                    .child(line(
+                        field.label.clone(),
+                        Style::new().fg(if commands || selected == index {
+                            colors.accent
+                        } else {
+                            colors.muted
+                        }),
+                    ))
+                    .child(editor.key(format!("dialog-field-{index}"))),
+            )
+            .child(blank());
     }
     if commands {
         let options = ctx.state.command_options();
-        let available = ctx.viewport().h.saturating_sub(13).max(3) as usize;
-        let start = dialog
-            .selected
-            .saturating_sub(available / 2)
-            .min(options.len().saturating_sub(available));
         if options.is_empty() {
             body = body.child(line("No matching commands.", Style::new().fg(colors.muted)));
         }
-        let mut choices = VStack::new().height(Length::Auto);
-        for (index, (label, _)) in options.iter().enumerate().skip(start).take(available) {
-            choices = choices.child(dialog_option(
+        for (index, (label, _)) in options.iter().enumerate() {
+            body = body.child(dialog_option(
                 ctx,
                 index,
                 label,
@@ -1629,9 +1651,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                 colors,
             ));
         }
-        body = body.child(choices);
     } else if matches!(dialog.kind, DialogKind::Themes) {
-        let mut choices = VStack::new().height(Length::Auto).gap(1);
         for (index, (name, hint)) in [
             ("Midnight", "Cool ink · violet · glacier blue"),
             ("Dracula", "Charcoal · orchid · electric green"),
@@ -1640,15 +1660,16 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         .iter()
         .enumerate()
         {
-            choices = choices.child(dialog_option(
-                ctx,
-                index,
-                &format!("{name:<10} {hint}"),
-                dialog.selected == index,
-                colors,
-            ));
+            body = body
+                .child(dialog_option(
+                    ctx,
+                    index,
+                    &format!("{name:<10} {hint}"),
+                    dialog.selected == index,
+                    colors,
+                ))
+                .child(blank());
         }
-        body = body.child(choices);
         if [
             &ctx.state.config.colors.background,
             &ctx.state.config.colors.surface,
@@ -1669,6 +1690,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         body = body.child(
             markdown(HELP, colors)
                 .height(Length::Auto)
+                .scrollbar(false)
                 .scroll_wheel(false),
         );
     } else if matches!(dialog.kind, DialogKind::Confirm(_)) {
@@ -1678,7 +1700,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         ));
     }
     if let Some(error) = &dialog.error {
-        body = body.child(
+        body = body.child(blank()).child(
             Text::new(format!("Error: {error}"))
                 .width(Length::Flex(1))
                 .height(Length::Auto)
@@ -1719,7 +1741,47 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         Text::new(" Close ").style(Style::new().fg(colors.muted)),
         || Msg::CloseDialog,
     ));
-    body = body.child(actions);
+    let mut scroll = body
+        .child(blank())
+        .child(actions)
+        .virtualize(false)
+        .scroll_keys(ScrollKeymap::NONE)
+        .focusable(false)
+        .tab_stop(false)
+        .scrollbar(true)
+        .scrollbar_config(vertical_scrollbar(colors))
+        .smooth_wheel_scroll(false)
+        .on_scroll(ctx.link().callback(|_: ScrollEvent| Msg::DialogScrolled));
+    if dialog.reveal_selection {
+        if commands || matches!(dialog.kind, DialogKind::Themes) {
+            scroll = scroll.reveal_key(format!("dialog-option-{}", dialog.selected));
+        } else if !dialog.fields.is_empty() {
+            scroll = scroll.reveal_key(format!("dialog-field-{}", dialog.selected));
+        }
+    }
+    let body = Element::from(scroll)
+        .max_height(Length::Px(ctx.viewport().h.saturating_sub(6).max(1)))
+        .key("dialog-scroll");
+    let body = if dialog.fields.is_empty() {
+        // Keep modal keyboard handling outside the viewport so scrolling cannot clip its focus.
+        VStack::new()
+            .height(Length::Auto)
+            .child(
+                KeyCapture::new()
+                    .on_key(ctx.link().key_handler(|key| match key.code {
+                        KeyCode::Enter => Some(Msg::Submit),
+                        KeyCode::Esc => Some(Msg::CloseDialog),
+                        KeyCode::Down | KeyCode::Tab if !key.mods.shift => Some(Msg::Move(1)),
+                        KeyCode::Up | KeyCode::Tab | KeyCode::BackTab => Some(Msg::Move(-1)),
+                        _ => None,
+                    }))
+                    .key("dialog-actions"),
+            )
+            .child(body)
+            .into()
+    } else {
+        body
+    };
     Element::from(
         Modal::new()
             .title(dialog.title.clone())
@@ -1769,6 +1831,7 @@ const HELP: &str = "\
 - **Shift+D / P / I / M** open Dashboard, Projects, Issues, or Merge Requests.
 - **1–9 / 0** open saved views 1–10. Tab shortcuts do not run inside dialogs.
 - Lists are active immediately. Arrow keys never switch tabs.
+- Overflowing panes show a right-edge scrollbar. Click its track or drag its thumb to scroll.
 - **Enter** opens the selected item, section, field, or job.
 - **Up / Down** move within the current scope. Document sections scroll.
 - **Esc** goes back one level; at a list it does nothing. Click a row to open it directly.

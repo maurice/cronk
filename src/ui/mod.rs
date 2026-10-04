@@ -91,6 +91,7 @@ pub struct Dialog {
     pub help: String,
     pub fields: Vec<FormField>,
     pub selected: usize,
+    pub reveal_selection: bool,
     pub error: Option<String>,
 }
 
@@ -184,12 +185,15 @@ pub enum Msg {
     Section(usize),
     Field(usize),
     ContentScroll(usize),
+    ListScroll(usize),
+    ListViewportChanged,
     ToggleProject,
     ToggleJob(u64),
     Action(Action),
     Palette,
     CloseDialog,
     Submit,
+    DialogScrolled,
     DialogSelect(usize),
     DialogField(usize),
     Input(usize, InputEvent),

@@ -44,6 +44,29 @@ impl BoundaryScroll {
         self.normalize(len, height);
     }
 
+    /// Apply a viewport drag/wheel movement without pulling it back to the old selection.
+    pub fn scroll_to(&mut self, offset: usize, len: usize, height: usize) {
+        if len == 0 {
+            *self = Self::default();
+            return;
+        }
+        let height = height.max(1).min(len);
+        let max_offset = len - height;
+        self.offset = offset.min(max_offset);
+        let margin = height / 4;
+        let first = if self.offset == 0 {
+            0
+        } else {
+            self.offset + margin
+        };
+        let last = if self.offset == max_offset {
+            len - 1
+        } else {
+            self.offset + height - margin - 1
+        };
+        self.selected = self.selected.clamp(first, last);
+    }
+
     pub fn select(&mut self, index: usize, len: usize, height: usize) {
         self.selected = index;
         self.normalize(len, height);
@@ -256,6 +279,161 @@ mod tests {
         scroll.select(90, 100, 8);
         scroll.move_by(-1, 10, 8);
         assert_state(&scroll, 8, 2);
+    }
+
+    #[test]
+    fn scroll_to_empty_lists_resets_stale_state() {
+        for height in [0, 1, 8, usize::MAX] {
+            for offset in [0, 10, usize::MAX] {
+                let mut scroll = BoundaryScroll {
+                    selected: usize::MAX,
+                    offset: usize::MAX,
+                };
+                scroll.scroll_to(offset, 0, height);
+                assert_state(&scroll, 0, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn scroll_to_tiny_viewports_use_the_full_visible_band() {
+        for height in 0usize..=3 {
+            let last = 4 + height.max(1) - 1;
+            for (selected, expected) in [(0, 4), (usize::MAX, last)] {
+                let mut scroll = BoundaryScroll {
+                    selected,
+                    offset: usize::MAX,
+                };
+                scroll.scroll_to(4, 10, height);
+                assert_state(&scroll, expected, 4);
+            }
+            for selected in 4..=last {
+                let mut scroll = BoundaryScroll {
+                    selected,
+                    offset: 0,
+                };
+                scroll.scroll_to(4, 10, height);
+                assert_state(&scroll, selected, 4);
+            }
+        }
+    }
+
+    #[test]
+    fn scroll_to_lists_fitting_the_viewport_clamps_only_stale_selection() {
+        for len in 1..=12 {
+            for height in [len, len + 1, usize::MAX] {
+                for selected in (0..=len).chain(std::iter::once(usize::MAX)) {
+                    let mut scroll = BoundaryScroll {
+                        selected,
+                        offset: usize::MAX,
+                    };
+                    scroll.scroll_to(usize::MAX, len, height);
+                    assert_state(&scroll, selected.min(len - 1), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scroll_to_clamps_offsets_and_allows_selection_in_boundary_margins() {
+        for (offset, selected, expected_selected, expected_offset) in [
+            (0, 0, 0, 0),
+            (0, 1, 1, 0),
+            (0, 29, 5, 0),
+            (22, 0, 24, 22),
+            (22, 28, 28, 22),
+            (22, 29, 29, 22),
+            (23, 0, 24, 22),
+            (usize::MAX, usize::MAX, 29, 22),
+        ] {
+            let mut scroll = BoundaryScroll {
+                selected,
+                offset: usize::MAX,
+            };
+            scroll.scroll_to(offset, 30, 8);
+            assert_state(&scroll, expected_selected, expected_offset);
+            assert_invariants(&scroll, 30, 8);
+        }
+    }
+
+    #[test]
+    fn scroll_to_preserves_selection_inside_the_quarter_band() {
+        for offset in [1, 7, 21] {
+            for selected in offset + 2..=offset + 5 {
+                let mut scroll = BoundaryScroll {
+                    selected,
+                    offset: 0,
+                };
+                scroll.scroll_to(offset, 30, 8);
+                assert_state(&scroll, selected, offset);
+            }
+        }
+    }
+
+    #[test]
+    fn scroll_to_moves_offscreen_and_margin_selection_to_the_nearest_band_edge() {
+        // Offset seven shows rows 7..=14, with the cursor band at 9..=12.
+        for (selected, expected) in [
+            (0, 9),
+            (6, 9),
+            (7, 9),
+            (8, 9),
+            (13, 12),
+            (14, 12),
+            (15, 12),
+            (29, 12),
+            (usize::MAX, 12),
+        ] {
+            let mut scroll = BoundaryScroll {
+                selected,
+                offset: 0,
+            };
+            scroll.scroll_to(7, 30, 8);
+            assert_state(&scroll, expected, 7);
+        }
+    }
+
+    #[test]
+    fn scroll_to_is_stable_under_repeated_normalization() {
+        for len in 0..=20 {
+            for height in 0..=24 {
+                for selected in 0..=24 {
+                    for offset in 0..=24 {
+                        let mut scroll = BoundaryScroll {
+                            selected,
+                            offset: usize::MAX,
+                        };
+                        scroll.scroll_to(offset, len, height);
+                        assert_invariants(&scroll, len, height);
+                        assert_eq!(scroll.offset, offset.min(len.saturating_sub(height.max(1))));
+                        let dragged = scroll.clone();
+                        scroll.normalize(len, height);
+                        assert_eq!(scroll, dragged);
+                        scroll.normalize(len, height);
+                        assert_eq!(scroll, dragged);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scroll_to_keyboard_moves_continue_from_the_dragged_selection() {
+        for (selected, dragged, delta, states) in [
+            (0, 9, 1, [(10, 7), (11, 7), (12, 7), (13, 8)]),
+            (29, 12, -1, [(11, 7), (10, 7), (9, 7), (8, 6)]),
+            (0, 9, -1, [(8, 6), (7, 5), (6, 4), (5, 3)]),
+            (29, 12, 1, [(13, 8), (14, 9), (15, 10), (16, 11)]),
+        ] {
+            let mut scroll = BoundaryScroll::default();
+            scroll.select(selected, 30, 8);
+            scroll.scroll_to(7, 30, 8);
+            assert_state(&scroll, dragged, 7);
+            for (selected, offset) in states {
+                scroll.move_by(delta, 30, 8);
+                assert_state(&scroll, selected, offset);
+            }
+        }
     }
 
     #[test]

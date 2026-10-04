@@ -1,0 +1,27 @@
+# Copy the structure into your workspace config, or start with `cronk --init`.
+# Never put access tokens in this file. IDs/paths below are illustrative.
+gitlab_url = "https://gitlab.company.example"
+token_env = "GITLAB_TOKEN"
+theme = "midnight" # midnight | dracula | light
+list_refresh_secs = 60 # minimum 15
+detail_refresh_secs = 10 # minimum 2; use 5 for faster details
+
+[colors]
+# accent = "#9B9FFF"
+# background = "#101521"
+# surface = "#192131"
+# selection = "#293654"
+# foreground = "#E5EAF5"
+# muted = "#96A3BC"
+
+# Add real projects through Ctrl+P -> Add existing GitLab project.
+# [[projects]]
+# id = 1234
+# path = "company/division/team/planning"
+# alias = "Planning"
+# visible = true
+
+# [[views]]
+# name = "My iteration"
+# kind = "issue"
+# query = 'label:"team::payments" assignee:@me state:opened'

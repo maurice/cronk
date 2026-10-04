@@ -1,0 +1,1368 @@
+use super::*;
+use crate::{config::SavedView, demo};
+use tui_lipan::{CommandLink, TaskPolicy};
+
+impl Component for Cronk {
+    type Message = Msg;
+    type Properties = ();
+    type State = State;
+
+    fn create_state(&self, _: &()) -> State {
+        let mut config = self.config.clone();
+        config.active_tab = config.active_tab.min(3 + config.views.len());
+        if config.route.as_ref().is_some_and(|key| {
+            !config
+                .projects
+                .iter()
+                .any(|p| p.id == key.project && p.visible)
+        }) {
+            config.route = None;
+            config.section = None;
+        }
+        let is_demo = self.api.is_none();
+        let scope = if config.route.is_some() {
+            if config.section.is_some() {
+                Scope::Section
+            } else {
+                Scope::Details
+            }
+        } else {
+            Scope::List
+        };
+        let details = if is_demo {
+            config.route.as_ref().map(demo::details)
+        } else {
+            None
+        };
+        let selected = config
+            .selections
+            .get(&config.active_tab.to_string())
+            .copied()
+            .unwrap_or(0);
+        let section_cursor = config.section.unwrap_or(0).min(
+            if config
+                .route
+                .as_ref()
+                .is_some_and(|k| k.kind == ItemKind::MergeRequest)
+            {
+                5
+            } else {
+                2
+            },
+        );
+        State {
+            config,
+            demo: is_demo,
+            scope,
+            items: if is_demo { demo::items() } else { vec![] },
+            user: if is_demo {
+                demo::user()
+            } else {
+                User::default()
+            },
+            details,
+            scroll: BoundaryScroll {
+                selected,
+                offset: selected.saturating_sub(2),
+            },
+            section_cursor,
+            content_offset: 0,
+            traces: HashMap::new(),
+            expanded: HashSet::new(),
+            dialog: None,
+            status: if is_demo {
+                "Demo workspace · no requests or remote writes".into()
+            } else {
+                "Connecting to GitLab…".into()
+            },
+            error: None,
+            list_pending: HashSet::new(),
+            detail_pending: None,
+            trace_pending: HashSet::new(),
+            mutation_pending: false,
+            user_pending: false,
+            list_epoch: 0,
+            detail_epoch: 0,
+            next_lists: Duration::ZERO,
+            next_details: Duration::ZERO,
+            next_traces: Duration::ZERO,
+            failures: 0,
+            blocked_until: Duration::ZERO,
+            tick: 0,
+        }
+    }
+
+    fn init(&mut self, ctx: &mut Context<Self>) -> Option<Command> {
+        ctx.link().send(Msg::Tick);
+        ctx.link().send(Msg::Refresh);
+        None
+    }
+
+    fn view(&self, ctx: &Context<Self>) -> Element {
+        view::view(ctx)
+    }
+
+    fn update(&mut self, msg: Msg, ctx: &mut Context<Self>) -> Update {
+        match msg {
+            Msg::Tick => {
+                ctx.state.tick += 1;
+                let now = ctx.elapsed();
+                if now >= ctx.state.blocked_until {
+                    if ctx.state.user.id == 0 && !ctx.state.user_pending {
+                        ctx.link().send(Msg::LoadUser);
+                    }
+                    if ctx.state.scope == Scope::List && now >= ctx.state.next_lists {
+                        self.queue_lists(ctx);
+                    }
+                    if ctx.state.config.route.is_some() && now >= ctx.state.next_details {
+                        ctx.link().send(Msg::LoadDetails);
+                    }
+                    if ctx.state.config.route.is_some() && now >= ctx.state.next_traces {
+                        ctx.link().send(Msg::LoadTraces);
+                    }
+                }
+                return Update::with_command(Command::after(
+                    Duration::from_secs(1),
+                    |link: CommandLink<Msg>| link.send(Msg::Tick),
+                ));
+            }
+            Msg::Refresh => {
+                if ctx.elapsed() < ctx.state.blocked_until {
+                    ctx.state.status =
+                        "GitLab backoff is active; refresh will resume automatically".into();
+                } else {
+                    ctx.state.error = None;
+                    self.queue_lists(ctx);
+                    ctx.link().send(Msg::LoadDetails);
+                    ctx.link().send(Msg::LoadTraces);
+                }
+            }
+            Msg::LoadProject(id, epoch) => {
+                if epoch != ctx.state.list_epoch {
+                    return Update::none();
+                }
+                if ctx.elapsed() < ctx.state.blocked_until {
+                    ctx.state.list_pending.remove(&id);
+                    return Update::none();
+                }
+                let Some(project) = ctx.state.project(id).filter(|p| p.visible).cloned() else {
+                    ctx.state.list_pending.remove(&id);
+                    return Update::none();
+                };
+                let Some(api) = self.api.clone() else {
+                    return Update::none();
+                };
+                return Update::with_command(ctx.link().command(move |link| {
+                    link.send(Msg::ProjectLoaded(
+                        id,
+                        epoch,
+                        api.list_project(&project).map_err(|e| e.to_string()),
+                    ));
+                }));
+            }
+            Msg::LoadUser => {
+                if ctx.state.user_pending || ctx.elapsed() < ctx.state.blocked_until {
+                    return Update::none();
+                }
+                let Some(api) = self.api.clone() else {
+                    return Update::none();
+                };
+                ctx.state.user_pending = true;
+                return Update::with_command(ctx.link().command(move |link| {
+                    link.send(Msg::UserLoaded(
+                        api.current_user().map_err(|e| e.to_string()),
+                    ));
+                }));
+            }
+            Msg::UserLoaded(result) => {
+                ctx.state.user_pending = false;
+                match result {
+                    Ok(user) => ctx.state.user = user,
+                    Err(error) => self.network_error(ctx, error),
+                }
+            }
+            Msg::ProjectLoaded(id, epoch, result) => {
+                if epoch != ctx.state.list_epoch {
+                    return Update::none();
+                }
+                ctx.state.list_pending.remove(&id);
+                if !ctx.state.project(id).is_some_and(|p| p.visible) {
+                    return Update::none();
+                }
+                let selected = ctx
+                    .state
+                    .visible_items()
+                    .get(ctx.state.scroll.selected)
+                    .map(|i| i.key.clone());
+                match result {
+                    Ok(items) => {
+                        ctx.state.items.retain(|i| i.key.project != id);
+                        ctx.state.items.extend(items);
+                        if let Some(key) = selected
+                            && let Some(index) =
+                                ctx.state.visible_items().iter().position(|i| i.key == key)
+                        {
+                            ctx.state.scroll.selected = index;
+                        }
+                        self.normalize(ctx);
+                        self.persist(ctx);
+                        if ctx.state.list_pending.is_empty() {
+                            ctx.state.status = "Visible projects are up to date".into();
+                        }
+                    }
+                    Err(error) => self.network_error(ctx, error),
+                }
+            }
+            Msg::LoadDetails => {
+                let Some(key) = ctx.state.config.route.clone() else {
+                    return Update::none();
+                };
+                if ctx
+                    .state
+                    .detail_pending
+                    .as_ref()
+                    .is_some_and(|(k, e)| k == &key && *e == ctx.state.detail_epoch)
+                    || ctx.elapsed() < ctx.state.blocked_until
+                {
+                    return Update::none();
+                }
+                ctx.state.next_details =
+                    ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs);
+                let Some(api) = self.api.clone() else {
+                    if ctx.state.details.is_none() {
+                        ctx.state.details = Some(demo::details(&key));
+                    }
+                    ctx.link().send(Msg::LoadTraces);
+                    return Update::full();
+                };
+                let epoch = ctx.state.detail_epoch;
+                ctx.state.detail_pending = Some((key.clone(), epoch));
+                return Update::with_command(ctx.link().command_keyed(
+                    "detail",
+                    TaskPolicy::LatestOnly,
+                    move |link| {
+                        let result = api.details(&key).map(Box::new).map_err(|e| e.to_string());
+                        link.send_if_not_cancelled(Msg::DetailsLoaded(key, epoch, result));
+                    },
+                ));
+            }
+            Msg::DetailsLoaded(key, epoch, result) => {
+                if ctx.state.config.route.as_ref() != Some(&key) || epoch != ctx.state.detail_epoch
+                {
+                    return Update::none();
+                }
+                ctx.state.detail_pending = None;
+                match result {
+                    Ok(details) => {
+                        // Preserve the selected job/discussion identity as GitLab reorders collections.
+                        let job_id = ctx
+                            .state
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.jobs.get(ctx.state.config.field))
+                            .map(|j| j.id);
+                        let discussion_id = ctx
+                            .state
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.discussions.get(ctx.state.config.field))
+                            .map(|d| d.id.clone());
+                        if let Some(item) = ctx.state.items.iter_mut().find(|i| i.key == key) {
+                            *item = details.item.clone();
+                        }
+                        let warnings = details.warnings.clone();
+                        ctx.state.details = Some(*details);
+                        if ctx.state.section_name() == "Jobs" {
+                            if let Some(index) = ctx
+                                .state
+                                .details
+                                .as_ref()
+                                .and_then(|d| d.jobs.iter().position(|j| Some(j.id) == job_id))
+                            {
+                                ctx.state.config.field = index;
+                            }
+                        } else if ctx.state.section_name() == "Discussions"
+                            && let Some(index) = ctx.state.details.as_ref().and_then(|d| {
+                                d.discussions
+                                    .iter()
+                                    .position(|d| Some(&d.id) == discussion_id.as_ref())
+                            })
+                        {
+                            ctx.state.config.field = index;
+                        }
+                        for warning in warnings {
+                            // Missing optional features must not stall otherwise healthy live logs.
+                            if warning.contains("Retry-After:")
+                                || warning.contains("HTTP 429")
+                                || warning.contains("HTTP 503")
+                            {
+                                self.network_error(ctx, warning);
+                            }
+                        }
+                        ctx.state.status = "Detail updated".into();
+                        ctx.link().send(Msg::LoadTraces);
+                    }
+                    Err(error) => self.network_error(ctx, error),
+                }
+            }
+            Msg::LoadTraces => return self.load_traces(ctx),
+            Msg::TraceLoaded(key, epoch, id, finished, result) => {
+                ctx.state.trace_pending.remove(&(epoch, id));
+                if ctx.state.config.route.as_ref() != Some(&key) || ctx.state.detail_epoch != epoch
+                {
+                    return Update::none();
+                }
+                match result {
+                    Ok(chunk) => {
+                        let trace = ctx.state.traces.entry(id).or_default();
+                        if chunk.reset {
+                            trace.text.clear();
+                        }
+                        trace.text.push_str(&chunk.text);
+                        // Bounded tail storage, preserving UTF-8 boundaries.
+                        if trace.text.len() > 128 * 1024 {
+                            let mut cut = trace.text.len() - 128 * 1024;
+                            while !trace.text.is_char_boundary(cut) {
+                                cut += 1;
+                            }
+                            trace.text.drain(..cut);
+                        }
+                        let no_progress = chunk.next_offset == trace.offset;
+                        trace.offset = chunk.next_offset;
+                        // Read completed jobs to EOF rather than treating the first bounded chunk as complete.
+                        trace.finished = finished && no_progress;
+                        trace.error = None;
+                    }
+                    Err(error) => {
+                        ctx.state.traces.entry(id).or_default().error = Some(error.clone());
+                        self.network_error(ctx, error);
+                    }
+                }
+            }
+            Msg::ProjectResolved(result) => {
+                ctx.state.mutation_pending = false;
+                match result {
+                    Ok(mut project) => {
+                        if ctx.state.config.projects.iter().any(|p| p.id == project.id) {
+                            self.dialog_error(ctx, "This project is already in the workspace");
+                        } else {
+                            project.alias = ctx
+                                .state
+                                .dialog
+                                .as_ref()
+                                .and_then(|d| d.fields.get(1))
+                                .map_or("", FormField::value)
+                                .trim()
+                                .to_owned();
+                            ctx.state.config.projects.push(project);
+                            self.close_dialog(ctx);
+                            self.persist(ctx);
+                            ctx.link().send(Msg::Refresh);
+                        }
+                    }
+                    Err(error) => self.dialog_error(ctx, &error),
+                }
+            }
+            Msg::MutationDone(result) => {
+                ctx.state.mutation_pending = false;
+                match result {
+                    Ok(()) => {
+                        self.close_dialog(ctx);
+                        ctx.state.status = "Change saved to GitLab".into();
+                        // A list GET begun before the write must not roll its result back in the UI.
+                        ctx.state.list_epoch += 1;
+                        ctx.state.list_pending.clear();
+                        ctx.state.detail_epoch += 1;
+                        ctx.state.detail_pending = None;
+                        ctx.link().send(Msg::Refresh);
+                    }
+                    Err(error) => {
+                        self.dialog_error(ctx, &error);
+                        self.network_error(ctx, error);
+                    }
+                }
+            }
+            Msg::Tab(index) => {
+                if index >= ctx.state.tab_names().len() || ctx.state.dialog.is_some() {
+                    return Update::none();
+                }
+                self.switch_tab(ctx, index);
+                self.persist(ctx);
+            }
+            Msg::Move(delta) => {
+                if ctx.state.dialog.is_some() {
+                    self.move_dialog(ctx, delta);
+                } else {
+                    self.move_selection(ctx, delta);
+                    self.persist(ctx);
+                }
+            }
+            Msg::Select(index) => {
+                self.select(ctx, index);
+                self.persist(ctx);
+            }
+            Msg::Activate(index) => {
+                self.select(ctx, index);
+
+                return self.update(Msg::Enter, ctx);
+            }
+            Msg::Enter => {
+                if ctx.state.dialog.is_some() {
+                    return self.submit(ctx);
+                }
+                match ctx.state.scope {
+                    Scope::List => {
+                        if ctx.state.config.active_tab == 1 {
+                            if let Some(project) = ctx
+                                .state
+                                .config
+                                .projects
+                                .get(ctx.state.scroll.selected)
+                                .cloned()
+                            {
+                                self.switch_tab(ctx, 2);
+                                ctx.state.config.filters.insert(
+                                    "2".into(),
+                                    format!("project:\"{}\"", project.path.replace('"', "")),
+                                );
+                                ctx.state.scroll = BoundaryScroll::default();
+                            }
+                        } else {
+                            let key = ctx
+                                .state
+                                .visible_items()
+                                .get(ctx.state.scroll.selected)
+                                .map(|i| i.key.clone());
+                            if let Some(key) = key {
+                                self.open_item(ctx, key);
+                            }
+                        }
+                    }
+                    Scope::Details => {
+                        ctx.state.scope = Scope::Section;
+                        ctx.state.config.section = Some(ctx.state.section_cursor);
+                        ctx.state.config.field = 0;
+                        ctx.state.content_offset = 0;
+                    }
+                    Scope::Section => match ctx.state.section_name() {
+                        "Fields" => self.edit_field(ctx),
+                        "Description" => {
+                            if let Some(d) = &ctx.state.details {
+                                let key = d.item.key.clone();
+                                let description = d.item.description.clone();
+                                self.show_dialog(
+                                    ctx,
+                                    DialogKind::Edit(key, "description".into()),
+                                    "Edit description",
+                                    "Enter saves · Ctrl+J inserts a newline · Esc cancels",
+                                    vec![FormField::new("Description", &description, true)],
+                                );
+                            }
+                        }
+                        "Jobs" => {
+                            if let Some(job) = ctx
+                                .state
+                                .details
+                                .as_ref()
+                                .and_then(|d| d.jobs.get(ctx.state.config.field))
+                            {
+                                return self.update(Msg::ToggleJob(job.id), ctx);
+                            }
+                        }
+                        "Discussions" => return self.action(ctx, Action::Reply),
+                        "Activity" => return self.action(ctx, Action::Comment),
+                        _ => {}
+                    },
+                }
+                self.persist(ctx);
+            }
+            Msg::Back => {
+                if ctx.state.dialog.is_some() {
+                    self.close_dialog(ctx);
+                } else {
+                    match ctx.state.scope {
+                        Scope::Section => {
+                            ctx.state.scope = Scope::Details;
+                            ctx.state.config.section = None;
+                            ctx.state.content_offset = 0;
+                        }
+                        Scope::Details => {
+                            ctx.state.scope = Scope::List;
+                            ctx.state.config.route = None;
+                            ctx.state.config.section = None;
+                            ctx.state.details = None;
+                            ctx.state.detail_epoch += 1;
+                            ctx.state.detail_pending = None;
+                            ctx.state.traces.clear();
+                            ctx.state.expanded.clear();
+                            ctx.state.content_offset = 0;
+                        }
+                        Scope::List => return Update::none(),
+                    }
+                    self.persist(ctx);
+                }
+            }
+            Msg::Section(index) => {
+                if index < ctx.state.sections().len() {
+                    ctx.state.section_cursor = index;
+                    ctx.state.scope = Scope::Section;
+                    ctx.state.config.section = Some(index);
+                    ctx.state.config.field = 0;
+                    ctx.state.content_offset = 0;
+                    self.persist(ctx);
+                }
+            }
+            Msg::Field(index) => {
+                ctx.state.config.field = index;
+                self.persist(ctx);
+                self.edit_field(ctx);
+            }
+            Msg::ContentScroll(offset) => {
+                ctx.state.content_offset = offset;
+                return Update::none();
+            }
+            Msg::ToggleProject => {
+                if ctx.state.config.active_tab == 1
+                    && let Some(project) =
+                        ctx.state.config.projects.get_mut(ctx.state.scroll.selected)
+                {
+                    project.visible = !project.visible;
+                    ctx.state.status = format!(
+                        "{} {}",
+                        project.name(),
+                        if project.visible {
+                            "included"
+                        } else {
+                            "hidden"
+                        }
+                    );
+                    self.persist(ctx);
+                    ctx.link().send(Msg::Refresh);
+                }
+            }
+            Msg::ToggleJob(id) => {
+                if !ctx.state.expanded.remove(&id) {
+                    ctx.state.expanded.insert(id);
+                }
+                ctx.link().send(Msg::LoadTraces);
+            }
+            Msg::Action(action) => return self.action(ctx, action),
+            Msg::Palette => self.show_dialog(
+                ctx,
+                DialogKind::Commands,
+                "Command palette",
+                "Type to filter · ↑/↓ or Tab to choose · Enter to run",
+                vec![FormField::new("Command", "", false)],
+            ),
+            Msg::CloseDialog => self.close_dialog(ctx),
+            Msg::Submit => return self.submit(ctx),
+            Msg::DialogSelect(index) => {
+                if let Some(d) = &mut ctx.state.dialog {
+                    d.selected = index;
+                }
+            }
+            Msg::DialogField(index) => {
+                if let Some(d) = &mut ctx.state.dialog
+                    && index < d.fields.len()
+                {
+                    d.selected = index;
+                    ctx.request_focus(format!("dialog-field-{index}"));
+                }
+            }
+            Msg::Input(index, event) => {
+                if let Some(d) = &mut ctx.state.dialog {
+                    if let Some(f) = d.fields.get_mut(index) {
+                        let previous = f.input.text().to_owned();
+                        event.apply_to(&mut f.input);
+                        if matches!(d.kind, DialogKind::Commands) && previous != f.input.text() {
+                            d.selected = 0;
+                        }
+                    }
+                    d.error = None;
+                }
+            }
+            Msg::Editor(index, event) => {
+                if let Some(d) = &mut ctx.state.dialog {
+                    if let Some(f) = d.fields.get_mut(index) {
+                        event.apply_to(&mut f.editor);
+                    }
+                    d.error = None;
+                }
+            }
+            Msg::Newline(index) => {
+                if let Some(f) = ctx
+                    .state
+                    .dialog
+                    .as_mut()
+                    .and_then(|d| d.fields.get_mut(index))
+                {
+                    f.editor.insert_char('\n');
+                }
+            }
+        }
+        Update::full()
+    }
+
+    fn on_key(&mut self, key: KeyEvent, ctx: &mut Context<Self>) -> KeyUpdate {
+        if key.is_with(KeyCode::Char('c'), KeyMods::CTRL) {
+            return KeyUpdate::handled(self.action(ctx, Action::Quit));
+        }
+        if ctx.state.dialog.is_some() {
+            let msg = match key.code {
+                KeyCode::Esc => Some(Msg::CloseDialog),
+                KeyCode::Enter => Some(Msg::Submit),
+                KeyCode::Down | KeyCode::Tab if !key.mods.shift => Some(Msg::Move(1)),
+                KeyCode::Up | KeyCode::BackTab | KeyCode::Tab => Some(Msg::Move(-1)),
+                _ => None,
+            };
+            return match msg {
+                Some(msg) => KeyUpdate::handled(self.update(msg, ctx)),
+                None => KeyUpdate::unhandled(Update::none()),
+            };
+        }
+        let ctrl = key.mods.ctrl;
+        let msg = if key.is_with(KeyCode::Char('p'), KeyMods::CTRL) || key.is(KeyCode::Char(':')) {
+            Some(Msg::Palette)
+        } else if ctrl && key.code == KeyCode::Char('r') {
+            Some(Msg::Refresh)
+        } else if key.mods.alt || ctrl || key.mods.super_key {
+            None
+        } else if let Some(index) = tab_shortcut(key) {
+            Some(Msg::Tab(index))
+        } else {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => Some(Msg::Move(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(Msg::Move(-1)),
+                KeyCode::Tab => Some(Msg::Move(if key.mods.shift { -1 } else { 1 })),
+                KeyCode::BackTab => Some(Msg::Move(-1)),
+
+                KeyCode::Enter => Some(Msg::Enter),
+                KeyCode::Esc => Some(Msg::Back),
+                KeyCode::PageDown => Some(Msg::Move(list_height(ctx.viewport().h) as isize)),
+                KeyCode::PageUp => Some(Msg::Move(-(list_height(ctx.viewport().h) as isize))),
+                KeyCode::Home => Some(Msg::Move(isize::MIN)),
+                KeyCode::End => Some(Msg::Move(isize::MAX)),
+                KeyCode::Char(' ') => Some(Msg::ToggleProject),
+                KeyCode::Char('/') => Some(Msg::Action(Action::Filter)),
+                KeyCode::Char('s') => Some(Msg::Action(Action::SaveView)),
+                KeyCode::Char('n') => Some(Msg::Action(
+                    if ctx.state.kind() == Some(ItemKind::MergeRequest) {
+                        Action::NewMergeRequest
+                    } else {
+                        Action::NewIssue
+                    },
+                )),
+                KeyCode::Char('c') => Some(Msg::Action(Action::Comment)),
+                KeyCode::Char('r') => Some(Msg::Action(
+                    if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Jobs" {
+                        Action::RetryJob
+                    } else {
+                        Action::Refresh
+                    },
+                )),
+                KeyCode::Char('R') => Some(Msg::Action(Action::Reply)),
+                KeyCode::Char('x') => Some(Msg::Action(Action::Resolve)),
+                KeyCode::Char('?') => Some(Msg::Action(Action::Help)),
+                KeyCode::Char('q') => Some(Msg::Action(Action::Quit)),
+
+                _ => None,
+            }
+        };
+        match msg {
+            Some(msg) => KeyUpdate::handled(self.update(msg, ctx)),
+            None => KeyUpdate::unhandled(Update::none()),
+        }
+    }
+}
+
+impl Cronk {
+    fn persist(&self, ctx: &mut Context<Self>) -> bool {
+        let key = ctx.state.tab_key();
+        ctx.state
+            .config
+            .selections
+            .insert(key, ctx.state.scroll.selected);
+        if let Some(path) = &self.path
+            && let Err(error) = ctx.state.config.save(path)
+        {
+            ctx.state.error = Some(format!("Workspace not saved: {error:#}"));
+            return false;
+        }
+        true
+    }
+
+    fn normalize(&self, ctx: &mut Context<Self>) {
+        let len = if ctx.state.config.active_tab == 1 {
+            ctx.state.config.projects.len()
+        } else {
+            ctx.state.visible_items().len()
+        };
+        let height = list_height(ctx.viewport().h);
+        ctx.state.scroll.normalize(len, height);
+    }
+
+    fn queue_lists(&self, ctx: &mut Context<Self>) {
+        if !ctx.state.list_pending.is_empty() {
+            return;
+        }
+        ctx.state.next_lists =
+            ctx.elapsed() + Duration::from_secs(ctx.state.config.list_refresh_secs);
+        if self.api.is_none() {
+            return;
+        }
+        ctx.state.list_epoch += 1;
+        let epoch = ctx.state.list_epoch;
+        let ids: Vec<_> = ctx
+            .state
+            .config
+            .projects
+            .iter()
+            .filter(|p| p.visible)
+            .map(|p| p.id)
+            .collect();
+        ctx.state.list_pending.extend(&ids);
+        ctx.state.status = if ids.is_empty() {
+            "Add projects with the command palette (Ctrl+P)".into()
+        } else {
+            "Refreshing visible projects…".into()
+        };
+        for id in ids {
+            ctx.link().send(Msg::LoadProject(id, epoch));
+        }
+    }
+
+    fn network_error(&self, ctx: &mut Context<Self>, error: String) {
+        ctx.state.failures = (ctx.state.failures + 1).min(6);
+        let seconds = 5 * (1u64 << ctx.state.failures);
+        let retry_after = retry_after(&error, std::time::SystemTime::now());
+        ctx.state.blocked_until = ctx.state.blocked_until.max(
+            ctx.elapsed()
+                .saturating_add(Duration::from_secs(seconds.max(retry_after))),
+        );
+        ctx.state.error = Some(error);
+    }
+
+    fn load_traces(&self, ctx: &mut Context<Self>) -> Update {
+        ctx.state.next_traces = ctx.elapsed() + Duration::from_secs(2);
+        let Some(details) = &ctx.state.details else {
+            return Update::none();
+        };
+        if ctx.elapsed() < ctx.state.blocked_until {
+            return Update::none();
+        }
+        let key = details.item.key.clone();
+        let project = details.jobs_project.unwrap_or(key.project);
+        let epoch = ctx.state.detail_epoch;
+        let requests: Vec<_> = details
+            .jobs
+            .iter()
+            .filter(|job| {
+                (job.running()
+                    || ctx.state.expanded.contains(&job.id)
+                    || ctx.state.traces.contains_key(&job.id))
+                    && !ctx.state.trace_pending.iter().any(|(_, id)| *id == job.id)
+                    && !ctx
+                        .state
+                        .traces
+                        .get(&job.id)
+                        .is_some_and(|t| t.finished && !job.running())
+            })
+            .map(|j| {
+                (
+                    j.id,
+                    ctx.state.traces.get(&j.id).map_or(0, |t| t.offset),
+                    !j.running(),
+                )
+            })
+            .collect();
+        if requests.is_empty() {
+            return Update::none();
+        }
+        if let Some(api) = self.api.clone() {
+            ctx.state
+                .trace_pending
+                .extend(requests.iter().map(|(id, _, _)| (epoch, *id)));
+            // Each job is independently delivered. A slow trace does not suppress already returned panels.
+            let command = ctx.link().command(move |link| {
+                // Bound connections and worker threads even for very wide enterprise pipelines.
+                for batch in requests.chunks(4) {
+                    std::thread::scope(|scope| {
+                        for &(id, offset, finished) in batch {
+                            let api = api.clone();
+                            let link = link.clone();
+                            let key = key.clone();
+                            scope.spawn(move || {
+                                link.send(Msg::TraceLoaded(
+                                    key,
+                                    epoch,
+                                    id,
+                                    finished,
+                                    api.trace(project, id, offset).map_err(|e| e.to_string()),
+                                ));
+                            });
+                        }
+                    });
+                }
+            });
+            Update::with_command(command)
+        } else {
+            for (id, _, finished) in requests {
+                let trace = ctx.state.traces.entry(id).or_default();
+                trace.text = demo::trace(id, ctx.state.tick);
+                trace.finished = finished;
+            }
+            Update::full()
+        }
+    }
+
+    fn switch_tab(&self, ctx: &mut Context<Self>, index: usize) {
+        let key = ctx.state.tab_key();
+        ctx.state
+            .config
+            .selections
+            .insert(key, ctx.state.scroll.selected);
+        ctx.state.config.active_tab = index;
+        ctx.state.config.route = None;
+        ctx.state.config.section = None;
+        ctx.state.scope = Scope::List;
+        ctx.state.detail_epoch += 1;
+        ctx.state.detail_pending = None;
+        ctx.state.details = None;
+        ctx.state.traces.clear();
+        ctx.state.expanded.clear();
+        ctx.state.content_offset = 0;
+        ctx.state.section_cursor = 0;
+        let selected = ctx
+            .state
+            .config
+            .selections
+            .get(&ctx.state.tab_key())
+            .copied()
+            .unwrap_or(0);
+        ctx.state.scroll = BoundaryScroll {
+            selected,
+            offset: selected.saturating_sub(2),
+        };
+        self.normalize(ctx);
+    }
+
+    fn open_item(&self, ctx: &mut Context<Self>, key: ItemKey) {
+        ctx.state.config.route = Some(key.clone());
+        ctx.state.config.section = None;
+        ctx.state.scope = Scope::Details;
+        ctx.state.section_cursor = 0;
+        ctx.state.config.field = 0;
+        ctx.state.content_offset = 0;
+        ctx.state.detail_epoch += 1;
+        ctx.state.detail_pending = None;
+        ctx.state.traces.clear();
+        ctx.state.expanded.clear();
+        ctx.state.details = if self.api.is_none() {
+            Some(demo::details(&key))
+        } else {
+            None
+        };
+        ctx.link().send(Msg::LoadDetails);
+    }
+
+    fn move_selection(&self, ctx: &mut Context<Self>, delta: isize) {
+        match ctx.state.scope {
+            Scope::List => {
+                let len = if ctx.state.config.active_tab == 1 {
+                    ctx.state.config.projects.len()
+                } else {
+                    ctx.state.visible_items().len()
+                };
+                let height = list_height(ctx.viewport().h);
+                ctx.state.scroll.move_by(delta, len, height);
+            }
+            Scope::Details => {
+                ctx.state.section_cursor = ctx
+                    .state
+                    .section_cursor
+                    .saturating_add_signed(delta)
+                    .min(ctx.state.sections().len() - 1);
+            }
+            Scope::Section => {
+                let len = match ctx.state.section_name() {
+                    "Fields" => ctx.state.fields().len(),
+                    "Jobs" => ctx.state.details.as_ref().map_or(0, |d| d.jobs.len()),
+                    "Discussions" => ctx
+                        .state
+                        .details
+                        .as_ref()
+                        .map_or(0, |d| d.discussions.len()),
+                    _ => {
+                        ctx.state.content_offset =
+                            ctx.state.content_offset.saturating_add_signed(delta);
+                        return;
+                    }
+                };
+                ctx.state.config.field = ctx
+                    .state
+                    .config
+                    .field
+                    .saturating_add_signed(delta)
+                    .min(len.saturating_sub(1));
+            }
+        }
+    }
+
+    fn select(&self, ctx: &mut Context<Self>, index: usize) {
+        match ctx.state.scope {
+            Scope::List => {
+                let len = if ctx.state.config.active_tab == 1 {
+                    ctx.state.config.projects.len()
+                } else {
+                    ctx.state.visible_items().len()
+                };
+                let height = list_height(ctx.viewport().h);
+                ctx.state.scroll.select(index, len, height);
+            }
+            Scope::Details => ctx.state.section_cursor = index.min(ctx.state.sections().len() - 1),
+            Scope::Section => {
+                ctx.state.config.field = index;
+                ctx.state.content_offset = 0;
+            }
+        }
+    }
+
+    fn show_dialog(
+        &self,
+        ctx: &mut Context<Self>,
+        kind: DialogKind,
+        title: &str,
+        help: &str,
+        fields: Vec<FormField>,
+    ) {
+        ctx.state.dialog = Some(Dialog {
+            kind,
+            title: title.into(),
+            help: help.into(),
+            fields,
+            selected: 0,
+            error: None,
+        });
+        ctx.request_focus("dialog-field-0");
+    }
+    fn close_dialog(&self, ctx: &mut Context<Self>) {
+        if ctx.state.mutation_pending {
+            ctx.state.status =
+                "Waiting for GitLab to confirm the request; the draft is retained".into();
+            return;
+        }
+        ctx.state.dialog = None;
+        ctx.blur();
+    }
+    fn dialog_error(&self, ctx: &mut Context<Self>, error: &str) {
+        if let Some(d) = &mut ctx.state.dialog {
+            d.error = Some(error.into());
+        } else {
+            ctx.state.error = Some(error.into());
+        }
+    }
+    fn move_dialog(&self, ctx: &mut Context<Self>, delta: isize) {
+        let count = if ctx
+            .state
+            .dialog
+            .as_ref()
+            .is_some_and(|d| matches!(d.kind, DialogKind::Commands))
+        {
+            ctx.state.command_options().len()
+        } else if ctx
+            .state
+            .dialog
+            .as_ref()
+            .is_some_and(|d| matches!(d.kind, DialogKind::Themes))
+        {
+            3
+        } else {
+            ctx.state.dialog.as_ref().map_or(0, |d| d.fields.len())
+        };
+        if let Some(d) = &mut ctx.state.dialog {
+            d.selected = d
+                .selected
+                .saturating_add_signed(delta)
+                .min(count.saturating_sub(1));
+            if !matches!(d.kind, DialogKind::Commands | DialogKind::Themes) && count > 0 {
+                let focus_key = format!("dialog-field-{}", d.selected);
+                ctx.request_focus(focus_key);
+            }
+        }
+    }
+
+    fn edit_field(&self, ctx: &mut Context<Self>) {
+        let Some(key) = ctx.state.config.route.clone() else {
+            return;
+        };
+        let fields = ctx.state.fields();
+        let Some((label, name, value)) = fields.get(ctx.state.config.field) else {
+            return;
+        };
+        let help = match *name {
+            "state_event" => "Enter close or reopen. Enter commits · Esc cancels",
+            "milestone_id" | "iteration_id" => {
+                "GitLab numeric ID (current name shown in details). Empty clears. Enter commits · Esc cancels"
+            }
+            "assignee_ids" | "reviewer_ids" => {
+                "Comma-separated GitLab user IDs; empty clears. Enter commits · Esc cancels"
+            }
+            _ => "Enter commits · Esc cancels",
+        };
+        let initial = if *name == "state_event" {
+            if value == "opened" { "close" } else { "reopen" }
+        } else {
+            value
+        };
+        self.show_dialog(
+            ctx,
+            DialogKind::Edit(key, (*name).into()),
+            &format!("Edit {label}"),
+            help,
+            vec![FormField::new(label, initial, false)],
+        );
+    }
+
+    fn action(&mut self, ctx: &mut Context<Self>, action: Action) -> Update {
+        if ctx.state.mutation_pending {
+            return Update::none();
+        }
+        match action {
+            Action::Refresh => { self.close_dialog(ctx); return self.update(Msg::Refresh, ctx); }
+            Action::Quit => { if self.persist(ctx) { ctx.quit(); } }
+            Action::Help => self.show_dialog(ctx, DialogKind::Help, "Keyboard guide", "Esc returns to your workspace", vec![]),
+            Action::Themes => self.show_dialog(ctx, DialogKind::Themes, "Choose theme", "↑/↓ or Tab selects · Enter applies · config colors remain overrides", vec![]),
+            Action::Filter => {
+                if ctx.state.scope != Scope::List || ctx.state.config.active_tab == 1 {
+                    self.dialog_error(ctx, "Choose Dashboard, Issues, Merge Requests, or a saved list first");
+                } else {
+                    let query = ctx.state.query_text().to_owned();
+                    self.show_dialog(ctx, DialogKind::Filter, "Filter view", "AND terms: label:\"team::core\" state:opened assignee:@me · -label:blocked", vec![FormField::new("Query", &query, false)]);
+                }
+            }
+            Action::SaveView => {
+                if ctx.state.kind().is_none() { self.dialog_error(ctx, "Save views from Issues or Merge Requests"); }
+                else { self.show_dialog(ctx, DialogKind::SaveView, "Save as a tab", "The current filter becomes a persistent view", vec![FormField::new("Tab name", "", false)]); }
+            }
+            Action::RenameView | Action::DeleteView => {
+                if let Some(index) = ctx.state.config.active_tab.checked_sub(4) {
+                    if let Some(view) = ctx.state.config.views.get(index) {
+                        let name = view.name.clone();
+                        if matches!(action, Action::RenameView) {
+                            self.show_dialog(ctx, DialogKind::RenameView, "Rename saved tab", "Enter saves · Esc cancels", vec![FormField::new("Tab name", &name, false)]);
+                        } else { self.show_dialog(ctx, DialogKind::Confirm(Confirmation::DeleteView(index)), "Remove saved tab?", "Only the local view is removed, not GitLab data", vec![]); }
+                    }
+                } else { self.dialog_error(ctx, "The four built-in tabs cannot be renamed or removed"); }
+            }
+            Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Use its full group/subgroup/project path or numeric ID; this does not create a GitLab project", vec![FormField::new("Project path or ID", "", false), FormField::new("Short alias (optional)", "", false)]),
+            Action::AliasProject | Action::RemoveProject => {
+                if ctx.state.config.active_tab != 1 { self.dialog_error(ctx, "Select a project in the Projects tab first"); }
+                else if let Some(project) = ctx.state.config.projects.get(ctx.state.scroll.selected) {
+                    let id = project.id;
+                    let name = project.name().to_owned();
+                    if matches!(action, Action::AliasProject) { self.show_dialog(ctx, DialogKind::AliasProject(id), "Project alias", "Short local name; GitLab path is unchanged", vec![FormField::new("Alias", &name, false)]); }
+                    else { self.show_dialog(ctx, DialogKind::Confirm(Confirmation::RemoveProject(id)), "Remove project from workspace?", &format!("{name} · GitLab project and issues are NOT deleted"), vec![]); }
+                }
+            }
+            Action::NewIssue | Action::NewMergeRequest => {
+                let project = ctx.state.config.route.as_ref().map(|k| k.project)
+                    .or_else(|| if ctx.state.config.active_tab == 1 { ctx.state.config.projects.get(ctx.state.scroll.selected).map(|p| p.id) } else { ctx.state.visible_items().get(ctx.state.scroll.selected).map(|i| i.key.project) })
+                    .or_else(|| ctx.state.config.projects.iter().find(|p| p.visible).map(|p| p.id));
+                let Some(project) = project else { self.dialog_error(ctx, "Add a project first"); return Update::full(); };
+                let project = project.to_string();
+                let mut fields = vec![FormField::new("Project ID (from Projects)", &project, false), FormField::new("Title", "", false)];
+                if matches!(action, Action::NewMergeRequest) {
+                    fields.push(FormField::new("Source branch (must already exist)", "", false));
+                    fields.push(FormField::new("Target branch", "main", false));
+                }
+                fields.push(FormField::new("Description", "", true));
+                self.show_dialog(ctx, if matches!(action, Action::NewIssue) { DialogKind::NewIssue } else { DialogKind::NewMergeRequest }, if matches!(action, Action::NewIssue) { "Create issue" } else { "Create merge request" }, "Tab changes field · Ctrl+J newline · Enter creates on GitLab · Esc cancels", fields);
+            }
+            Action::Comment | Action::Reply | Action::Resolve => {
+                let Some(key) = ctx.state.config.route.clone() else { self.dialog_error(ctx, "Open an issue or merge request first"); return Update::full(); };
+                if matches!(action, Action::Comment) {
+                    self.show_dialog(ctx, DialogKind::Comment(key), "Add comment", "Enter posts to GitLab · Ctrl+J newline · Esc cancels", vec![FormField::new("Comment", "", true)]);
+                } else {
+                    let discussion = if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Discussions" {
+                        ctx.state.details.as_ref().and_then(|d| d.discussions.get(ctx.state.config.field)).cloned()
+                    } else { None };
+                    if let Some(d) = discussion {
+                        if matches!(action, Action::Reply) {
+                            self.show_dialog(ctx, DialogKind::Reply(key, d.id), "Reply to discussion", "Enter posts · Ctrl+J newline · Esc cancels", vec![FormField::new("Reply", "", true)]);
+                        } else if d.notes.iter().any(|n| n.resolvable) {
+                            let resolved = d.notes.iter().any(|n| n.resolvable && !n.resolved);
+                            self.show_dialog(ctx, DialogKind::Confirm(Confirmation::Mutate(Mutation::Resolve { key, discussion: d.id, resolved })), if resolved { "Resolve discussion?" } else { "Reopen discussion?" }, "This updates the discussion for everyone", vec![]);
+                        } else { self.dialog_error(ctx, "This discussion cannot be resolved"); }
+                    } else { self.dialog_error(ctx, "Enter Discussions and select a thread first"); }
+                }
+            }
+            Action::RetryJob => {
+                let job = if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Jobs" {
+                    ctx.state.details.as_ref().and_then(|d| d.jobs.get(ctx.state.config.field)).cloned()
+                } else { None };
+                if let Some(job) = job.filter(Job::retryable) {
+                    let project = ctx.state.details.as_ref().and_then(|d| d.jobs_project)
+                        .unwrap_or_else(|| ctx.state.config.route.as_ref().map_or(0, |k| k.project));
+                    self.show_dialog(ctx, DialogKind::Confirm(Confirmation::Mutate(Mutation::RetryJob { project, job: job.id })), "Retry pipeline job?", &format!("{} · this consumes GitLab runner resources", job.name), vec![]);
+                } else { self.dialog_error(ctx, "Select a finished, retryable job in the Jobs section"); }
+            }
+        }
+        Update::full()
+    }
+
+    fn submit(&mut self, ctx: &mut Context<Self>) -> Update {
+        if ctx.state.mutation_pending {
+            return Update::none();
+        }
+        let Some(dialog) = &ctx.state.dialog else {
+            return Update::none();
+        };
+        let kind = dialog.kind.clone();
+        let values: Vec<String> = dialog.fields.iter().map(|f| f.value().to_owned()).collect();
+        let selected = dialog.selected;
+        let first = values.first().map_or("", String::as_str);
+        let mutation = match kind {
+            DialogKind::Commands => {
+                if let Some((_, action)) = ctx.state.command_options().get(selected).copied() {
+                    self.close_dialog(ctx);
+                    return self.action(ctx, action);
+                }
+                return Update::none();
+            }
+            DialogKind::Themes => {
+                if let Some(theme) = ["midnight", "dracula", "light"].get(selected) {
+                    ctx.state.config.theme = (*theme).into();
+                }
+                self.close_dialog(ctx);
+                self.persist(ctx);
+                return Update::full();
+            }
+            DialogKind::Help => {
+                self.close_dialog(ctx);
+                return Update::full();
+            }
+            DialogKind::Filter => {
+                if let Err(error) = Query::parse(first) {
+                    self.dialog_error(ctx, &error);
+                    return Update::full();
+                }
+                let key = ctx.state.tab_key();
+                ctx.state.config.filters.insert(key, first.into());
+                ctx.state.scroll = BoundaryScroll::default();
+                self.close_dialog(ctx);
+                self.persist(ctx);
+                return Update::full();
+            }
+            DialogKind::SaveView | DialogKind::RenameView => {
+                let name = first.trim();
+                let rename_index = if matches!(kind, DialogKind::RenameView) {
+                    ctx.state.config.active_tab.checked_sub(4)
+                } else {
+                    None
+                };
+                if name.is_empty()
+                    || ctx
+                        .state
+                        .config
+                        .views
+                        .iter()
+                        .enumerate()
+                        .any(|(i, v)| Some(i) != rename_index && v.name == name)
+                {
+                    self.dialog_error(ctx, "Choose a nonempty, unique tab name");
+                    return Update::full();
+                }
+                if let Some(index) = rename_index {
+                    ctx.state.config.views[index].name = name.into();
+                } else if let Some(kind) = ctx.state.kind() {
+                    let query = ctx.state.query_text().to_owned();
+                    ctx.state.config.views.push(SavedView {
+                        name: name.into(),
+                        kind,
+                        query,
+                    });
+                    self.switch_tab(ctx, ctx.state.config.views.len() + 3);
+                }
+                self.close_dialog(ctx);
+                self.persist(ctx);
+                return Update::full();
+            }
+            DialogKind::AddProject => {
+                if first.trim().is_empty() {
+                    self.dialog_error(ctx, "Enter a project path or ID");
+                    return Update::full();
+                }
+                let Some(api) = self.api.clone() else {
+                    self.dialog_error(
+                        ctx,
+                        "Demo mode uses fictional projects; connect GitLab to add a real project",
+                    );
+                    return Update::full();
+                };
+                let path = first.trim().to_owned();
+                ctx.state.mutation_pending = true;
+                return Update::with_command(ctx.link().command(move |link| {
+                    link.send(Msg::ProjectResolved(
+                        api.resolve_project(&path).map_err(|e| e.to_string()),
+                    ))
+                }));
+            }
+            DialogKind::AliasProject(id) => {
+                if let Some(project) = ctx.state.config.projects.iter_mut().find(|p| p.id == id) {
+                    project.alias = first.trim().into();
+                }
+                self.close_dialog(ctx);
+                self.persist(ctx);
+                return Update::full();
+            }
+            DialogKind::Confirm(Confirmation::RemoveProject(id)) => {
+                ctx.state.config.projects.retain(|p| p.id != id);
+                ctx.state.items.retain(|i| i.key.project != id);
+                self.normalize(ctx);
+                self.close_dialog(ctx);
+                self.persist(ctx);
+                return Update::full();
+            }
+            DialogKind::Confirm(Confirmation::DeleteView(index)) => {
+                if index < ctx.state.config.views.len() {
+                    self.switch_tab(ctx, 0);
+                    ctx.state.config.views.remove(index);
+                    let removed = index + 4;
+                    shift_tab_map(&mut ctx.state.config.filters, removed);
+                    shift_tab_map(&mut ctx.state.config.selections, removed);
+                }
+                self.close_dialog(ctx);
+                self.persist(ctx);
+                return Update::full();
+            }
+            DialogKind::Confirm(Confirmation::Mutate(mutation)) => mutation,
+            DialogKind::Edit(key, field) => {
+                if field == "title" && first.trim().is_empty() {
+                    self.dialog_error(ctx, "Title cannot be empty");
+                    return Update::full();
+                }
+                Mutation::Edit {
+                    key,
+                    field,
+                    value: first.to_owned(),
+                }
+            }
+            DialogKind::Comment(ref key) | DialogKind::Reply(ref key, _) => {
+                let key = key.clone();
+                if first.trim().is_empty() {
+                    self.dialog_error(ctx, "Comment cannot be empty");
+                    return Update::full();
+                }
+                if let DialogKind::Reply(_, discussion) = kind {
+                    Mutation::Reply {
+                        key,
+                        discussion,
+                        body: first.into(),
+                    }
+                } else {
+                    Mutation::Comment {
+                        key,
+                        body: first.into(),
+                    }
+                }
+            }
+            DialogKind::NewIssue | DialogKind::NewMergeRequest => {
+                let Some(project) = first
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|id| ctx.state.project(*id).is_some())
+                else {
+                    self.dialog_error(ctx, "Use a project ID from your Projects tab");
+                    return Update::full();
+                };
+                if values[1].trim().is_empty() {
+                    self.dialog_error(ctx, "Title cannot be empty");
+                    return Update::full();
+                }
+                if matches!(kind, DialogKind::NewIssue) {
+                    Mutation::CreateIssue {
+                        project,
+                        title: values[1].clone(),
+                        description: values[2].clone(),
+                    }
+                } else {
+                    if values[2].trim().is_empty() || values[3].trim().is_empty() {
+                        self.dialog_error(ctx, "Source and target branches are required");
+                        return Update::full();
+                    }
+                    Mutation::CreateMergeRequest {
+                        project,
+                        title: values[1].clone(),
+                        source: values[2].clone(),
+                        target: values[3].clone(),
+                        description: values[4].clone(),
+                    }
+                }
+            }
+        };
+        let Some(api) = self.api.clone() else {
+            self.dialog_error(ctx, "Demo is read-only: no request was sent. Local filters, views, visibility, and themes are editable.");
+            return Update::full();
+        };
+        if ctx.elapsed() < ctx.state.blocked_until {
+            self.dialog_error(
+                ctx,
+                "GitLab backoff is active. Your draft is retained; retry later.",
+            );
+            return Update::full();
+        }
+        ctx.state.mutation_pending = true;
+        ctx.state.status = "Saving to GitLab…".into();
+        Update::with_command(ctx.link().command(move |link| {
+            link.send(Msg::MutationDone(
+                api.mutate(mutation).map_err(|e| e.to_string()),
+            ))
+        }))
+    }
+}
+
+fn tab_shortcut(key: KeyEvent) -> Option<usize> {
+    // Traditional terminals send uppercase; enhanced protocols may send Shift+lowercase.
+    match (key.code, key.mods.shift) {
+        (KeyCode::Char('D'), _) | (KeyCode::Char('d'), true) => Some(0),
+        (KeyCode::Char('P'), _) | (KeyCode::Char('p'), true) => Some(1),
+        (KeyCode::Char('I'), _) | (KeyCode::Char('i'), true) => Some(2),
+        (KeyCode::Char('M'), _) | (KeyCode::Char('m'), true) => Some(3),
+        (KeyCode::Char(c @ '1'..='9'), false) => Some(4 + c as usize - '1' as usize),
+        (KeyCode::Char('0'), false) => Some(13),
+        _ => None,
+    }
+}
+
+fn retry_after(error: &str, now: std::time::SystemTime) -> u64 {
+    let Some(value) = error.split("Retry-After: ").nth(1) else {
+        return 0;
+    };
+    let value = value.split(" (retry later").next().unwrap_or(value).trim();
+    value
+        .parse()
+        .ok()
+        .or_else(|| {
+            httpdate::parse_http_date(value)
+                .ok()
+                .map(|date| date.duration_since(now).unwrap_or_default().as_secs())
+        })
+        .unwrap_or(0)
+}
+
+fn shift_tab_map<T>(map: &mut std::collections::BTreeMap<String, T>, removed: usize) {
+    *map = std::mem::take(map)
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let index = key.parse::<usize>().ok()?;
+            if index == removed {
+                None
+            } else {
+                Some((
+                    (if index > removed { index - 1 } else { index }).to_string(),
+                    value,
+                ))
+            }
+        })
+        .collect();
+}

@@ -5,6 +5,7 @@ use std::{
 };
 
 use cronk::{
+    build_info,
     config::{Config, SavedView},
     demo,
     model::{ItemKey, ItemKind, Mutation, TraceChunk},
@@ -406,6 +407,16 @@ fn dialogs_and_palette_type_direct_shortcuts_without_switching_tabs() {
         key(&mut ui, KeyCode::Esc);
         active_list_responds(&mut ui);
     }
+}
+
+#[test]
+fn header_shows_build_revision_on_the_right() {
+    let ui = mount(config(), None);
+    let header = ui.capture_frame().to_lines()[0].clone();
+    assert!(
+        header.contains(&build_info::display_version()),
+        "missing build version in header: {header}"
+    );
 }
 
 #[test]
@@ -1680,10 +1691,15 @@ fn small_project_viewport_snapshot() {
     ui.render();
     let frame = ui.capture_frame();
     assert_eq!((frame.width, frame.height), (48, 14));
+    let lines = frame.to_lines();
+    let tag = build_info::display_version()
+        .split_once('@')
+        .map_or(build_info::display_version(), |(tag, _)| tag.to_owned());
+    assert!(lines[0].contains("@demo-arin  ·  midnight"), "{}", lines[0]);
+    assert!(lines[0].contains(&format!("{tag}@")), "{}", lines[0]);
     assert_eq!(
-        frame.to_lines(),
-        [
-            "  CRONK   DEMO · offli…@demo-arin  ·  midnight",
+        &lines[1..],
+        &[
             "  Dashboard   Projects   Issues   Merge Request",
             "",
             "  Projects",
@@ -1718,10 +1734,15 @@ fn small_empty_filter_viewport_snapshot() {
     ui.render();
     let frame = ui.capture_frame();
     assert_eq!((frame.width, frame.height), (40, 12));
+    let lines = frame.to_lines();
+    let tag = build_info::display_version()
+        .split_once('@')
+        .map_or(build_info::display_version(), |(tag, _)| tag.to_owned());
+    assert!(lines[0].contains("@demo-arin  ·  midnight"), "{}", lines[0]);
+    assert!(lines[0].contains(&format!("{tag}@")), "{}", lines[0]);
     assert_eq!(
-        frame.to_lines(),
-        [
-            "  CRONK   DEMO…@demo-arin  ·  midnight",
+        &lines[1..],
+        &[
             "  Dashboard   Projects   Issues   Merge",
             "",
             "  Issues",

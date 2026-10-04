@@ -1,5 +1,5 @@
 use super::{Cronk, Dialog, DialogKind, Msg, Scope, State, list_height};
-use crate::{config::Config, model::*};
+use crate::{build_info, config::Config, model::*};
 use tui_lipan::{
     prelude::*,
     style::{RowStylePolicy, ThemePalette},
@@ -319,9 +319,18 @@ fn brand(state: &State, colors: Colors) -> Element {
         ))
         .child(
             Text::new(if state.user.username.is_empty() {
-                state.config.theme.clone()
+                format!(
+                    "{}  ·  {}",
+                    state.config.theme,
+                    build_info::display_version()
+                )
             } else {
-                format!("@{}  ·  {}", state.user.username, state.config.theme)
+                format!(
+                    "@{}  ·  {}  ·  {}",
+                    state.user.username,
+                    state.config.theme,
+                    build_info::display_version()
+                )
             })
             .style(Style::new().fg(colors.muted))
             .height(Length::Px(1)),

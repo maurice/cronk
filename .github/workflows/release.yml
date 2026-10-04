@@ -78,6 +78,8 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
 
       - name: Build release binary
+        env:
+          CRONK_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: cross build --locked --release --target ${{ matrix.target }} --bin $BINARY_NAME
 
       - name: Package release archive

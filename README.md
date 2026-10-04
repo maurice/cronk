@@ -51,6 +51,7 @@ Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTT
 | `Esc` | Cancel editor, or go back exactly one scope |
 | `Shift+D` / `Shift+P` / `Shift+I` / `Shift+M` | Open Dashboard / Projects / Issues / Merge Requests |
 | `1`–`9`, `0` | Open saved views 1–9, then the tenth view |
+| `←` / `→` | Switch to the previous / next tab (no wraparound) |
 | `Esc` from a list | No action; the list remains active |
 | `Home` / `End`, `PageUp` / `PageDown` | Move through a list/document |
 | Mouse click / wheel | Open rows, choose tabs/sections, select fields, scroll |
@@ -69,7 +70,7 @@ Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTT
 | `?` | Keyboard guide |
 | `q` / `Ctrl+C` | Quit outside text editors |
 
-Each tab's list is active as soon as you switch to it; there is no separate tab-navigation mode. Arrow keys never switch tabs, including Ctrl+arrows. The built-in tab initials are underlined, saved tabs display their number shortcuts, and the bottom gutter repeats the hints. Tab shortcuts are inactive inside dialogs/editors. More than ten saved views remain accessible by mouse; the tab strip scrolls horizontally when necessary.
+Each tab's list is active as soon as you switch to it; there is no separate tab-navigation mode. Left/Right switch tabs without wrapping; Up/Down navigate the current scope. Modified arrows do not switch tabs. The built-in tab initials are underlined, saved tabs display their number shortcuts, and the bottom gutter repeats the hints. Tab shortcuts are inactive inside dialogs/editors. More than ten saved views remain accessible by Left/Right or mouse; the tab strip scrolls horizontally when necessary.
 
 Lists use a quarter-viewport boundary: the cursor moves to the lower/upper quarter margin, the viewport follows further movement, then the cursor reaches the actual final/first row. No wraparound. Three terminal rows form one list item; the margin rounds down to whole items.
 

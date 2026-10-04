@@ -725,6 +725,13 @@ impl Component for Cronk {
             Some(Msg::Tab(index))
         } else {
             match key.code {
+                KeyCode::Left if key.mods == KeyMods::NONE => {
+                    ctx.state.config.active_tab.checked_sub(1).map(Msg::Tab)
+                }
+                KeyCode::Right if key.mods == KeyMods::NONE => {
+                    let next = ctx.state.config.active_tab + 1;
+                    (next < ctx.state.tab_names().len()).then_some(Msg::Tab(next))
+                }
                 KeyCode::Down | KeyCode::Char('j') => Some(Msg::Move(1)),
                 KeyCode::Up | KeyCode::Char('k') => Some(Msg::Move(-1)),
                 KeyCode::Tab => Some(Msg::Move(if key.mods.shift { -1 } else { 1 })),

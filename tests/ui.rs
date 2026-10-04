@@ -219,7 +219,7 @@ fn lowercase_and_control_alt_super_modified_shortcuts_do_not_switch_tabs() {
 }
 
 #[test]
-fn horizontal_arrows_never_switch_tabs_in_any_scope() {
+fn modified_horizontal_arrows_never_switch_tabs_in_any_scope() {
     let mut ui = mount(numbered_views_config(2), None);
     key(&mut ui, KeyCode::Char('I'));
     key(&mut ui, KeyCode::Tab);
@@ -227,7 +227,7 @@ fn horizontal_arrows_never_switch_tabs_in_any_scope() {
         assert_eq!(ui.state().scope, scope);
         let before = serde_json::to_value(&ui.state().config).unwrap();
         let scroll = ui.state().scroll.clone();
-        for mods in modifier_combinations() {
+        for mods in modifier_combinations().filter(|mods| *mods != KeyMods::NONE) {
             for code in [KeyCode::Left, KeyCode::Right] {
                 modified(&mut ui, code, mods);
                 assert_eq!(ui.state().scope, scope, "{code:?} {mods:?}");
@@ -239,6 +239,46 @@ fn horizontal_arrows_never_switch_tabs_in_any_scope() {
             key(&mut ui, KeyCode::Enter);
         }
     }
+}
+
+#[test]
+fn horizontal_arrows_switch_tabs_from_every_scope_and_reach_unnumbered_views() {
+    for depth in 0..=2 {
+        for (arrow, expected) in [(KeyCode::Left, 1), (KeyCode::Right, 3)] {
+            let mut ui = mount(numbered_views_config(12), None);
+            key(&mut ui, KeyCode::Char('I'));
+            for _ in 0..depth {
+                key(&mut ui, KeyCode::Enter);
+            }
+            key(&mut ui, arrow);
+            assert_eq!(ui.state().config.active_tab, expected);
+            active_list_responds(&mut ui);
+        }
+    }
+    let mut ui = mount(numbered_views_config(12), None);
+    key(&mut ui, KeyCode::Left);
+    assert_eq!(ui.state().config.active_tab, 0);
+    for index in 1..16 {
+        key(&mut ui, KeyCode::Right);
+        assert_eq!(ui.state().config.active_tab, index);
+    }
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Right);
+    assert_eq!(ui.state().config.active_tab, 15);
+    assert_eq!(ui.state().scope, Scope::Details);
+}
+
+#[test]
+fn horizontal_arrows_edit_dialog_text_without_switching_tabs() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('/'));
+    type_text(&mut ui, "abc");
+    key(&mut ui, KeyCode::Left);
+    type_text(&mut ui, "X");
+    key(&mut ui, KeyCode::Right);
+    type_text(&mut ui, "Y");
+    assert_eq!(dialog(&ui).fields[0].value(), "abXcY");
+    assert_eq!(ui.state().config.active_tab, 0);
 }
 
 #[test]

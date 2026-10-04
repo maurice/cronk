@@ -1947,7 +1947,7 @@ const HELP: &str = "\
 ## Navigation
 - **Shift+D / P / I / M** open Dashboard, Projects, Issues, or Merge Requests.
 - **1–9 / 0** open saved views 1–10. Tab shortcuts do not run inside dialogs.
-- Lists are active immediately. Arrow keys never switch tabs.
+- Lists are active immediately. **Left / Right** switch tabs without wrapping, outside dialogs.
 - Overflowing panes show a right-edge scrollbar. Click its track or drag its thumb to scroll.
 - **Enter** opens the selected item, section, field, or job.
 - **Up / Down** move within the current scope. Document sections scroll.

@@ -17,6 +17,11 @@ tempfile = "3"
 toml = "0.8"
 tui-lipan = { version = "=0.18.2", default-features = false, features = ["markdown", "diff-view", "ui-snapshot-png"] }
 
+[dev-dependencies.cargo-husky]
+version = "1"
+default-features = false
+features = ["user-hooks"]
+
 [profile.release]
 lto = "thin"
 strip = true

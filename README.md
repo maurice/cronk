@@ -161,6 +161,8 @@ cargo run --locked -- --demo --snapshot dashboard.png
 cargo run --locked --example gallery
 ```
 
+The pre-commit hook runs the formatting check and Clippy with warnings denied. It is installed by `cargo-husky` the first time you run `cargo test` after fetching dependencies.
+
 `gallery` writes five deterministic PNG/Markdown captures to `.snapshots/` without touching your workspace or opening a terminal. Small-viewport and keyboard/mouse integration tests run through tui-lipan's actual headless runtime.
 
 Module layout:

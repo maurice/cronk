@@ -357,12 +357,14 @@ fn modified_horizontal_arrows_never_switch_tabs_in_any_scope() {
     key(&mut ui, KeyCode::Char('I'));
     key(&mut ui, KeyCode::Tab);
     for scope in [Scope::List, Scope::Details, Scope::Section] {
+        settle_layout(&mut ui);
         assert_eq!(ui.state().scope, scope);
         let before = serde_json::to_value(&ui.state().config).unwrap();
         let scroll = ui.state().scroll.clone();
         for mods in modifier_combinations().filter(|mods| *mods != KeyMods::NONE) {
             for code in [KeyCode::Left, KeyCode::Right] {
                 modified(&mut ui, code, mods);
+                settle_layout(&mut ui);
                 assert_eq!(ui.state().scope, scope, "{code:?} {mods:?}");
                 assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), before);
                 assert_eq!(ui.state().scroll, scroll);
@@ -384,6 +386,7 @@ fn horizontal_arrows_switch_tabs_from_every_scope_and_reach_unnumbered_views() {
                 key(&mut ui, KeyCode::Enter);
             }
             key(&mut ui, KeyCode::Down);
+            settle_layout(&mut ui);
             let navigation = tab_state(ui.state());
             let selected = ui.state().scroll.selected;
             key(&mut ui, arrow);
@@ -397,6 +400,7 @@ fn horizontal_arrows_switch_tabs_from_every_scope_and_reach_unnumbered_views() {
                     KeyCode::Left
                 },
             );
+            settle_layout(&mut ui);
             assert_eq!(ui.state().config.active_tab, 2);
             assert_tab_state(&ui, &navigation, selected);
         }
@@ -410,10 +414,12 @@ fn horizontal_arrows_switch_tabs_from_every_scope_and_reach_unnumbered_views() {
     }
     key(&mut ui, KeyCode::Enter);
     key(&mut ui, KeyCode::Down);
+    settle_layout(&mut ui);
     let navigation = tab_state(ui.state());
     let selected = ui.state().scroll.selected;
     let epoch = ui.state().detail_epoch;
     key(&mut ui, KeyCode::Right);
+    settle_layout(&mut ui);
     assert_eq!(ui.state().config.active_tab, 15);
     assert_tab_state(&ui, &navigation, selected);
     assert_eq!(ui.state().detail_epoch, epoch);
@@ -421,6 +427,7 @@ fn horizontal_arrows_switch_tabs_from_every_scope_and_reach_unnumbered_views() {
     assert_eq!(ui.state().config.active_tab, 14);
     active_list_responds(&mut ui);
     key(&mut ui, KeyCode::Right);
+    settle_layout(&mut ui);
     assert_eq!(ui.state().config.active_tab, 15);
     assert_tab_state(&ui, &navigation, selected);
 }
@@ -480,12 +487,14 @@ fn missing_saved_view_numbers_preserve_the_current_list_detail_and_section() {
         let mut ui = mount(config, None);
         key(&mut ui, KeyCode::Tab);
         for scope in [Scope::List, Scope::Details, Scope::Section] {
+            settle_layout(&mut ui);
             assert_eq!(ui.state().scope, scope);
             let before = serde_json::to_value(&ui.state().config).unwrap();
             let scroll = ui.state().scroll.clone();
             let epoch = ui.state().detail_epoch;
             for ch in "1234567890".chars().skip(count) {
                 key(&mut ui, KeyCode::Char(ch));
+                settle_layout(&mut ui);
                 assert_eq!(ui.state().scope, scope, "key {ch}, {count} saved views");
                 assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), before);
                 assert_eq!(ui.state().scroll, scroll);
@@ -524,6 +533,7 @@ fn keyboard_tab_switches_restore_each_tabs_list_details_and_section() {
                 }
                 key(&mut ui, KeyCode::Down);
             }
+            settle_layout(&mut ui);
             visits.push((tab_state(ui.state()), ui.state().scroll.selected));
         }
         for (index, ch) in "DPIM1234567890"
@@ -534,6 +544,7 @@ fn keyboard_tab_switches_restore_each_tabs_list_details_and_section() {
             .rev()
         {
             key(&mut ui, KeyCode::Char(ch));
+            settle_layout(&mut ui);
             assert_eq!(ui.state().config.active_tab, index);
             let (expected, selected) = &visits[index];
             assert_tab_state(&ui, expected, *selected);
@@ -552,6 +563,7 @@ fn keyboard_tab_switches_restore_each_tabs_list_details_and_section() {
             };
             for (ch, mods) in shortcuts {
                 modified(&mut ui, KeyCode::Char(ch), mods);
+                settle_layout(&mut ui);
                 assert_tab_state(&ui, expected, *selected);
                 assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), before);
                 assert_eq!(
@@ -598,10 +610,12 @@ fn mouse_tab_switches_restore_each_tabs_list_details_and_section() {
                 }
                 key(&mut ui, KeyCode::Down);
             }
+            settle_layout(&mut ui);
             visits.push((tab_state(ui.state()), ui.state().scroll.selected));
         }
         for (index, label) in labels.iter().enumerate().rev() {
             click_text(&mut ui, label, 0);
+            settle_layout(&mut ui);
             assert_eq!(ui.state().config.active_tab, index);
             let (expected, selected) = &visits[index];
             assert_tab_state(&ui, expected, *selected);
@@ -609,6 +623,7 @@ fn mouse_tab_switches_restore_each_tabs_list_details_and_section() {
             let epoch = ui.state().detail_epoch;
             let cached_traces = traces(ui.state());
             click_text(&mut ui, label, 0);
+            settle_layout(&mut ui);
             assert_tab_state(&ui, expected, *selected);
             assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), before);
             assert_eq!(ui.state().detail_epoch, epoch, "same-tab clicks are no-ops");
@@ -1221,6 +1236,7 @@ fn deleting_a_saved_view_reindexes_navigation_and_caches_without_overwriting_its
     let mut ui = mount_with_viewport(config, Some(&path), viewport);
     key(&mut ui, KeyCode::Enter);
     key(&mut ui, KeyCode::Down);
+    settle_layout(&mut ui);
     let dashboard = tab_state(ui.state());
     let dashboard_selected = ui.state().scroll.selected;
 
@@ -1229,6 +1245,7 @@ fn deleting_a_saved_view_reindexes_navigation_and_caches_without_overwriting_its
     open_section(&mut ui, "Fields");
     key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Down);
+    settle_layout(&mut ui);
     let first = tab_state(ui.state());
     let first_selected = ui.state().scroll.selected;
     key(&mut ui, KeyCode::Char('3'));
@@ -1254,6 +1271,7 @@ fn deleting_a_saved_view_reindexes_navigation_and_caches_without_overwriting_its
     open_section(&mut ui, "Fields");
     key(&mut ui, KeyCode::Down);
     assert_ne!(ui.state().config.route, last.route);
+    settle_layout(&mut ui);
     let before = persisted_tab(&ui, &path);
     palette_command(&mut ui, "Delete saved tab");
     assert!(matches!(
@@ -1261,12 +1279,14 @@ fn deleting_a_saved_view_reindexes_navigation_and_caches_without_overwriting_its
         DialogKind::Confirm(Confirmation::DeleteView(1))
     ));
     key(&mut ui, KeyCode::Esc);
+    settle_layout(&mut ui);
     assert_eq!(
         serde_json::to_value(persisted(&ui, &path)).unwrap(),
         serde_json::to_value(before).unwrap()
     );
     palette_command(&mut ui, "Delete saved tab");
     key(&mut ui, KeyCode::Enter);
+    settle_layout(&mut ui);
     assert_eq!(ui.state().config.active_tab, 0);
     assert_tab_state(&ui, &dashboard, dashboard_selected);
     let saved = persisted_tab(&ui, &path);
@@ -1303,11 +1323,13 @@ fn deleting_a_saved_view_reindexes_navigation_and_caches_without_overwriting_its
     );
     assert_eq!(traces(ui.state()), last_traces);
     key(&mut ui, KeyCode::Char('1'));
+    settle_layout(&mut ui);
     assert_tab_state(&ui, &first, first_selected);
     persisted_tab(&ui, &path);
     drop(ui);
 
     let mut restarted = mount_with_viewport(Config::load(&path).unwrap(), Some(&path), viewport);
+    settle_layout(&mut restarted);
     assert_tab_state(&restarted, &first, first_selected);
     key(&mut restarted, KeyCode::Char('2'));
     settle_layout(&mut restarted);
@@ -1746,7 +1768,9 @@ fn tab_switches_restore_independent_caches_and_reject_responses_from_previous_vi
     key(&mut ui, KeyCode::Char('M'));
     key(&mut ui, KeyCode::Enter);
     let job = cache_finished_job(&mut ui, "Built-in cached detail");
-    ui.dispatch(Msg::ContentScroll(3)).unwrap();
+    settle_layout(&mut ui);
+    ui.dispatch(Msg::DetailScrolled(3)).unwrap();
+    settle_layout(&mut ui);
     let builtin = tab_state(ui.state());
     let builtin_selected = ui.state().scroll.selected;
     let builtin_traces = traces(ui.state());
@@ -1761,7 +1785,9 @@ fn tab_switches_restore_independent_caches_and_reject_responses_from_previous_vi
     key(&mut ui, KeyCode::Enter);
     assert_eq!(ui.state().config.route.as_ref(), Some(&route));
     assert_eq!(cache_finished_job(&mut ui, "Saved tab cached detail"), job);
-    ui.dispatch(Msg::ContentScroll(5)).unwrap();
+    settle_layout(&mut ui);
+    ui.dispatch(Msg::DetailScrolled(5)).unwrap();
+    settle_layout(&mut ui);
     let saved = tab_state(ui.state());
     let saved_selected = ui.state().scroll.selected;
     let saved_traces = traces(ui.state());
@@ -2079,18 +2105,35 @@ fn every_tabs_navigation_persists_immediately_and_survives_restart() {
                     open_section(&mut ui, "Description");
                     settle_layout(&mut ui);
                     persisted_tab(&ui, &path);
+                    // Description is anchored inside one continuous document, not a new scroll view.
+                    let description_offset = ui.state().content_offset;
+                    assert!(description_offset > 0);
                     key(&mut ui, KeyCode::Down);
-                    assert_eq!(persisted_tab(&ui, &path).tab_states["4"].content_offset, 1);
-                    ui.dispatch(Msg::ContentScroll(4)).unwrap();
                     settle_layout(&mut ui);
-                    assert_eq!(persisted_tab(&ui, &path).tab_states["4"].content_offset, 4);
+                    assert_eq!(
+                        persisted_tab(&ui, &path).tab_states["4"].content_offset,
+                        description_offset + 1
+                    );
+                    ui.dispatch(Msg::ContentScroll(description_offset + 4))
+                        .unwrap();
+                    settle_layout(&mut ui);
+                    assert_eq!(
+                        persisted_tab(&ui, &path).tab_states["4"].content_offset,
+                        description_offset + 4
+                    );
                 }
                 _ => unreachable!(),
             }
         }
+        settle_layout(&mut ui);
+        persisted_tab(&ui, &path);
         visits.push((tab_state(ui.state()), ui.state().scroll.selected));
     }
+    // Identical routes in different tabs must still restore independent document offsets.
+    assert_eq!(visits[2].0.route, visits[4].0.route);
+    assert_ne!(visits[2].0.content_offset, visits[4].0.content_offset);
     key(&mut ui, KeyCode::Char('D'));
+    settle_layout(&mut ui);
     let saved = persisted_tab(&ui, &path);
     for (index, (expected, selected)) in visits.iter().enumerate() {
         let tab = index.to_string();
@@ -2103,9 +2146,11 @@ fn every_tabs_navigation_persists_immediately_and_survives_restart() {
     drop(ui);
 
     let mut restarted = mount_with_viewport(Config::load(&path).unwrap(), Some(&path), viewport);
+    settle_layout(&mut restarted);
     assert_tab_state(&restarted, &visits[0].0, visits[0].1);
     for (index, ch) in "DPIM123".chars().enumerate() {
         key(&mut restarted, KeyCode::Char(ch));
+
         settle_layout(&mut restarted);
         assert_eq!(restarted.state().config.active_tab, index);
         assert_tab_state(&restarted, &visits[index].0, visits[index].1);
@@ -2203,11 +2248,13 @@ fn committed_keyboard_events_persist_immediately_and_restart_restores_the_route(
     key(&mut ui, KeyCode::Enter);
     assert_eq!(persisted(&ui, &path).section, Some(0));
     key(&mut ui, KeyCode::Tab);
-    assert_eq!(persisted(&ui, &path).field, 1);
+    settle_layout(&mut ui);
+    assert_eq!(persisted_tab(&ui, &path).field, 1);
     let committed = std::fs::read(&path).unwrap();
     key(&mut ui, KeyCode::Enter);
     replace_input(&mut ui, "reopen");
     key(&mut ui, KeyCode::Esc);
+    settle_layout(&mut ui);
     assert_eq!(
         std::fs::read(&path).unwrap(),
         committed,
@@ -2225,8 +2272,15 @@ fn committed_keyboard_events_persist_immediately_and_restart_restores_the_route(
     );
     assert_eq!(restarted.state().section_name(), "Fields");
     assert_eq!(restarted.state().config.field, 1);
+    settle_layout(&mut restarted);
+    let mut navigation = tab_state(restarted.state());
+    let list_selected = restarted.state().scroll.selected;
+    assert!(navigation.content_offset > 0);
     key(&mut restarted, KeyCode::Esc);
-    assert_eq!(persisted(&restarted, &path).section, None);
+    settle_layout(&mut restarted);
+    navigation.section = None;
+    assert_tab_state(&restarted, &navigation, list_selected);
+    assert_eq!(persisted_tab(&restarted, &path).section, None);
     key(&mut restarted, KeyCode::Esc);
     assert!(persisted(&restarted, &path).route.is_none());
     assert_eq!(selected_key(restarted.state()), selected);

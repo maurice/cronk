@@ -392,8 +392,8 @@ fn context_line(state: &State, colors: Colors) -> Element {
             )
         }
         Scope::Details => (
-            "OVERVIEW".into(),
-            "Choose a section · Enter to explore".into(),
+            state.section_name().to_uppercase(),
+            "Tab / ↑ ↓ choose section · Enter focuses · PgUp/PgDn scroll".into(),
         ),
         Scope::Section => (
             state.section_name().to_uppercase(),
@@ -420,7 +420,7 @@ fn section_hint(section: &str) -> &'static str {
         "Discussions" => "↑ ↓ choose a discussion · reply / resolve via commands",
         "Pipeline" => "All running jobs stream together · ↑ ↓ scroll",
         "Changes" => "Unified diff · ↑ ↓ scroll",
-        _ => "↑ ↓ scroll · Esc returns to overview",
+        _ => "↑ ↓ scroll · Esc returns to section navigation",
     }
 }
 
@@ -648,34 +648,25 @@ fn empty_state(title: &str, help: &str, colors: Colors) -> Element {
         .into()
 }
 
-fn scroll_content(
-    ctx: &Context<Cronk>,
-    key: String,
-    children: Vec<Element>,
-    colors: Colors,
-) -> Element {
-    Element::from(
-        ScrollView::new()
-            // Measure variable-height content before dragging so the thumb's range stays accurate.
-            .virtualize(false)
-            .offset(ctx.state.content_offset)
-            .scroll_keys(ScrollKeymap::NONE)
-            .focusable(false)
-            .tab_stop(false)
-            .scrollbar(true)
-            .scrollbar_config(vertical_scrollbar(colors))
-            .scroll_wheel_multiplier(3)
-            .smooth_wheel_scroll(false)
-            .padding(content_padding(2))
-            .style(colors.base())
-            .on_scroll_to(ctx.link().callback(Msg::ContentScroll))
-            .on_viewport_change(
-                ctx.link()
-                    .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
-            )
-            .children(children),
-    )
-    .key(key)
+fn scroll_content(ctx: &Context<Cronk>, children: Vec<Element>, colors: Colors) -> ScrollView {
+    ScrollView::new()
+        // Measure variable-height content before dragging so the thumb's range stays accurate.
+        .virtualize(false)
+        .offset(ctx.state.content_offset)
+        .scroll_keys(ScrollKeymap::NONE)
+        .focusable(false)
+        .tab_stop(false)
+        .scrollbar(true)
+        .scrollbar_config(vertical_scrollbar(colors))
+        .scroll_wheel_multiplier(3)
+        .smooth_wheel_scroll(false)
+        .padding(content_padding(2))
+        .style(colors.base())
+        .on_scroll_to(ctx.link().callback(Msg::DetailScrolled))
+        .on_viewport_change(ctx.link().callback(|event: ScrollViewportEvent| {
+            Msg::ContentViewport(event.offset, event.metrics.max_offset)
+        }))
+        .children(children)
 }
 
 fn markdown(value: &str, colors: Colors) -> DocumentView {
@@ -700,21 +691,6 @@ fn markdown(value: &str, colors: Colors) -> DocumentView {
     .table_outer_frame(false)
 }
 
-fn section_document(ctx: &Context<Cronk>, value: &str, key: String, colors: Colors) -> Element {
-    scroll_content(
-        ctx,
-        key,
-        vec![
-            markdown(value, colors)
-                .height(Length::Auto)
-                .scrollbar(false)
-                .scroll_wheel(false)
-                .into(),
-        ],
-        colors,
-    )
-}
-
 fn detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
     let state = &ctx.state;
     let Some(details) = state
@@ -732,43 +708,13 @@ fn detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
             colors,
         );
     };
-    let key = item_key(&details.item.key);
-    if state.scope == Scope::Details {
-        return overview(ctx, details, colors);
-    }
-    match state.section_name() {
-        "Fields" => fields(ctx, details, colors),
-        "Description" => section_document(
-            ctx,
-            &details.item.description,
-            format!("description-{key}"),
-            colors,
-        ),
-        "Activity" => {
-            let mut content = Vec::new();
-            for note in &details.notes {
-                content.push(note_view(note, colors));
-            }
-            if content.is_empty() {
-                content.push(line("No activity yet.", Style::new().fg(colors.muted)).into());
-            }
-            scroll_content(ctx, format!("activity-{key}"), content, colors)
-        }
-        "Pipeline" => pipeline(ctx, details, colors),
-        "Jobs" => jobs(ctx, details, colors),
-        "Discussions" => discussions(ctx, details, colors),
-        "Changes" => changes(ctx, details, colors),
-        _ => empty_state(
-            "Section unavailable",
-            "Return to the overview to choose a section.",
-            colors,
-        ),
-    }
+    detail_document(ctx, details, colors)
 }
 
 fn metadata(label: &str, value: impl Into<String>, colors: Colors) -> Element {
     let value = value.into();
     HStack::new()
+        .style(colors.base())
         .height(Length::Auto)
         .gap(1)
         .child(
@@ -790,61 +736,93 @@ fn metadata(label: &str, value: impl Into<String>, colors: Colors) -> Element {
         .into()
 }
 
-fn users(users: &[User]) -> String {
-    users
-        .iter()
-        .map(|u| format!("@{}", u.username))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn overview(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
+fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
     let state = &ctx.state;
-    let item = &details.item;
-    let mut navigation = Vec::new();
+    let mut content = Vec::new();
     for (index, section) in state.sections().iter().enumerate() {
         let selected = state.section_cursor == index;
-        let count = match *section {
-            "Jobs" => format!("{}", details.jobs.len()),
-            "Discussions" => format!("{}", details.discussions.len()),
-            "Changes" => format!("{}", details.diffs.len()),
-            "Activity" => format!("{}", details.notes.len()),
-            _ => String::new(),
+        let section_colors = Colors {
+            background: if selected {
+                colors.selection
+            } else {
+                colors.background
+            },
+            ..colors
         };
-        navigation.push(click(
+        let style = section_colors.base();
+        content.push(click(
             ctx,
-            format!("overview-section-{index}"),
-            VStack::new()
-                .height(Length::Px(2))
-                .style(if selected {
-                    colors.selected()
-                } else {
-                    colors.base()
-                })
-                .child(line(
-                    format!(" {} {section}  {count}", if selected { "›" } else { " " }),
-                    Style::new()
-                        .fg(if selected {
-                            colors.accent
-                        } else {
-                            colors.foreground
-                        })
-                        .bold(),
-                ))
-                .child(line(
-                    if selected { "   Enter to explore" } else { "" },
-                    Style::new().fg(colors.muted),
-                )),
-            move || Msg::Section(index),
+            format!("detail-section-{index}"),
+            line(
+                format!(" {} {section}", if selected { "›" } else { " " }),
+                style.fg(colors.accent).bold(),
+            ),
+            move || Msg::DetailSection(index),
         ));
+        let children = match *section {
+            "Fields" => fields(ctx, details, section_colors),
+            "Description" => vec![
+                markdown(&details.item.description, section_colors)
+                    .height(Length::Auto)
+                    .scrollbar(false)
+                    .scroll_wheel(false)
+                    .into(),
+            ],
+            "Activity" => {
+                let mut notes: Vec<_> = details.notes.iter().collect();
+                notes.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+                if notes.is_empty() {
+                    vec![line("No activity yet.", style.fg(colors.muted)).into()]
+                } else {
+                    notes
+                        .into_iter()
+                        .map(|note| note_view(note, section_colors))
+                        .collect()
+                }
+            }
+            "Pipeline" => pipeline(details, section_colors),
+            "Jobs" => jobs(ctx, details, section_colors),
+            "Discussions" => discussions(ctx, details, section_colors),
+            "Changes" => changes(details, section_colors),
+            _ => Vec::new(),
+        };
+        // Keep stable row keys on direct children: native scroll anchoring then
+        // survives newly inserted notes and collapsing job panels above the viewport.
+        content.extend(children);
+        content.push(blank().key(format!("detail-section-gap-{index}")));
     }
+    let mut scroll = scroll_content(ctx, content, colors);
+    if state.reveal_content {
+        let target = if state.scope == Scope::Section {
+            match state.section_name() {
+                "Fields" => Some(format!("edit-field-{}", state.config.field)),
+                "Jobs" => details
+                    .jobs
+                    .get(state.config.field)
+                    .map(|job| format!("job-{}", job.id)),
+                "Discussions" => details
+                    .discussions
+                    .get(state.config.field)
+                    .map(|d| format!("discussion-{}", d.id)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        scroll = scroll.scroll_to_key(
+            target.unwrap_or_else(|| format!("detail-section-{}", state.section_cursor)),
+        );
+    }
+    Element::from(scroll).key(format!(
+        "detail-{}-{}",
+        state.config.active_tab,
+        item_key(&details.item.key)
+    ))
+}
+
+fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element> {
+    let item = &details.item;
     let mut content = vec![
-        Text::new(item.title.clone())
-            .width(Length::Flex(1))
-            .height(Length::Auto)
-            .overflow(Overflow::Wrap)
-            .style(Style::new().fg(colors.foreground).bold())
-            .into(),
         rich(
             vec![
                 status_span(&item.state, colors),
@@ -853,128 +831,6 @@ fn overview(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element 
             colors.base(),
         )
         .into(),
-        rich(label_spans(&item.labels, colors), colors.base()).into(),
-        blank(),
-        metadata(
-            "Project",
-            state
-                .project(item.key.project)
-                .map_or_else(|| item.key.project.to_string(), |p| p.path.clone()),
-            colors,
-        ),
-        metadata("Author", format!("@{}", item.author.username), colors),
-        metadata("Assignees", users(&item.assignees), colors),
-        metadata("Milestone", item.milestone.clone(), colors),
-        metadata("Updated", item.updated_at.clone(), colors),
-    ];
-    if item.key.kind == ItemKind::MergeRequest {
-        content.push(metadata(
-            "Branches",
-            format!("{} → {}", item.source_branch, item.target_branch),
-            colors,
-        ));
-        content.push(metadata("Reviewers", users(&item.reviewers), colors));
-        content.push(metadata(
-            "Pipeline",
-            item.pipeline
-                .as_ref()
-                .map_or_else(|| "None".into(), |p| format!("#{} · {}", p.id, p.status)),
-            colors,
-        ));
-        content.push(metadata(
-            "Review",
-            format!(
-                "{} jobs · {} discussions · {} unresolved · {} changed files",
-                details.jobs.len(),
-                details.discussions.len(),
-                item.unresolved
-                    .map_or_else(|| "unknown".into(), |n| n.to_string()),
-                details.diffs.len()
-            ),
-            colors,
-        ));
-    } else {
-        content.push(metadata("Iteration", item.iteration.clone(), colors));
-    }
-    content.push(metadata("URL", item.web_url.clone(), colors));
-    for warning in &details.warnings {
-        content.push(
-            Text::new(format!("○ {warning}"))
-                .width(Length::Flex(1))
-                .overflow(Overflow::Wrap)
-                .style(Style::new().fg(colors.yellow))
-                .into(),
-        );
-    }
-    content.push(blank());
-    content.push(line("DESCRIPTION", Style::new().fg(colors.accent).bold()).into());
-    content.push(
-        markdown(&item.description, colors)
-            .height(Length::Auto)
-            .scroll_wheel(false)
-            .into(),
-    );
-    if item.key.kind == ItemKind::Issue {
-        content.push(blank());
-        content.push(
-            line(
-                format!("RECENT ACTIVITY  ·  {} events", details.notes.len()),
-                Style::new().fg(colors.accent).bold(),
-            )
-            .into(),
-        );
-        let start = details.notes.len().saturating_sub(3);
-        for note in &details.notes[start..] {
-            content.push(note_view(note, colors));
-        }
-        if details.notes.is_empty() {
-            content.push(line("No activity yet.", Style::new().fg(colors.muted)).into());
-        }
-    }
-    let summary = scroll_content(
-        ctx,
-        format!("overview-{}", item_key(&item.key)),
-        content,
-        colors,
-    );
-    if ctx.viewport().w < 70 {
-        VStack::new()
-            .child(
-                Tabs::new()
-                    .tabs(state.sections().iter().map(|s| Tab::new(*s)))
-                    .active(state.section_cursor)
-                    .height(Length::Px(1))
-                    .border(false)
-                    .overflow(TabsOverflow::Ellipsis)
-                    .focusable(false)
-                    .tab_stop(false)
-                    .active_style(colors.selected().fg(colors.accent))
-                    .on_change(ctx.link().callback(|e: TabsEvent| Msg::Section(e.index))),
-            )
-            .child(summary)
-            .into()
-    } else {
-        HStack::new()
-            .child(
-                ScrollView::new()
-                    .width(Length::Px(23))
-                    .reveal_key(format!("overview-section-{}", state.section_cursor))
-                    .padding(content_padding(1))
-                    .scroll_keys(ScrollKeymap::NONE)
-                    .focusable(false)
-                    .tab_stop(false)
-                    .scrollbar(true)
-                    .scrollbar_config(vertical_scrollbar(colors))
-                    .gap(1)
-                    .children(navigation),
-            )
-            .child(summary)
-            .into()
-    }
-}
-
-fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
-    let mut content = vec![
         metadata(
             "Project path",
             ctx.state
@@ -985,7 +841,9 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
         blank(),
     ];
     for (index, (label, _, value)) in ctx.state.fields().into_iter().enumerate() {
-        let selected = ctx.state.config.field == index;
+        let selected = ctx.state.scope == Scope::Section
+            && ctx.state.section_name() == "Fields"
+            && ctx.state.config.field == index;
         let style = if selected {
             colors.selected()
         } else {
@@ -1011,9 +869,15 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
             ctx,
             format!("edit-field-{index}"),
             VStack::new()
-                .height(Length::Px(2))
+                .height(Length::Auto)
                 .style(style)
-                .child(rich(spans, style))
+                .child(
+                    Text::from_spans(spans)
+                        .width(Length::Flex(1))
+                        .height(Length::Auto)
+                        .overflow(Overflow::Wrap)
+                        .style(style),
+                )
                 .child(line(
                     if selected {
                         "   Enter or click to edit"
@@ -1025,40 +889,42 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
             move || Msg::Field(index),
         ));
     }
-    content.push(blank());
     content.push(metadata(
-        "Milestone",
-        details.item.milestone.clone(),
+        "Author",
+        format!("@{}", item.author.username),
         colors,
     ));
-    if details.item.key.kind == ItemKind::Issue {
+    content.push(metadata("Updated", item.updated_at.clone(), colors));
+    if item.key.kind == ItemKind::MergeRequest {
         content.push(metadata(
-            "Iteration",
-            details.item.iteration.clone(),
+            "Branches",
+            format!("{} → {}", item.source_branch, item.target_branch),
+            colors,
+        ));
+        content.push(metadata(
+            "Review",
+            format!(
+                "{} discussions · {} unresolved · {} changed files",
+                details.discussions.len(),
+                item.unresolved
+                    .map_or_else(|| "unknown".into(), |n| n.to_string()),
+                details.diffs.len()
+            ),
             colors,
         ));
     }
-    content.push(metadata("Web URL", details.item.web_url.clone(), colors));
-    let mut scroll = ScrollView::new()
-        .virtualize(false)
-        .offset(ctx.state.content_offset)
-        .scroll_keys(ScrollKeymap::NONE)
-        .focusable(false)
-        .tab_stop(false)
-        .scrollbar(true)
-        .scrollbar_config(vertical_scrollbar(colors))
-        .padding(content_padding(2))
-        .smooth_wheel_scroll(false)
-        .on_scroll_to(ctx.link().callback(Msg::ContentScroll))
-        .on_viewport_change(
-            ctx.link()
-                .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
-        )
-        .children(content);
-    if ctx.state.reveal_content {
-        scroll = scroll.reveal_key(format!("edit-field-{}", ctx.state.config.field));
+    content.push(metadata("Web URL", item.web_url.clone(), colors));
+    for warning in &details.warnings {
+        content.push(
+            Text::new(format!("○ {warning}"))
+                .width(Length::Flex(1))
+                .height(Length::Auto)
+                .overflow(Overflow::Wrap)
+                .style(colors.base().fg(colors.yellow))
+                .into(),
+        );
     }
-    Element::from(scroll).key(format!("fields-{}", item_key(&details.item.key)))
+    content
 }
 
 fn note_view(note: &Note, colors: Colors) -> Element {
@@ -1085,10 +951,12 @@ fn note_view(note: &Note, colors: Colors) -> Element {
     Element::from(
         VStack::new()
             .height(Length::Auto)
+            .style(colors.base())
             .child(rich(header, colors.base()))
             .child(
                 markdown(&note.body, colors)
                     .height(Length::Auto)
+                    .scrollbar(false)
                     .scroll_wheel(false),
             )
             .child(blank()),
@@ -1096,7 +964,7 @@ fn note_view(note: &Note, colors: Colors) -> Element {
     .key(format!("note-{}", note.id))
 }
 
-fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
+fn pipeline(details: &Details, colors: Colors) -> Vec<Element> {
     let mut content = Vec::new();
     if let Some(pipeline) = &details.item.pipeline {
         content.push(
@@ -1137,45 +1005,7 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element 
         )
         .into(),
     );
-    content.push(blank());
-    let running: Vec<_> = details.jobs.iter().filter(|j| j.running()).collect();
-    if running.is_empty() {
-        content.push(
-            line(
-                "No running jobs. Open Jobs to inspect completed traces.",
-                Style::new().fg(colors.muted),
-            )
-            .into(),
-        );
-    } else {
-        content.push(
-            line(
-                "LIVE TRACES  ·  following every running job",
-                Style::new().fg(colors.accent).bold(),
-            )
-            .into(),
-        );
-        let columns = if ctx.viewport().w >= 105 { 2 } else { 1 };
-        let groups = running.len().div_ceil(columns);
-        // Share the available height: concurrent logs should remain visible even at 80×24.
-        let lines = (ctx.viewport().h.saturating_sub(14) as usize / groups)
-            .saturating_sub(3)
-            .clamp(1, 7);
-        for chunk in running.chunks(columns) {
-            let mut row = HStack::new().height(Length::Auto).gap(2);
-            for job in chunk {
-                row = row.child(job_panel(ctx, job, lines, true, colors));
-            }
-            content.push(row.into());
-            content.push(blank());
-        }
-    }
-    scroll_content(
-        ctx,
-        format!("pipeline-{}", item_key(&details.item.key)),
-        content,
-        colors,
-    )
+    content
 }
 
 fn job_header(job: &Job, selected: bool, expanded: bool, colors: Colors) -> Vec<Span> {
@@ -1192,22 +1022,11 @@ fn job_header(job: &Job, selected: bool, expanded: bool, colors: Colors) -> Vec<
     spans
 }
 
-fn job_panel(
-    ctx: &Context<Cronk>,
-    job: &Job,
-    lines: usize,
-    header: bool,
-    colors: Colors,
-) -> Element {
+fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> Element {
     let mut panel = VStack::new()
         .height(Length::Auto)
         .style(Style::new().bg(colors.surface));
-    if header {
-        panel = panel.child(rich(
-            job_header(job, false, true, colors),
-            Style::new().bg(colors.surface),
-        ));
-    }
+
     match ctx.state.traces.get(&job.id) {
         Some(trace) => {
             if let Some(error) = &trace.error {
@@ -1265,17 +1084,21 @@ fn trace_tail(text: &str, count: usize) -> String {
     lines.join("\n")
 }
 
-fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
+fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element> {
     if details.jobs.is_empty() {
-        return empty_state(
-            "No jobs",
-            "This pipeline has not created any jobs yet.",
-            colors,
-        );
+        return vec![
+            line(
+                "No jobs in this pipeline yet.",
+                colors.base().fg(colors.muted),
+            )
+            .into(),
+        ];
     }
     let mut content = Vec::new();
     for (index, job) in details.jobs.iter().enumerate() {
-        let selected = ctx.state.config.field == index;
+        let selected = ctx.state.scope == Scope::Section
+            && ctx.state.section_name() == "Jobs"
+            && ctx.state.config.field == index;
         let expanded = job.running() || ctx.state.expanded.contains(&job.id);
         let id = job.id;
         let link = ctx.link().clone();
@@ -1291,6 +1114,7 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
                 },
             ),
             move || {
+                link.send(Msg::Section(3));
                 link.send(Msg::Select(index));
                 Msg::ToggleJob(id)
             },
@@ -1300,34 +1124,12 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
                 ctx,
                 job,
                 if job.running() { 8 } else { 18 },
-                false,
                 colors,
             ));
         }
         content.push(blank());
     }
-    let mut scroll = ScrollView::new()
-        .virtualize(false)
-        .offset(ctx.state.content_offset)
-        .scroll_keys(ScrollKeymap::NONE)
-        .focusable(false)
-        .tab_stop(false)
-        .scrollbar(true)
-        .scrollbar_config(vertical_scrollbar(colors))
-        .padding(content_padding(2))
-        .smooth_wheel_scroll(false)
-        .on_scroll_to(ctx.link().callback(Msg::ContentScroll))
-        .on_viewport_change(
-            ctx.link()
-                .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
-        )
-        .children(content);
-    if ctx.state.reveal_content
-        && let Some(job) = details.jobs.get(ctx.state.config.field)
-    {
-        scroll = scroll.reveal_key(format!("job-{}", job.id));
-    }
-    Element::from(scroll).key(format!("jobs-{}", item_key(&details.item.key)))
+    content
 }
 
 fn discussion_state(discussion: &Discussion) -> &'static str {
@@ -1341,18 +1143,16 @@ fn discussion_state(discussion: &Discussion) -> &'static str {
     }
 }
 
-fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
+fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element> {
     if details.discussions.is_empty() {
-        return empty_state(
-            "No discussions",
-            "Add a comment to start the review conversation.",
-            colors,
-        );
+        return vec![line("No discussions yet.", colors.base().fg(colors.muted)).into()];
     }
-    let selected = ctx.state.config.field.min(details.discussions.len() - 1);
-    let mut summaries = Vec::new();
+    let mut content = Vec::new();
     for (index, discussion) in details.discussions.iter().enumerate() {
-        let style = if selected == index {
+        let selected = ctx.state.scope == Scope::Section
+            && ctx.state.section_name() == "Discussions"
+            && ctx.state.config.field == index;
+        let style = if selected {
             colors.selected()
         } else {
             colors.base()
@@ -1361,75 +1161,37 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Eleme
             .notes
             .first()
             .map_or("unknown", |n| n.author.username.as_str());
-        let preview = discussion
-            .notes
-            .first()
-            .map_or("Empty discussion", |n| n.body.lines().next().unwrap_or(""));
-        summaries.push(click(
+        let link = ctx.link().clone();
+        content.push(click(
             ctx,
             format!("discussion-{}", discussion.id),
-            VStack::new()
-                .height(Length::Px(3))
-                .style(style)
-                .child(rich(
-                    vec![
-                        Span::new(format!(
-                            " {} @{}  ",
-                            if selected == index { "›" } else { " " },
-                            author
-                        ))
-                        .fg(colors.cyan),
-                        status_span(discussion_state(discussion), colors),
-                        Span::new(format!("  ·  {} notes", discussion.notes.len()))
-                            .fg(colors.muted),
-                    ],
-                    style,
-                ))
-                .child(line(format!("   {preview}"), style))
-                .child(blank()),
-            move || Msg::Select(index),
+            rich(
+                vec![
+                    Span::new(format!(
+                        " {} @{}  ",
+                        if selected { "›" } else { " " },
+                        author
+                    ))
+                    .fg(colors.cyan),
+                    status_span(discussion_state(discussion), colors),
+                    Span::new(format!("  ·  {} notes", discussion.notes.len())).fg(colors.muted),
+                ],
+                style,
+            ),
+            move || {
+                link.send(Msg::Section(4));
+                Msg::Select(index)
+            },
         ));
+        content.extend(discussion.notes.iter().map(|note| note_view(note, colors)));
+        content.push(blank());
     }
-    let notes: Vec<_> = details.discussions[selected]
-        .notes
-        .iter()
-        .map(|note| note_view(note, colors))
-        .collect();
-    let content = scroll_content(
-        ctx,
-        format!("discussion-notes-{}", details.discussions[selected].id),
-        notes,
-        colors,
-    );
-    let summary = ScrollView::new()
-        .scroll_keys(ScrollKeymap::NONE)
-        .focusable(false)
-        .tab_stop(false)
-        .padding(content_padding(1))
-        .scrollbar(true)
-        .scrollbar_config(vertical_scrollbar(colors))
-        .reveal_key(format!("discussion-{}", details.discussions[selected].id))
-        .children(summaries);
-    if ctx.viewport().w >= 100 {
-        HStack::new()
-            .child(summary.width(Length::Px(42)))
-            .child(content)
-            .into()
-    } else {
-        VStack::new()
-            .child(summary.height(Length::Px(6)))
-            .child(content)
-            .into()
-    }
+    content
 }
 
-fn changes(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
+fn changes(details: &Details, colors: Colors) -> Vec<Element> {
     if details.diffs.is_empty() {
-        return empty_state(
-            "No changes available",
-            "GitLab returned no file diffs for this merge request.",
-            colors,
-        );
+        return vec![line("No changes available.", colors.base().fg(colors.muted)).into()];
     }
     let mut content = Vec::new();
     for (index, diff) in details.diffs.iter().enumerate() {
@@ -1484,19 +1246,14 @@ fn changes(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
                         .width(Length::Flex(1))
                         .height(Length::Auto)
                         .overflow(Overflow::Wrap)
-                        .style(Style::new().fg(foreground)),
+                        .style(colors.base().fg(foreground)),
                 )
                 .key(format!("diff-{index}-line-{number}")),
             );
         }
         content.push(blank());
     }
-    scroll_content(
-        ctx,
-        format!("changes-{}", item_key(&details.item.key)),
-        content,
-        colors,
-    )
+    content
 }
 
 fn footer(state: &State, colors: Colors) -> Element {
@@ -1533,11 +1290,9 @@ fn footer(state: &State, colors: Colors) -> Element {
     }
     let shortcuts = match state.scope {
         Scope::List => "↑ ↓ move   Enter open   / filter   : commands   r refresh   ? help",
-        Scope::Details => {
-            " ↑ ↓ section   Enter explore   Esc back   : commands   r refresh   ? help"
-        }
+        Scope::Details => " ↑ ↓ section   Enter focus   PgUp/PgDn scroll   Esc back   : commands",
         Scope::Section => {
-            " ↑ ↓ navigate   Enter act   Esc overview   : commands   r refresh   ? help"
+            " ↑ ↓ navigate   Enter act   Esc sections   PgUp/PgDn scroll   : commands"
         }
     };
     VStack::new()
@@ -1952,7 +1707,9 @@ const HELP: &str = "\
 - Lists are active immediately. **Left / Right** switch tabs without wrapping, outside dialogs.
 - Overflowing panes show a right-edge scrollbar. Click its track or drag its thumb to scroll.
 - **Enter** opens the selected item, section, field, or job.
-- **Up / Down** move within the current scope. Document sections scroll.
+- Details show all sections in one document. **Tab / Shift+Tab / Up / Down** select sections.
+- **PageUp / PageDown** scroll the whole detail document; **Enter** focuses section actions.
+- **Esc** leaves section actions without resetting the viewport, then returns to the list.
 - **Esc** goes back one level; at a list it does nothing. Click a row to open it directly.
 - **Space** toggles visibility in Projects. Hidden projects leave the work lists.
 
@@ -1968,7 +1725,7 @@ const HELP: &str = "\
 - **Ctrl+J** inserts a newline in multiline fields. **Esc** cancels.
 - ID-backed fields suggest names: **Up / Down** choose, **Enter** accepts, then saves.
 - Separate assignees/reviewers with commas; only the trimmed token at the caret is searched.
-- Running jobs expand automatically. Pipeline shows all running traces.
+- Running jobs expand automatically. All live traces appear inline in Jobs.
 - Job logs follow their trailing output; finished jobs expand on demand.
 - **DEMO** uses fictional offline data, never a live GitLab workspace.
 ";

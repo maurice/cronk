@@ -85,6 +85,7 @@ impl Component for Cronk {
             },
             section_cursor,
             content_offset: saved.as_ref().map_or(0, |tab| tab.content_offset),
+            content_max_offset: usize::MAX,
             reveal_content: saved.is_none(),
             tab_cache: BTreeMap::new(),
             traces: HashMap::new(),
@@ -469,7 +470,6 @@ impl Component for Cronk {
                         ctx.state.scope = Scope::Section;
                         ctx.state.config.section = Some(ctx.state.section_cursor);
                         ctx.state.config.field = 0;
-                        ctx.state.content_offset = 0;
                     }
                     Scope::Section => match ctx.state.section_name() {
                         "Fields" => self.edit_field(ctx),
@@ -511,7 +511,7 @@ impl Component for Cronk {
                         Scope::Section => {
                             ctx.state.scope = Scope::Details;
                             ctx.state.config.section = None;
-                            ctx.state.content_offset = 0;
+                            ctx.state.reveal_content = false;
                         }
                         Scope::Details => {
                             ctx.state.scope = Scope::List;
@@ -536,14 +536,44 @@ impl Component for Cronk {
                     ctx.state.scope = Scope::Section;
                     ctx.state.config.section = Some(index);
                     ctx.state.config.field = 0;
-                    ctx.state.content_offset = 0;
                     self.persist(ctx);
                 }
             }
+            Msg::DetailSection(index) => {
+                if index < ctx.state.sections().len() && ctx.state.config.route.is_some() {
+                    ctx.state.section_cursor = index;
+                    ctx.state.scope = Scope::Details;
+                    ctx.state.config.section = None;
+                    ctx.state.reveal_content = false;
+                    self.persist(ctx);
+                }
+            }
+            Msg::DetailScrolled(offset) => {
+                ctx.state.reveal_content = false;
+                ctx.state.content_offset = offset;
+                self.persist(ctx);
+            }
+            Msg::ScrollContent(delta) => {
+                ctx.state.reveal_content = false;
+                ctx.state.content_offset = ctx
+                    .state
+                    .content_offset
+                    .saturating_add_signed(delta)
+                    .min(ctx.state.content_max_offset);
+                self.persist(ctx);
+            }
             Msg::Field(index) => {
+                ctx.state.scope = Scope::Section;
+                ctx.state.section_cursor = 0;
+                ctx.state.config.section = Some(0);
+                ctx.state.reveal_content = false;
                 ctx.state.config.field = index;
                 self.persist(ctx);
                 self.edit_field(ctx);
+            }
+            Msg::ContentViewport(offset, max_offset) => {
+                ctx.state.content_max_offset = max_offset;
+                return self.update(Msg::ContentScroll(offset), ctx);
             }
             Msg::ContentScroll(offset) => {
                 if ctx.state.content_offset != offset {
@@ -771,6 +801,14 @@ impl Component for Cronk {
 
                 KeyCode::Enter => Some(Msg::Enter),
                 KeyCode::Esc => Some(Msg::Back),
+                KeyCode::PageDown | KeyCode::PageUp if ctx.state.scope != Scope::List => {
+                    let rows = ctx.viewport().h.saturating_sub(9).max(1) as isize;
+                    Some(Msg::ScrollContent(if key.code == KeyCode::PageDown {
+                        rows
+                    } else {
+                        -rows
+                    }))
+                }
                 KeyCode::PageDown => Some(Msg::Move(list_height(ctx.viewport().h) as isize)),
                 KeyCode::PageUp => Some(Msg::Move(-(list_height(ctx.viewport().h) as isize))),
                 KeyCode::Home => Some(Msg::Move(isize::MIN)),
@@ -1010,6 +1048,7 @@ impl Cronk {
         ctx.state.next_traces = cache.next_traces;
         ctx.state.expanded = tab.expanded.into_iter().collect();
         ctx.state.content_offset = tab.content_offset;
+        ctx.state.content_max_offset = usize::MAX;
         ctx.state.section_cursor = tab.section_cursor.min(ctx.state.sections().len() - 1);
         ctx.state.reveal_content = false;
         ctx.state.scroll = BoundaryScroll {
@@ -1046,6 +1085,7 @@ impl Cronk {
 
     fn open_item(&self, ctx: &mut Context<Self>, key: ItemKey) {
         ctx.state.reveal_content = true;
+        ctx.state.content_max_offset = usize::MAX;
         ctx.state.config.route = Some(key.clone());
         ctx.state.config.section = None;
         ctx.state.scope = Scope::Details;
@@ -1093,8 +1133,12 @@ impl Cronk {
                         .as_ref()
                         .map_or(0, |d| d.discussions.len()),
                     _ => {
-                        ctx.state.content_offset =
-                            ctx.state.content_offset.saturating_add_signed(delta);
+                        ctx.state.reveal_content = false;
+                        ctx.state.content_offset = ctx
+                            .state
+                            .content_offset
+                            .saturating_add_signed(delta)
+                            .min(ctx.state.content_max_offset);
                         return;
                     }
                 };
@@ -1122,7 +1166,7 @@ impl Cronk {
             Scope::Details => ctx.state.section_cursor = index.min(ctx.state.sections().len() - 1),
             Scope::Section => {
                 ctx.state.config.field = index;
-                ctx.state.content_offset = 0;
+                ctx.state.reveal_content = false;
             }
         }
     }

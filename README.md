@@ -47,13 +47,14 @@ Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTT
 | Key / gesture | Action |
 | --- | --- |
 | `↑` / `↓`, `Tab` / `Shift+Tab`, `k` / `j` | Move within the current scope |
-| `Enter` | Open item → enter section → edit field; submit a dialog |
+| `Enter` | Open item → focus section actions → edit field; submit a dialog |
 | `Esc` | Cancel editor, or go back exactly one scope |
 | `Shift+D` / `Shift+P` / `Shift+I` / `Shift+M` | Open Dashboard / Projects / Issues / Merge Requests |
 | `1`–`9`, `0` | Open saved views 1–9, then the tenth view |
 | `←` / `→` | Switch to the previous / next tab (no wraparound) |
 | `Esc` from a list | No action; the list remains active |
-| `Home` / `End`, `PageUp` / `PageDown` | Move through a list/document |
+| `Home` / `End` | First/last item or section; in a focused text section, document start/end |
+| `PageUp` / `PageDown` | Page through a list or scroll the whole detail document |
 | Mouse click / wheel | Open rows, choose tabs/sections, select fields, scroll |
 | Scrollbar track click / thumb drag | Scroll the corresponding viewport without activating its contents |
 | `Space` in Projects | Include/hide the selected project in other lists |
@@ -74,11 +75,15 @@ Each tab restores its last list or drilled-down detail scope, including selectio
 
 Lists use a quarter-viewport boundary: the cursor moves to the lower/upper quarter margin, the viewport follows further movement, then the cursor reaches the actual final/first row. No wraparound. Three terminal rows form one list item; the margin rounds down to whole items.
 
-Overflowing lists, detail panes, dialogs, and multiline editors show a theme-colored scrollbar at their right edge. The thumb indicates the visible fraction and current position; click the track or drag the thumb to scroll. Split panes scroll independently. Mouse scrolling keeps list selection visible, keyboard navigation continues from there, and unchanged refreshes do not pull the viewport back. Scrollbars disappear when content fits.
+Overflowing lists, detail panes, dialogs, and multiline editors show a theme-colored scrollbar at their right edge. The thumb indicates the visible fraction and current position; click the track or drag the thumb to scroll. Mouse scrolling keeps list selection visible, keyboard navigation continues from there, and unchanged refreshes do not pull the viewport back. Scrollbars disappear when content fits.
 
 The Dashboard shows your open authored, assigned, or requested-review work. It orders failed pipelines, unresolved discussions, passing non-draft review candidates, other MRs, then issues. A review candidate is a hint, **not** a claim that approvals, mergeability, or company policy checks are satisfied. Enter opens the real detail while preserving the Dashboard as the return destination.
 
-Issues have Fields, Description, and Activity scopes. MRs have Fields, Description, Pipeline, Jobs, Discussions, and Changes. Project rows open a project-filtered Issues list; the visibility checkbox works independently.
+Issue and MR details are **one continuous document**, with one scrollbar and no section sidebar or split panes. Issues show Fields, Description, and all Activity (newest first). MRs show Fields, Description, Pipeline, Jobs, every Discussion and its notes, and Changes. Nothing needs to be opened just to read a section; completed job logs remain collapsed until requested.
+
+**Tab / Shift+Tab or Up / Down** select sections and bring their heading into view. The current section has a selection background; GitLab label colors stay intact. **Enter** focuses a section's actions without replacing the document: choose/edit fields, expand or retry jobs, reply to or resolve discussions, or edit the description. **Esc** returns to section navigation without resetting the viewport, then returns to the work list. **PageUp / PageDown**, the wheel, and the scrollbar always scroll the whole document. Clicking a section heading selects it; clicking a field edits it, a job toggles it, and a discussion selects its thread.
+
+Project rows open a project-filtered Issues list; the visibility checkbox works independently.
 
 ## Name-based field completion
 
@@ -94,7 +99,7 @@ New issue/MR forms suggest projects from your workspace by alias or path. **Add 
 
 ![Two running jobs with concurrent live tails](docs/jobs.png)
 
-All running jobs in the open MR's head pipeline are expanded automatically and fetched independently. Finished jobs collapse unless explicitly expanded. The Pipeline view prioritizes live panels; the Jobs view includes the whole pipeline and lets you select a finished job to inspect or retry it. Wider pipelines still require scrolling when their panels cannot fit on one screen.
+All running jobs in the open MR's head pipeline are expanded automatically and fetched independently. Finished jobs collapse unless explicitly expanded. The inline Pipeline section shows the summary; Jobs displays every job and its live tail in the same document, without duplicating logs. Select a finished job to inspect or retry it. Large pipelines still require scrolling when their panels cannot fit on one screen.
 
 Logs are **near-real-time REST polling**, not a push stream. Each job keeps a byte offset, requests new data with HTTP Range, and appends only new text. UTF-8 and terminal escape sequences are handled across chunk boundaries; OSC/DCS and terminal controls are stripped. Responses are capped at 256 KiB of source bytes; the UI retains the latest 128 KiB per job. Completed logs are drained to EOF. Panels display trailing lines rather than a full searchable log archive.
 

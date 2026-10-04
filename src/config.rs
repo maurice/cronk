@@ -29,10 +29,23 @@ pub struct Config {
     pub detail_refresh_secs: u64,
     pub active_tab: usize,
     pub selections: BTreeMap<String, usize>,
+    pub tab_states: BTreeMap<String, TabState>,
     pub route: Option<ItemKey>,
     pub section: Option<usize>,
     pub field: usize,
     pub filters: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TabState {
+    pub route: Option<ItemKey>,
+    pub section: Option<usize>,
+    pub field: usize,
+    pub section_cursor: usize,
+    pub list_offset: usize,
+    pub content_offset: usize,
+    pub expanded: BTreeSet<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -67,6 +80,7 @@ impl Default for Config {
             detail_refresh_secs: 10,
             active_tab: 0,
             selections: BTreeMap::new(),
+            tab_states: BTreeMap::new(),
             route: None,
             section: None,
             field: 0,
@@ -329,6 +343,22 @@ mod tests {
             detail_refresh_secs: 2,
             active_tab: 3,
             selections: BTreeMap::from([("project/42:issues".into(), 17)]),
+            tab_states: BTreeMap::from([(
+                "3".into(),
+                TabState {
+                    route: Some(ItemKey {
+                        project: 42,
+                        iid: 7,
+                        kind: ItemKind::MergeRequest,
+                    }),
+                    section: Some(2),
+                    section_cursor: 2,
+                    field: 4,
+                    list_offset: 12,
+                    content_offset: 8,
+                    expanded: BTreeSet::from([91, 92]),
+                },
+            )]),
             route: Some(ItemKey {
                 project: 42,
                 iid: 7,

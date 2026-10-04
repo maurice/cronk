@@ -1,12 +1,12 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     time::{Duration, SystemTime},
 };
 
 use cronk::{
     build_info,
-    config::{Config, SavedView},
+    config::{Config, SavedView, TabState},
     demo,
     model::{ItemKey, ItemKind, Mutation, TraceChunk},
     ui::{Confirmation, Cronk, Dialog, DialogKind, Msg, Scope, State},
@@ -27,8 +27,21 @@ fn config() -> Config {
 }
 
 fn mount(config: Config, path: Option<&Path>) -> Ui {
+    mount_with_viewport(
+        config,
+        path,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 80,
+            h: 24,
+        },
+    )
+}
+
+fn mount_with_viewport(config: Config, path: Option<&Path>, viewport: Rect) -> Ui {
     let app = App::new().focus_policy(FocusPolicy::Manual);
-    let mut ui = TestBackend::new_with_app(
+    let mut ui = TestBackend::new_with_app_and_viewport(
         app,
         Cronk {
             config,
@@ -36,10 +49,17 @@ fn mount(config: Config, path: Option<&Path>) -> Ui {
             api: None,
         },
         (),
+        viewport,
     );
     ui.pump().unwrap();
     ui.render();
     ui
+}
+
+fn settle_layout(ui: &mut Ui) {
+    // Rendering queues viewport callbacks; drain them before checking persisted scroll offsets.
+    ui.render();
+    ui.pump().unwrap();
 }
 
 fn key(ui: &mut Ui, code: KeyCode) {
@@ -96,6 +116,119 @@ fn persisted(ui: &Ui, path: &Path) -> Config {
         "disk must reflect the complete committed workspace"
     );
     saved
+}
+
+fn tab_state(state: &State) -> TabState {
+    TabState {
+        route: state.config.route.clone(),
+        section: state.config.section,
+        field: state.config.field,
+        section_cursor: state.section_cursor,
+        list_offset: state.scroll.offset,
+        content_offset: state.content_offset,
+        expanded: state.expanded.iter().copied().collect(),
+    }
+}
+
+fn assert_tab_state(ui: &Ui, expected: &TabState, selected: usize) {
+    let state = ui.state();
+    assert_eq!(
+        state.config.route,
+        expected.route,
+        "{} route",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.config.section,
+        expected.section,
+        "{} section",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.config.field,
+        expected.field,
+        "{} field",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.section_cursor,
+        expected.section_cursor,
+        "{} section cursor",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.scroll.selected,
+        selected,
+        "{} list selection",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.scroll.offset,
+        expected.list_offset,
+        "{} list offset",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.content_offset,
+        expected.content_offset,
+        "{} content offset",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.expanded.iter().copied().collect::<BTreeSet<_>>(),
+        expected.expanded
+    );
+    assert_eq!(
+        state.scope,
+        match (&expected.route, expected.section) {
+            (None, _) => Scope::List,
+            (Some(_), None) => Scope::Details,
+            (Some(_), Some(_)) => Scope::Section,
+        },
+        "{} scope",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.details.as_ref().map(|d| &d.item.key),
+        expected.route.as_ref()
+    );
+    assert!(state.dialog.is_none());
+    assert_eq!(ui.focused_key(), None);
+}
+
+fn persisted_tab(ui: &Ui, path: &Path) -> Config {
+    let saved = persisted(ui, path);
+    let tab = ui.state().tab_key();
+    assert_eq!(saved.selections[&tab], ui.state().scroll.selected);
+    assert_eq!(
+        serde_json::to_value(&saved.tab_states[&tab]).unwrap(),
+        serde_json::to_value(tab_state(ui.state())).unwrap(),
+        "the active tab's complete navigation must be saved on each committed event"
+    );
+    saved
+}
+
+fn open_section(ui: &mut Ui, name: &str) {
+    assert_eq!(ui.state().scope, Scope::Details);
+    let index = ui
+        .state()
+        .sections()
+        .iter()
+        .position(|s| *s == name)
+        .unwrap();
+    let cursor = ui.state().section_cursor;
+    let code = if cursor < index {
+        KeyCode::Down
+    } else {
+        KeyCode::Up
+    };
+    for _ in 0..cursor.abs_diff(index) {
+        key(ui, code);
+    }
+    assert_eq!(ui.state().section_cursor, index);
+    key(ui, KeyCode::Enter);
+    assert_eq!(ui.state().scope, Scope::Section);
+    assert_eq!(ui.state().section_name(), name);
 }
 
 // Find real rendered cells rather than assuming widget geometry or dispatching a click message.
@@ -250,9 +383,22 @@ fn horizontal_arrows_switch_tabs_from_every_scope_and_reach_unnumbered_views() {
             for _ in 0..depth {
                 key(&mut ui, KeyCode::Enter);
             }
+            key(&mut ui, KeyCode::Down);
+            let navigation = tab_state(ui.state());
+            let selected = ui.state().scroll.selected;
             key(&mut ui, arrow);
             assert_eq!(ui.state().config.active_tab, expected);
             active_list_responds(&mut ui);
+            key(
+                &mut ui,
+                if arrow == KeyCode::Left {
+                    KeyCode::Right
+                } else {
+                    KeyCode::Left
+                },
+            );
+            assert_eq!(ui.state().config.active_tab, 2);
+            assert_tab_state(&ui, &navigation, selected);
         }
     }
     let mut ui = mount(numbered_views_config(12), None);
@@ -263,9 +409,20 @@ fn horizontal_arrows_switch_tabs_from_every_scope_and_reach_unnumbered_views() {
         assert_eq!(ui.state().config.active_tab, index);
     }
     key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Down);
+    let navigation = tab_state(ui.state());
+    let selected = ui.state().scroll.selected;
+    let epoch = ui.state().detail_epoch;
     key(&mut ui, KeyCode::Right);
     assert_eq!(ui.state().config.active_tab, 15);
-    assert_eq!(ui.state().scope, Scope::Details);
+    assert_tab_state(&ui, &navigation, selected);
+    assert_eq!(ui.state().detail_epoch, epoch);
+    key(&mut ui, KeyCode::Left);
+    assert_eq!(ui.state().config.active_tab, 14);
+    active_list_responds(&mut ui);
+    key(&mut ui, KeyCode::Right);
+    assert_eq!(ui.state().config.active_tab, 15);
+    assert_tab_state(&ui, &navigation, selected);
 }
 
 #[test]
@@ -348,67 +505,114 @@ fn missing_saved_view_numbers_preserve_the_current_list_detail_and_section() {
 }
 
 #[test]
-fn keyboard_tab_switches_leave_details_and_sections_for_an_active_list() {
-    let mut ui = mount(numbered_views_config(10), None);
-    for depth in 1..=2 {
+fn keyboard_tab_switches_restore_each_tabs_list_details_and_section() {
+    for depth in 0..=2 {
+        let mut ui = mount(numbered_views_config(10), None);
+        let mut visits = Vec::new();
         for (index, ch) in "DPIM1234567890".chars().enumerate() {
-            key(&mut ui, KeyCode::Char('I'));
-            key(&mut ui, KeyCode::Enter);
-            if depth == 2 {
-                key(&mut ui, KeyCode::Enter);
-            }
-            assert_eq!(
-                ui.state().scope,
-                if depth == 1 {
-                    Scope::Details
-                } else {
-                    Scope::Section
-                }
-            );
             key(&mut ui, KeyCode::Char(ch));
             assert_eq!(ui.state().config.active_tab, index, "key {ch}");
             active_list_responds(&mut ui);
+            for _ in 0..=index % 3 {
+                key(&mut ui, KeyCode::Down);
+            }
+            // Projects is a list whose Enter action opens a filtered Issues tab.
+            if index != 1 && depth > 0 {
+                key(&mut ui, KeyCode::Enter);
+                if depth == 2 {
+                    key(&mut ui, KeyCode::Enter);
+                }
+                key(&mut ui, KeyCode::Down);
+            }
+            visits.push((tab_state(ui.state()), ui.state().scroll.selected));
+        }
+        for (index, ch) in "DPIM1234567890"
+            .chars()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .enumerate()
+            .rev()
+        {
+            key(&mut ui, KeyCode::Char(ch));
+            assert_eq!(ui.state().config.active_tab, index);
+            let (expected, selected) = &visits[index];
+            assert_tab_state(&ui, expected, *selected);
+            let before = serde_json::to_value(&ui.state().config).unwrap();
+            let epoch = ui.state().detail_epoch;
+            let details = ui.state().details.as_ref().map(|d| d.item.clone());
+            let cached_traces = traces(ui.state());
+            let shortcuts = if ch.is_ascii_uppercase() {
+                vec![
+                    (ch, KeyMods::NONE),
+                    (ch, KeyMods::SHIFT),
+                    (ch.to_ascii_lowercase(), KeyMods::SHIFT),
+                ]
+            } else {
+                vec![(ch, KeyMods::NONE)]
+            };
+            for (ch, mods) in shortcuts {
+                modified(&mut ui, KeyCode::Char(ch), mods);
+                assert_tab_state(&ui, expected, *selected);
+                assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), before);
+                assert_eq!(
+                    ui.state().detail_epoch,
+                    epoch,
+                    "same-tab shortcuts are no-ops"
+                );
+                assert_eq!(ui.state().details.as_ref().map(|d| d.item.clone()), details);
+                assert_eq!(traces(ui.state()), cached_traces);
+            }
         }
     }
 }
 
 #[test]
-fn mouse_tab_switches_leave_details_and_sections_for_an_active_list() {
-    let mut ui = mount(numbered_views_config(2), None);
-    ui.set_viewport(Rect {
-        x: 0,
-        y: 0,
-        w: 160,
-        h: 30,
-    });
+fn mouse_tab_switches_restore_each_tabs_list_details_and_section() {
+    let labels = [
+        "Dashboard",
+        "Projects",
+        "Issues",
+        "Merge Requests",
+        "1 Queue01",
+        "2 Queue02",
+    ];
     for depth in 0..=2 {
-        for (index, label) in [
-            "Dashboard",
-            "Projects",
-            "Issues",
-            "Merge Requests",
-            "1 Queue01",
-            "2 Queue02",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            key(&mut ui, KeyCode::Char('I'));
-            for _ in 0..depth {
-                key(&mut ui, KeyCode::Enter);
-            }
-            assert_eq!(
-                ui.state().scope,
-                match depth {
-                    0 => Scope::List,
-                    1 => Scope::Details,
-                    _ => Scope::Section,
-                }
-            );
-            // The first occurrence is in the rendered header, not the breadcrumb below it.
+        let mut ui = mount(numbered_views_config(2), None);
+        ui.set_viewport(Rect {
+            x: 0,
+            y: 0,
+            w: 160,
+            h: 30,
+        });
+        let mut visits = Vec::new();
+        for (index, label) in labels.iter().enumerate() {
+            // The first occurrence is in the header, not the breadcrumb below it.
             click_text(&mut ui, label, 0);
             assert_eq!(ui.state().config.active_tab, index, "clicked {label}");
             active_list_responds(&mut ui);
+            key(&mut ui, KeyCode::Down);
+            if index != 1 && depth > 0 {
+                key(&mut ui, KeyCode::Enter);
+                if depth == 2 {
+                    key(&mut ui, KeyCode::Enter);
+                }
+                key(&mut ui, KeyCode::Down);
+            }
+            visits.push((tab_state(ui.state()), ui.state().scroll.selected));
+        }
+        for (index, label) in labels.iter().enumerate().rev() {
+            click_text(&mut ui, label, 0);
+            assert_eq!(ui.state().config.active_tab, index);
+            let (expected, selected) = &visits[index];
+            assert_tab_state(&ui, expected, *selected);
+            let before = serde_json::to_value(&ui.state().config).unwrap();
+            let epoch = ui.state().detail_epoch;
+            let cached_traces = traces(ui.state());
+            click_text(&mut ui, label, 0);
+            assert_tab_state(&ui, expected, *selected);
+            assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), before);
+            assert_eq!(ui.state().detail_epoch, epoch, "same-tab clicks are no-ops");
+            assert_eq!(traces(ui.state()), cached_traces);
         }
     }
 }
@@ -1002,10 +1206,128 @@ fn deleting_a_middle_saved_view_reindexes_filters_and_selections_without_overwri
 }
 
 #[test]
+fn deleting_a_saved_view_reindexes_navigation_and_caches_without_overwriting_its_neighbor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.toml");
+    let mut config = saved_views_config();
+    config.views[2].kind = ItemKind::MergeRequest;
+    // The cached and reloaded job panels must both overflow at the same viewport size.
+    let viewport = Rect {
+        x: 0,
+        y: 0,
+        w: 80,
+        h: 14,
+    };
+    let mut ui = mount_with_viewport(config, Some(&path), viewport);
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Down);
+    let dashboard = tab_state(ui.state());
+    let dashboard_selected = ui.state().scroll.selected;
+
+    key(&mut ui, KeyCode::Char('1'));
+    key(&mut ui, KeyCode::Enter);
+    open_section(&mut ui, "Fields");
+    key(&mut ui, KeyCode::Down);
+    key(&mut ui, KeyCode::Down);
+    let first = tab_state(ui.state());
+    let first_selected = ui.state().scroll.selected;
+    key(&mut ui, KeyCode::Char('3'));
+    key(&mut ui, KeyCode::Enter);
+    cache_finished_job(&mut ui, "Last view cached detail");
+    key(&mut ui, KeyCode::Down);
+    ui.dispatch(Msg::ContentScroll(4)).unwrap();
+    settle_layout(&mut ui);
+    assert_eq!(
+        ui.state().content_offset,
+        4,
+        "the fixture must support a real scroll offset"
+    );
+    let last = tab_state(ui.state());
+    let last_selected = ui.state().scroll.selected;
+    let last_traces = traces(ui.state());
+    assert!(last.list_offset > 0);
+    assert_eq!(last.field, 1);
+    persisted_tab(&ui, &path);
+
+    key(&mut ui, KeyCode::Char('2'));
+    key(&mut ui, KeyCode::Enter);
+    open_section(&mut ui, "Fields");
+    key(&mut ui, KeyCode::Down);
+    assert_ne!(ui.state().config.route, last.route);
+    let before = persisted_tab(&ui, &path);
+    palette_command(&mut ui, "Delete saved tab");
+    assert!(matches!(
+        dialog(&ui).kind,
+        DialogKind::Confirm(Confirmation::DeleteView(1))
+    ));
+    key(&mut ui, KeyCode::Esc);
+    assert_eq!(
+        serde_json::to_value(persisted(&ui, &path)).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+    palette_command(&mut ui, "Delete saved tab");
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().config.active_tab, 0);
+    assert_tab_state(&ui, &dashboard, dashboard_selected);
+    let saved = persisted_tab(&ui, &path);
+    assert_eq!(
+        saved
+            .views
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>(),
+        ["First", "Last"]
+    );
+    assert_eq!(saved.filters["5"], "state:opened");
+    assert_eq!(saved.selections["5"], last_selected);
+    assert_eq!(saved.selections["4"], first_selected);
+    assert_eq!(
+        serde_json::to_value(&saved.tab_states["5"]).unwrap(),
+        serde_json::to_value(&last).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&saved.tab_states["4"]).unwrap(),
+        serde_json::to_value(&first).unwrap()
+    );
+    assert!(!saved.filters.contains_key("6"));
+    assert!(!saved.selections.contains_key("6"));
+    assert!(!saved.tab_states.contains_key("6"));
+
+    key(&mut ui, KeyCode::Char('2'));
+    settle_layout(&mut ui);
+    assert_eq!(ui.state().tab_name(), "Last");
+    assert_tab_state(&ui, &last, last_selected);
+    assert_eq!(
+        ui.state().details.as_ref().unwrap().item.title,
+        "Last view cached detail"
+    );
+    assert_eq!(traces(ui.state()), last_traces);
+    key(&mut ui, KeyCode::Char('1'));
+    assert_tab_state(&ui, &first, first_selected);
+    persisted_tab(&ui, &path);
+    drop(ui);
+
+    let mut restarted = mount_with_viewport(Config::load(&path).unwrap(), Some(&path), viewport);
+    assert_tab_state(&restarted, &first, first_selected);
+    key(&mut restarted, KeyCode::Char('2'));
+    settle_layout(&mut restarted);
+    assert_tab_state(&restarted, &last, last_selected);
+    assert!(
+        !persisted_tab(&restarted, &path)
+            .tab_states
+            .contains_key("6")
+    );
+}
+
+#[test]
 fn deleting_the_last_saved_view_does_not_resurrect_its_selection_key() {
     let mut config = saved_views_config();
     config.active_tab = 6;
     let mut ui = mount(config, None);
+    key(&mut ui, KeyCode::Enter);
+    open_section(&mut ui, "Fields");
+    key(&mut ui, KeyCode::Down);
+    assert!(ui.state().config.tab_states.contains_key("6"));
     palette_command(&mut ui, "Delete saved tab");
     click_text(&mut ui, " Confirm ", 0);
     assert_eq!(ui.state().config.views.len(), 2);
@@ -1014,6 +1336,10 @@ fn deleting_the_last_saved_view_does_not_resurrect_its_selection_key() {
         !ui.state().config.selections.contains_key("6"),
         "switching away must not recreate the deleted tab's cursor"
     );
+    assert!(!ui.state().config.tab_states.contains_key("6"));
+    key(&mut ui, KeyCode::Char('1'));
+    key(&mut ui, KeyCode::Char('D'));
+    assert!(!ui.state().config.tab_states.contains_key("6"));
 }
 
 #[test]
@@ -1107,6 +1433,179 @@ fn mouse_project_and_work_rows_activate_the_clicked_identity() {
 }
 
 #[test]
+fn hiding_or_removing_a_project_invalidates_all_cached_tab_routes() {
+    for remove in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.toml");
+        let mut config = numbered_views_config(2);
+        config.views[0].kind = ItemKind::MergeRequest;
+        let project = config.projects[0].id;
+        let mut ui = mount(config, Some(&path));
+        for ch in ['M', '1'] {
+            key(&mut ui, KeyCode::Char(ch));
+            key(&mut ui, KeyCode::Enter);
+            assert_eq!(ui.state().config.route.as_ref().unwrap().project, project);
+            cache_finished_job(&mut ui, "Detail from a project being hidden");
+            persisted_tab(&ui, &path);
+        }
+        key(&mut ui, KeyCode::Char('2'));
+        let visible = ui
+            .state()
+            .visible_items()
+            .iter()
+            .position(|i| i.key.project != project)
+            .unwrap();
+        for _ in 0..visible {
+            key(&mut ui, KeyCode::Down);
+        }
+        key(&mut ui, KeyCode::Enter);
+        open_section(&mut ui, "Fields");
+        key(&mut ui, KeyCode::Down);
+        let valid_route = ui.state().config.route.clone().unwrap();
+        key(&mut ui, KeyCode::Char('P'));
+        key(&mut ui, KeyCode::Home);
+        assert_eq!(
+            ui.state().config.projects[ui.state().scroll.selected].id,
+            project
+        );
+        if remove {
+            palette_command(&mut ui, "Remove project from workspace");
+            assert!(
+                matches!(dialog(&ui).kind, DialogKind::Confirm(Confirmation::RemoveProject(id)) if id == project)
+            );
+            key(&mut ui, KeyCode::Enter);
+            assert!(ui.state().project(project).is_none());
+        } else {
+            key(&mut ui, KeyCode::Char(' '));
+            assert!(!ui.state().project(project).unwrap().visible);
+        }
+        let saved = persisted_tab(&ui, &path);
+        assert!(saved.tab_states.values().all(|tab| {
+            tab.route
+                .as_ref()
+                .is_none_or(|route| route.project != project)
+        }));
+        assert_eq!(saved.tab_states["5"].route.as_ref(), Some(&valid_route));
+        for ch in ['M', '1'] {
+            key(&mut ui, KeyCode::Char(ch));
+            active_list_responds(&mut ui);
+            assert!(ui.state().traces.is_empty());
+            assert!(ui.state().expanded.is_empty());
+            assert_eq!(ui.state().content_offset, 0);
+            assert!(
+                ui.state()
+                    .visible_items()
+                    .iter()
+                    .all(|i| i.key.project != project)
+            );
+            persisted_tab(&ui, &path);
+        }
+        drop(ui);
+        let mut restarted = mount(Config::load(&path).unwrap(), Some(&path));
+        active_list_responds(&mut restarted);
+        key(&mut restarted, KeyCode::Char('2'));
+        assert_eq!(restarted.state().config.route.as_ref(), Some(&valid_route));
+        assert_eq!(restarted.state().scope, Scope::Section);
+        assert_eq!(restarted.state().config.field, 1);
+        if !remove {
+            key(&mut restarted, KeyCode::Char('P'));
+            key(&mut restarted, KeyCode::Home);
+            key(&mut restarted, KeyCode::Char(' '));
+            assert!(restarted.state().project(project).unwrap().visible);
+            for ch in ['M', '1'] {
+                key(&mut restarted, KeyCode::Char(ch));
+                assert_eq!(restarted.state().scope, Scope::List);
+                assert!(
+                    restarted.state().config.route.is_none(),
+                    "showing a project must not resurrect invalidated routes"
+                );
+                assert!(restarted.state().details.is_none());
+                assert!(restarted.state().traces.is_empty());
+                assert!(restarted.state().expanded.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn restart_clears_active_and_inactive_routes_for_hidden_or_removed_projects() {
+    for remove in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.toml");
+        let mut config = numbered_views_config(2);
+        config.views[0].kind = ItemKind::MergeRequest;
+        let project = config.projects[0].id;
+        let items = demo::items();
+        let invalid = items
+            .iter()
+            .find(|i| i.key.project == project && i.key.kind == ItemKind::MergeRequest)
+            .unwrap()
+            .key
+            .clone();
+        let valid = items
+            .iter()
+            .find(|i| i.key.project != project && i.key.kind == ItemKind::Issue)
+            .unwrap()
+            .key
+            .clone();
+        let job = demo::details(&invalid).jobs[0].id;
+        let stale = TabState {
+            route: Some(invalid.clone()),
+            section: Some(3),
+            field: 1,
+            section_cursor: 3,
+            content_offset: 4,
+            expanded: BTreeSet::from([job]),
+            ..TabState::default()
+        };
+        config.active_tab = 3;
+        config.route = Some(invalid);
+        config.section = stale.section;
+        config.field = stale.field;
+        config.tab_states.insert("3".into(), stale.clone());
+        config.tab_states.insert("4".into(), stale);
+        config.tab_states.insert(
+            "5".into(),
+            TabState {
+                route: Some(valid.clone()),
+                section: Some(0),
+                field: 2,
+                ..TabState::default()
+            },
+        );
+        if remove {
+            config.projects.remove(0);
+        } else {
+            config.projects[0].visible = false;
+        }
+        config.save(&path).unwrap();
+        let mut ui = mount(Config::load(&path).unwrap(), Some(&path));
+        assert_eq!(ui.state().config.active_tab, 3);
+        active_list_responds(&mut ui);
+        assert!(ui.state().expanded.is_empty());
+        assert!(ui.state().traces.is_empty());
+        assert_eq!(ui.state().content_offset, 0);
+        key(&mut ui, KeyCode::Char('1'));
+        active_list_responds(&mut ui);
+        assert!(ui.state().expanded.is_empty());
+        assert!(ui.state().traces.is_empty());
+        assert_eq!(ui.state().content_offset, 0);
+        let saved = persisted_tab(&ui, &path);
+        assert!(saved.tab_states.values().all(|tab| {
+            tab.route
+                .as_ref()
+                .is_none_or(|route| route.project != project)
+        }));
+        key(&mut ui, KeyCode::Char('2'));
+        assert_eq!(ui.state().config.route.as_ref(), Some(&valid));
+        assert_eq!(ui.state().scope, Scope::Section);
+        assert_eq!(ui.state().config.section, Some(0));
+        assert_eq!(ui.state().config.field, 2);
+        assert_eq!(ui.state().details.as_ref().unwrap().item.key, valid);
+    }
+}
+
+#[test]
 fn a_list_request_started_before_a_successful_write_cannot_replace_newer_rows() {
     let mut ui = mount(config(), None);
     let old_epoch = ui.state().list_epoch;
@@ -1187,6 +1686,168 @@ fn traces(state: &State) -> BTreeMap<u64, (String, u64, bool, Option<String>)> {
         .iter()
         .map(|(&id, t)| (id, (t.text.clone(), t.offset, t.finished, t.error.clone())))
         .collect()
+}
+
+fn cache_finished_job(ui: &mut Ui, marker: &str) -> u64 {
+    let route = ui.state().config.route.clone().unwrap();
+    let epoch = ui.state().detail_epoch;
+    let mut details = ui.state().details.clone().unwrap();
+    details.warnings.clear();
+    details.item.title = marker.into();
+    let index = details.jobs.iter().position(|j| !j.running()).unwrap();
+    let job = details.jobs[index].id;
+    ui.dispatch(Msg::DetailsLoaded(
+        route.clone(),
+        epoch,
+        Ok(Box::new(details)),
+    ))
+    .unwrap();
+    open_section(ui, "Jobs");
+    for _ in 0..index {
+        key(ui, KeyCode::Down);
+    }
+    key(ui, KeyCode::Enter);
+    assert!(ui.state().expanded.contains(&job));
+    let text = format!("{marker} λ cached trace\n").repeat(40);
+    let offset = text.len() as u64;
+    ui.dispatch(Msg::TraceLoaded(
+        route.clone(),
+        epoch,
+        job,
+        true,
+        Ok(TraceChunk {
+            text,
+            next_offset: offset,
+            reset: true,
+        }),
+    ))
+    .unwrap();
+    ui.dispatch(Msg::TraceLoaded(
+        route,
+        epoch,
+        job,
+        true,
+        Ok(TraceChunk {
+            text: String::new(),
+            next_offset: offset,
+            reset: false,
+        }),
+    ))
+    .unwrap();
+    assert!(ui.state().traces[&job].finished);
+    job
+}
+
+#[test]
+fn tab_switches_restore_independent_caches_and_reject_responses_from_previous_visits() {
+    let mut config = numbered_views_config(1);
+    config.views[0].kind = ItemKind::MergeRequest;
+    let mut ui = mount(config, None);
+    key(&mut ui, KeyCode::Char('M'));
+    key(&mut ui, KeyCode::Enter);
+    let job = cache_finished_job(&mut ui, "Built-in cached detail");
+    ui.dispatch(Msg::ContentScroll(3)).unwrap();
+    let builtin = tab_state(ui.state());
+    let builtin_selected = ui.state().scroll.selected;
+    let builtin_traces = traces(ui.state());
+    let old_epoch = ui.state().detail_epoch;
+    let route = ui.state().config.route.clone().unwrap();
+
+    key(&mut ui, KeyCode::Char('1'));
+    active_list_responds(&mut ui);
+    assert!(ui.state().traces.is_empty());
+    assert!(ui.state().expanded.is_empty());
+    assert_eq!(ui.state().content_offset, 0);
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().config.route.as_ref(), Some(&route));
+    assert_eq!(cache_finished_job(&mut ui, "Saved tab cached detail"), job);
+    ui.dispatch(Msg::ContentScroll(5)).unwrap();
+    let saved = tab_state(ui.state());
+    let saved_selected = ui.state().scroll.selected;
+    let saved_traces = traces(ui.state());
+    assert_ne!(
+        builtin_traces, saved_traces,
+        "even the same route has per-tab caches"
+    );
+    let saved_epoch = ui.state().detail_epoch;
+    assert!(saved_epoch > old_epoch);
+
+    key(&mut ui, KeyCode::Char('M'));
+    assert_tab_state(&ui, &builtin, builtin_selected);
+    assert_eq!(
+        ui.state().details.as_ref().unwrap().item.title,
+        "Built-in cached detail"
+    );
+    assert_eq!(traces(ui.state()), builtin_traces);
+    let epoch = ui.state().detail_epoch;
+    assert!(
+        epoch > saved_epoch,
+        "restoring a cached route starts a new request generation"
+    );
+    // Only request bookkeeping is synthetic; route changes and epochs came from tab navigation.
+    ui.state_mut().detail_pending = Some((route.clone(), epoch));
+    ui.state_mut().trace_pending.insert((epoch, job));
+    for stale_epoch in [old_epoch, saved_epoch] {
+        let mut stale = demo::details(&route);
+        stale.item.title = "STALE RESTORED DETAIL".into();
+        ui.dispatch(Msg::DetailsLoaded(
+            route.clone(),
+            stale_epoch,
+            Ok(Box::new(stale)),
+        ))
+        .unwrap();
+        ui.dispatch(Msg::DetailsLoaded(
+            route.clone(),
+            stale_epoch,
+            Err("stale detail failure".into()),
+        ))
+        .unwrap();
+        ui.dispatch(Msg::TraceLoaded(
+            route.clone(),
+            stale_epoch,
+            job,
+            true,
+            Ok(TraceChunk {
+                text: "STALE RESTORED TRACE".into(),
+                next_offset: 1,
+                reset: true,
+            }),
+        ))
+        .unwrap();
+        ui.dispatch(Msg::TraceLoaded(
+            route.clone(),
+            stale_epoch,
+            job,
+            true,
+            Err("stale trace failure".into()),
+        ))
+        .unwrap();
+        assert_tab_state(&ui, &builtin, builtin_selected);
+        assert_eq!(
+            ui.state().details.as_ref().unwrap().item.title,
+            "Built-in cached detail"
+        );
+        assert_eq!(traces(ui.state()), builtin_traces);
+        assert_eq!(ui.state().detail_pending, Some((route.clone(), epoch)));
+        assert!(ui.state().trace_pending.contains(&(epoch, job)));
+        assert!(ui.state().error.is_none());
+        assert_eq!(ui.state().failures, 0);
+        assert_eq!(ui.state().blocked_until, Duration::ZERO);
+    }
+    key(&mut ui, KeyCode::Char('M'));
+    click_text(&mut ui, "Merge Requests", 0);
+    assert_tab_state(&ui, &builtin, builtin_selected);
+    assert_eq!(traces(ui.state()), builtin_traces);
+    assert_eq!(ui.state().detail_epoch, epoch);
+    assert_eq!(ui.state().detail_pending, Some((route, epoch)));
+    assert!(ui.state().trace_pending.contains(&(epoch, job)));
+    key(&mut ui, KeyCode::Char('1'));
+    assert_tab_state(&ui, &saved, saved_selected);
+    assert_eq!(
+        ui.state().details.as_ref().unwrap().item.title,
+        "Saved tab cached detail"
+    );
+    assert_eq!(traces(ui.state()), saved_traces);
 }
 
 #[test]
@@ -1352,6 +2013,160 @@ fn a_finished_job_is_not_marked_drained_until_a_no_progress_eof_chunk() {
         "a drained completed job must not be fetched again, even in demo mode"
     );
     assert_eq!(ui.state().traces[&job].offset, text.len() as u64);
+}
+
+#[test]
+fn every_tabs_navigation_persists_immediately_and_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.toml");
+    let mut config = numbered_views_config(3);
+    config.views[1].kind = ItemKind::MergeRequest;
+    // Keep Description and Jobs scrollable before and after restart, without relying on cached text.
+    let viewport = Rect {
+        x: 0,
+        y: 0,
+        w: 80,
+        h: 14,
+    };
+    let mut ui = mount_with_viewport(config, Some(&path), viewport);
+    let mut visits = Vec::new();
+    for (index, ch) in "DPIM123".chars().enumerate() {
+        key(&mut ui, KeyCode::Char(ch));
+        key(&mut ui, KeyCode::End);
+        persisted_tab(&ui, &path);
+        key(&mut ui, KeyCode::Up);
+        persisted_tab(&ui, &path);
+        if index != 1 && index != 6 {
+            assert!(ui.state().scroll.offset > 0);
+            key(&mut ui, KeyCode::Enter);
+            persisted_tab(&ui, &path);
+            match index {
+                0 | 5 => {
+                    // Details scope remembers its highlighted section without opening it.
+                    for _ in 0..=index % 3 {
+                        key(&mut ui, KeyCode::Down);
+                        persisted_tab(&ui, &path);
+                    }
+                    assert_eq!(ui.state().config.section, None);
+                }
+                2 => {
+                    open_section(&mut ui, "Fields");
+                    persisted_tab(&ui, &path);
+                    for _ in 0..2 {
+                        key(&mut ui, KeyCode::Down);
+                        persisted_tab(&ui, &path);
+                    }
+                    assert_eq!(ui.state().config.field, 2);
+                }
+                3 => {
+                    open_section(&mut ui, "Jobs");
+                    persisted_tab(&ui, &path);
+                    key(&mut ui, KeyCode::Down);
+                    persisted_tab(&ui, &path);
+                    let job = ui.state().details.as_ref().unwrap().jobs[1].id;
+                    key(&mut ui, KeyCode::Enter);
+                    assert!(
+                        persisted_tab(&ui, &path).tab_states["3"]
+                            .expanded
+                            .contains(&job)
+                    );
+                    // Exercise the scroll callback without depending on detail widget geometry.
+                    ui.dispatch(Msg::ContentScroll(3)).unwrap();
+                    settle_layout(&mut ui);
+                    assert_eq!(persisted_tab(&ui, &path).tab_states["3"].content_offset, 3);
+                }
+                4 => {
+                    open_section(&mut ui, "Description");
+                    settle_layout(&mut ui);
+                    persisted_tab(&ui, &path);
+                    key(&mut ui, KeyCode::Down);
+                    assert_eq!(persisted_tab(&ui, &path).tab_states["4"].content_offset, 1);
+                    ui.dispatch(Msg::ContentScroll(4)).unwrap();
+                    settle_layout(&mut ui);
+                    assert_eq!(persisted_tab(&ui, &path).tab_states["4"].content_offset, 4);
+                }
+                _ => unreachable!(),
+            }
+        }
+        visits.push((tab_state(ui.state()), ui.state().scroll.selected));
+    }
+    key(&mut ui, KeyCode::Char('D'));
+    let saved = persisted_tab(&ui, &path);
+    for (index, (expected, selected)) in visits.iter().enumerate() {
+        let tab = index.to_string();
+        assert_eq!(saved.selections[&tab], *selected);
+        assert_eq!(
+            serde_json::to_value(&saved.tab_states[&tab]).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+    drop(ui);
+
+    let mut restarted = mount_with_viewport(Config::load(&path).unwrap(), Some(&path), viewport);
+    assert_tab_state(&restarted, &visits[0].0, visits[0].1);
+    for (index, ch) in "DPIM123".chars().enumerate() {
+        key(&mut restarted, KeyCode::Char(ch));
+        settle_layout(&mut restarted);
+        assert_eq!(restarted.state().config.active_tab, index);
+        assert_tab_state(&restarted, &visits[index].0, visits[index].1);
+        persisted_tab(&restarted, &path);
+    }
+}
+
+#[test]
+fn restored_tab_uses_selections_for_its_list_cursor_not_the_detail_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.toml");
+    let mut config = config();
+    let route = demo::items()
+        .into_iter()
+        .find(|i| i.key.kind == ItemKind::Issue)
+        .unwrap()
+        .key;
+    let expected = TabState {
+        route: Some(route.clone()),
+        section_cursor: 2,
+        ..TabState::default()
+    };
+    config.active_tab = 2;
+    config.route = Some(route.clone());
+    config.selections.insert("2".into(), 1);
+    config.tab_states.insert("2".into(), expected.clone());
+    config.save(&path).unwrap();
+    let mut ui = mount(Config::load(&path).unwrap(), Some(&path));
+    assert_tab_state(&ui, &expected, 1);
+    assert_ne!(selected_key(ui.state()), route);
+    key(&mut ui, KeyCode::Char('D'));
+    key(&mut ui, KeyCode::Char('I'));
+    assert_tab_state(&ui, &expected, 1);
+    assert_eq!(persisted_tab(&ui, &path).selections["2"], 1);
+}
+
+#[test]
+fn list_scroll_callbacks_persist_offsets_for_builtin_and_saved_tabs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.toml");
+    let mut ui = mount(numbered_views_config(1), Some(&path));
+    ui.set_viewport(Rect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 14,
+    });
+    let mut visits = Vec::new();
+    for ch in "DPIM1".chars() {
+        key(&mut ui, KeyCode::Char(ch));
+        // List scroll messages carry cell offsets; navigation stores row offsets.
+        ui.dispatch(Msg::ListScroll(6)).unwrap();
+        assert!(ui.state().scroll.offset > 0);
+        persisted_tab(&ui, &path);
+        visits.push((tab_state(ui.state()), ui.state().scroll.selected));
+    }
+    for (index, ch) in "DPIM1".chars().enumerate() {
+        key(&mut ui, KeyCode::Char(ch));
+        assert_tab_state(&ui, &visits[index].0, visits[index].1);
+        persisted_tab(&ui, &path);
+    }
 }
 
 #[test]

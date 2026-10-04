@@ -1,5 +1,8 @@
 use super::*;
-use crate::{config::SavedView, demo};
+use crate::{
+    config::{SavedView, TabState},
+    demo,
+};
 use tui_lipan::{CommandLink, TaskPolicy};
 
 impl Component for Cronk {
@@ -18,6 +21,16 @@ impl Component for Cronk {
         }) {
             config.route = None;
             config.section = None;
+        }
+        prune_tab_routes(&mut config);
+        let saved = config
+            .tab_states
+            .get(&config.active_tab.to_string())
+            .cloned();
+        if let Some(tab) = &saved {
+            config.route = tab.route.clone();
+            config.section = tab.section;
+            config.field = tab.field;
         }
         let is_demo = self.api.is_none();
         let scope = if config.route.is_some() {
@@ -39,17 +52,20 @@ impl Component for Cronk {
             .get(&config.active_tab.to_string())
             .copied()
             .unwrap_or(0);
-        let section_cursor = config.section.unwrap_or(0).min(
-            if config
-                .route
-                .as_ref()
-                .is_some_and(|k| k.kind == ItemKind::MergeRequest)
-            {
-                5
-            } else {
-                2
-            },
-        );
+        let section_cursor = saved
+            .as_ref()
+            .map_or(config.section.unwrap_or(0), |tab| tab.section_cursor)
+            .min(
+                if config
+                    .route
+                    .as_ref()
+                    .is_some_and(|k| k.kind == ItemKind::MergeRequest)
+                {
+                    5
+                } else {
+                    2
+                },
+            );
         State {
             config,
             demo: is_demo,
@@ -63,12 +79,16 @@ impl Component for Cronk {
             details,
             scroll: BoundaryScroll {
                 selected,
-                offset: selected.saturating_sub(2),
+                offset: saved
+                    .as_ref()
+                    .map_or(selected.saturating_sub(2), |tab| tab.list_offset),
             },
             section_cursor,
-            content_offset: 0,
+            content_offset: saved.as_ref().map_or(0, |tab| tab.content_offset),
+            reveal_content: saved.is_none(),
+            tab_cache: BTreeMap::new(),
             traces: HashMap::new(),
-            expanded: HashSet::new(),
+            expanded: saved.map_or_else(HashSet::new, |tab| tab.expanded.into_iter().collect()),
             dialog: None,
             status: if is_demo {
                 "Demo workspace · no requests or remote writes".into()
@@ -385,7 +405,10 @@ impl Component for Cronk {
                 }
             }
             Msg::Tab(index) => {
-                if index >= ctx.state.tab_names().len() || ctx.state.dialog.is_some() {
+                if index >= ctx.state.tab_names().len()
+                    || index == ctx.state.config.active_tab
+                    || ctx.state.dialog.is_some()
+                {
                     return Update::none();
                 }
                 self.switch_tab(ctx, index);
@@ -423,6 +446,7 @@ impl Component for Cronk {
                                 .cloned()
                             {
                                 self.switch_tab(ctx, 2);
+                                self.reset_detail(ctx);
                                 ctx.state.config.filters.insert(
                                     "2".into(),
                                     format!("project:\"{}\"", project.path.replace('"', "")),
@@ -441,6 +465,7 @@ impl Component for Cronk {
                         }
                     }
                     Scope::Details => {
+                        ctx.state.reveal_content = true;
                         ctx.state.scope = Scope::Section;
                         ctx.state.config.section = Some(ctx.state.section_cursor);
                         ctx.state.config.field = 0;
@@ -506,6 +531,7 @@ impl Component for Cronk {
             }
             Msg::Section(index) => {
                 if index < ctx.state.sections().len() {
+                    ctx.state.reveal_content = true;
                     ctx.state.section_cursor = index;
                     ctx.state.scope = Scope::Section;
                     ctx.state.config.section = Some(index);
@@ -520,7 +546,12 @@ impl Component for Cronk {
                 self.edit_field(ctx);
             }
             Msg::ContentScroll(offset) => {
-                ctx.state.content_offset = offset;
+                if ctx.state.content_offset != offset {
+                    ctx.state.content_offset = offset;
+                    if !self.persist(ctx) {
+                        return Update::full();
+                    }
+                }
                 return Update::none();
             }
             Msg::ListScroll(_) | Msg::ListViewportChanged => {
@@ -568,6 +599,7 @@ impl Component for Cronk {
                 if !ctx.state.expanded.remove(&id) {
                     ctx.state.expanded.insert(id);
                 }
+                self.persist(ctx);
                 ctx.link().send(Msg::LoadTraces);
             }
             Msg::Action(action) => return self.action(ctx, action),
@@ -782,7 +814,17 @@ impl Cronk {
         ctx.state
             .config
             .selections
-            .insert(key, ctx.state.scroll.selected);
+            .insert(key.clone(), ctx.state.scroll.selected);
+        let tab = navigation(&ctx.state);
+        ctx.state.config.tab_states.insert(key, tab);
+        prune_tab_routes(&mut ctx.state.config);
+        let config = &ctx.state.config;
+        ctx.state.tab_cache.retain(|key, _| {
+            config
+                .tab_states
+                .get(key)
+                .is_some_and(|tab| tab.route.is_some())
+        });
         if let Some(path) = &self.path
             && let Err(error) = ctx.state.config.save(path)
         {
@@ -917,37 +959,93 @@ impl Cronk {
     }
 
     fn switch_tab(&self, ctx: &mut Context<Self>, index: usize) {
+        if index == ctx.state.config.active_tab {
+            return;
+        }
         let key = ctx.state.tab_key();
+        let tab = navigation(&ctx.state);
+        ctx.state.config.tab_states.insert(key.clone(), tab);
         ctx.state
             .config
             .selections
-            .insert(key, ctx.state.scroll.selected);
+            .insert(key.clone(), ctx.state.scroll.selected);
+        let cache = TabCache {
+            details: ctx.state.details.take(),
+            traces: std::mem::take(&mut ctx.state.traces),
+            next_details: ctx.state.next_details,
+            next_traces: ctx.state.next_traces,
+        };
+        ctx.state.tab_cache.insert(key, cache);
         ctx.state.config.active_tab = index;
-        ctx.state.config.route = None;
-        ctx.state.config.section = None;
-        ctx.state.scope = Scope::List;
-        ctx.state.detail_epoch += 1;
-        ctx.state.detail_pending = None;
-        ctx.state.details = None;
-        ctx.state.traces.clear();
-        ctx.state.expanded.clear();
-        ctx.state.content_offset = 0;
-        ctx.state.section_cursor = 0;
-        let selected = ctx
+        let key = ctx.state.tab_key();
+        let selected = ctx.state.config.selections.get(&key).copied().unwrap_or(0);
+        let tab = ctx
             .state
             .config
-            .selections
-            .get(&ctx.state.tab_key())
-            .copied()
-            .unwrap_or(0);
+            .tab_states
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| TabState {
+                list_offset: selected.saturating_sub(2),
+                ..TabState::default()
+            });
+        let cache = ctx.state.tab_cache.remove(&key).unwrap_or_default();
+        ctx.state.config.route = tab.route;
+        ctx.state.config.section = tab.section;
+        ctx.state.config.field = tab.field;
+        ctx.state.scope = if ctx.state.config.route.is_none() {
+            Scope::List
+        } else if ctx.state.config.section.is_some() {
+            Scope::Section
+        } else {
+            Scope::Details
+        };
+        // A response from a previous visit must not overwrite the restored cache.
+        ctx.state.detail_epoch += 1;
+        ctx.state.detail_pending = None;
+        ctx.state.trace_pending.clear();
+        ctx.state.details = cache.details;
+        ctx.state.traces = cache.traces;
+        ctx.state.next_details = cache.next_details;
+        ctx.state.next_traces = cache.next_traces;
+        ctx.state.expanded = tab.expanded.into_iter().collect();
+        ctx.state.content_offset = tab.content_offset;
+        ctx.state.section_cursor = tab.section_cursor.min(ctx.state.sections().len() - 1);
+        ctx.state.reveal_content = false;
         ctx.state.scroll = BoundaryScroll {
             selected,
-            offset: selected.saturating_sub(2),
+            offset: tab.list_offset,
         };
-        self.normalize(ctx);
+        // Avoid discarding a restored cursor while the first live list is still loading.
+        if self.api.is_none() || !ctx.state.items.is_empty() || index == 1 {
+            self.normalize(ctx);
+        }
+        if ctx.state.config.route.is_some() {
+            if ctx.state.details.is_none() || ctx.elapsed() >= ctx.state.next_details {
+                ctx.link().send(Msg::LoadDetails);
+            } else if ctx.elapsed() >= ctx.state.next_traces {
+                ctx.link().send(Msg::LoadTraces);
+            }
+        }
+    }
+
+    fn reset_detail(&self, ctx: &mut Context<Self>) {
+        ctx.state.config.route = None;
+        ctx.state.config.section = None;
+        ctx.state.config.field = 0;
+        ctx.state.scope = Scope::List;
+        ctx.state.details = None;
+        ctx.state.detail_epoch += 1;
+        ctx.state.detail_pending = None;
+        ctx.state.trace_pending.clear();
+        ctx.state.traces.clear();
+        ctx.state.expanded.clear();
+        ctx.state.section_cursor = 0;
+        ctx.state.content_offset = 0;
     }
 
     fn open_item(&self, ctx: &mut Context<Self>, key: ItemKey) {
+        ctx.state.reveal_content = true;
         ctx.state.config.route = Some(key.clone());
         ctx.state.config.section = None;
         ctx.state.scope = Scope::Details;
@@ -967,6 +1065,7 @@ impl Cronk {
     }
 
     fn move_selection(&self, ctx: &mut Context<Self>, delta: isize) {
+        ctx.state.reveal_content = true;
         match ctx.state.scope {
             Scope::List => {
                 let len = if ctx.state.config.active_tab == 1 {
@@ -1386,6 +1485,8 @@ impl Cronk {
                     let removed = index + 4;
                     shift_tab_map(&mut ctx.state.config.filters, removed);
                     shift_tab_map(&mut ctx.state.config.selections, removed);
+                    shift_tab_map(&mut ctx.state.config.tab_states, removed);
+                    shift_tab_map(&mut ctx.state.tab_cache, removed);
                 }
                 self.close_dialog(ctx);
                 self.persist(ctx);
@@ -1475,6 +1576,50 @@ impl Cronk {
             ))
         }))
     }
+}
+
+fn navigation(state: &State) -> TabState {
+    TabState {
+        route: state.config.route.clone(),
+        section: state.config.section,
+        field: state.config.field,
+        section_cursor: state.section_cursor,
+        list_offset: state.scroll.offset,
+        content_offset: state.content_offset,
+        expanded: state.expanded.iter().copied().collect(),
+    }
+}
+
+fn prune_tab_routes(config: &mut Config) {
+    config.tab_states.retain(|key, tab| {
+        if !key
+            .parse::<usize>()
+            .is_ok_and(|index| index < 4 + config.views.len())
+        {
+            return false;
+        }
+        if tab.route.as_ref().is_some_and(|route| {
+            !config
+                .projects
+                .iter()
+                .any(|p| p.id == route.project && p.visible)
+        }) {
+            *tab = TabState {
+                list_offset: tab.list_offset,
+                ..TabState::default()
+            };
+        }
+        if let Some(route) = &tab.route {
+            let last = if route.kind == ItemKind::MergeRequest {
+                5
+            } else {
+                2
+            };
+            tab.section = tab.section.map(|section| section.min(last));
+            tab.section_cursor = tab.section_cursor.min(last);
+        }
+        true
+    });
 }
 
 fn tab_shortcut(key: KeyEvent) -> Option<usize> {

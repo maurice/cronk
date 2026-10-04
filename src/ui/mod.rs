@@ -7,7 +7,7 @@ pub use completion::Completion;
 use crate::{config::Config, filter::Query, gitlab::GitLab, model::*, scroll::BoundaryScroll};
 use std::result::Result;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     time::Duration,
 };
@@ -36,6 +36,8 @@ pub struct State {
     pub scroll: BoundaryScroll,
     pub section_cursor: usize,
     pub content_offset: usize,
+    pub reveal_content: bool,
+    pub(super) tab_cache: BTreeMap<String, TabCache>,
     pub traces: HashMap<u64, Trace>,
     pub expanded: HashSet<u64>,
     pub dialog: Option<Dialog>,
@@ -56,6 +58,14 @@ pub struct State {
     pub tick: u64,
     pub lookup_epoch: u64,
     pub lookup_inflight: Option<u64>,
+}
+
+#[derive(Default)]
+pub(super) struct TabCache {
+    details: Option<Details>,
+    traces: HashMap<u64, Trace>,
+    next_details: Duration,
+    next_traces: Duration,
 }
 
 #[derive(Default)]

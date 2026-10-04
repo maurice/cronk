@@ -1039,26 +1039,26 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
         ));
     }
     content.push(metadata("Web URL", details.item.web_url.clone(), colors));
-    Element::from(
-        ScrollView::new()
-            .virtualize(false)
-            .offset(ctx.state.content_offset)
-            .reveal_key(format!("edit-field-{}", ctx.state.config.field))
-            .scroll_keys(ScrollKeymap::NONE)
-            .focusable(false)
-            .tab_stop(false)
-            .scrollbar(true)
-            .scrollbar_config(vertical_scrollbar(colors))
-            .padding(content_padding(2))
-            .smooth_wheel_scroll(false)
-            .on_scroll_to(ctx.link().callback(Msg::ContentScroll))
-            .on_viewport_change(
-                ctx.link()
-                    .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
-            )
-            .children(content),
-    )
-    .key(format!("fields-{}", item_key(&details.item.key)))
+    let mut scroll = ScrollView::new()
+        .virtualize(false)
+        .offset(ctx.state.content_offset)
+        .scroll_keys(ScrollKeymap::NONE)
+        .focusable(false)
+        .tab_stop(false)
+        .scrollbar(true)
+        .scrollbar_config(vertical_scrollbar(colors))
+        .padding(content_padding(2))
+        .smooth_wheel_scroll(false)
+        .on_scroll_to(ctx.link().callback(Msg::ContentScroll))
+        .on_viewport_change(
+            ctx.link()
+                .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
+        )
+        .children(content);
+    if ctx.state.reveal_content {
+        scroll = scroll.reveal_key(format!("edit-field-{}", ctx.state.config.field));
+    }
+    Element::from(scroll).key(format!("fields-{}", item_key(&details.item.key)))
 }
 
 fn note_view(note: &Note, colors: Colors) -> Element {
@@ -1322,7 +1322,9 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
                 .callback(|event: ScrollViewportEvent| Msg::ContentScroll(event.offset)),
         )
         .children(content);
-    if let Some(job) = details.jobs.get(ctx.state.config.field) {
+    if ctx.state.reveal_content
+        && let Some(job) = details.jobs.get(ctx.state.config.field)
+    {
         scroll = scroll.reveal_key(format!("job-{}", job.id));
     }
     Element::from(scroll).key(format!("jobs-{}", item_key(&details.item.key)))

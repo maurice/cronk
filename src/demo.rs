@@ -260,7 +260,9 @@ pub fn items() -> Vec<WorkItem> {
                     Vec::new()
                 },
                 milestone: "Demo milestone · Constellation 0.4".into(),
+                milestone_id: Some(401),
                 iteration: format!("Demo iteration {} · predictable concurrency", 12 + index),
+                iteration_id: Some(1200 + index as u64),
                 source_branch: if mr {
                     format!(
                         "demo/{}/{}",

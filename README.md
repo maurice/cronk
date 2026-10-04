@@ -38,7 +38,7 @@ cargo run --locked
 
 Create a personal access token with `read_api` for browsing, or `api` for editing, posting, creating issues/MRs, and retrying jobs. Your account must also have the required project permissions. Do not put the token in a command argument or the TOML file. `token_env` can name a different environment variable.
 
-Open **Ctrl+P → Add existing GitLab project**. Enter its numeric ID or full `group/subgroup/project` path and an optional short alias. This registers an existing project locally; it does not create a project on GitLab. Use separate `--config path/to/workspace.toml` files for different hosts. `--host` / `GITLAB_URL` cannot silently repoint a populated workspace to another host.
+Open **Ctrl+P → Add existing GitLab project**. Search by project name, choose a suggestion, and optionally set a short alias. A numeric ID or full `group/subgroup/project` path also works. This registers an existing project locally; it does not create a project on GitLab. Use separate `--config path/to/workspace.toml` files for different hosts. `--host` / `GITLAB_URL` cannot silently repoint a populated workspace to another host.
 
 Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTTPS and native system certificate roots are used; install your company CA into the system trust store. There is deliberately no insecure-TLS switch. Redirects are rejected rather than forwarding credentials. HTTP is permitted only for loopback development/test servers.
 
@@ -78,6 +78,16 @@ Overflowing lists, detail panes, dialogs, and multiline editors show a theme-col
 The Dashboard shows your open authored, assigned, or requested-review work. It orders failed pipelines, unresolved discussions, passing non-draft review candidates, other MRs, then issues. A review candidate is a hint, **not** a claim that approvals, mergeability, or company policy checks are satisfied. Enter opens the real detail while preserving the Dashboard as the return destination.
 
 Issues have Fields, Description, and Activity scopes. MRs have Fields, Description, Pipeline, Jobs, Discussions, and Changes. Project rows open a project-filtered Issues list; the visibility checkbox works independently.
+
+## Name-based field completion
+
+Assignees, reviewers, milestones, and iterations suggest GitLab matches as you type. Use **↑ / ↓** to choose, **Enter** to insert a suggestion, then **Enter** again to save the form. Clicking a suggestion only inserts it; it never submits. **Tab / Shift+Tab** still switch fields and **Esc** cancels the editor. Press an arrow key to open suggestions without changing the text.
+
+For assignees and reviewers, separate people with commas: `@alex, Sam`. Each lookup uses the trimmed token at the caret after the previous comma, so spaces around entries are fine. Accepting a suggestion replaces only that token, leaving the other people untouched. Suggestions show display names and usernames; accepted people use unambiguous `@username` tokens. Milestones and iterations are single-valued and may contain commas in their names. Existing assignments retain their IDs behind their readable values; an empty field clears the assignment. Unresolved names must be chosen from suggestions before saving. Numeric IDs remain available as a fallback.
+
+Searches are debounced for **300 ms**, with at most one lookup request in flight; obsolete responses cannot replace newer results. Each request fetches at most the first **20 matches**, and up to 32 queries are cached per field for the lifetime of the dialog. Refine your search to find more specific matches. Project members are searched by name/username; milestone and iteration lookups include ancestor groups. Untitled, automatically scheduled iterations show their date range and can be searched by cadence title where supported by GitLab. Lookup errors and rate limits retain your draft.
+
+New issue/MR forms suggest projects from your workspace by alias or path. **Add existing project** searches your GitLab memberships. Demo mode uses local fictional matches and makes no lookup requests.
 
 ## Pipelines without tab switching
 
@@ -145,7 +155,7 @@ No background service, telemetry, third-party data service, or agent invocation 
 
 ## Current limits
 
-- **Not every GitLab field/filter is exposed.** Editors cover title, description, labels, state, assignee IDs, milestone ID, issue iteration ID, MR target branch, and reviewer IDs. People/iteration/milestone autocomplete is not implemented; numeric IDs are required for those editors.
+- **Not every GitLab field/filter is exposed.** Editors cover title, description, labels, state, assignees, milestones, issue iterations, MR target branch, and reviewers. Name completion currently covers ID-backed fields and projects, not branches or labels. Iteration lookups require GitLab Premium/Ultimate; older versions may not support cadence-title search. Permission/version failures are shown rather than treated as empty results.
 - Issue activity is the reverse-chronological notes/system-notes feed, not a merged feed of every GitLab resource-event endpoint. General comments and discussion replies are supported; inline diff comments, review submission/approvals, merging, artifacts, and interactive manual jobs are not yet implemented.
 - Lists currently paginate **all history** on refresh, conditionally revalidating each page. Very large projects will need incremental/keyset synchronization and periodic reconciliation before this is an efficient daily driver. There is no offline content cache. Hidden projects are not newly polled, although requests already started may finish.
 - Dashboard enrichment is bounded: at most 12 recently updated open MRs per project receive pipeline/discussion enrichment, with up to 12 additional discussion-page requests. Unknown values remain unknown. Open an MR to fetch its complete detail. A passed pipeline is not sufficient evidence that an MR is ready to merge.
@@ -178,5 +188,6 @@ Module layout:
 - `src/demo.rs`: deterministic fictional fixtures.
 - `tests/ui.rs`: keyboard, mouse, route/persistence, and async-result regression tests.
 - `tests/scrollbars.rs`: scrollbar geometry, dragging, scrolling, resize/refresh, and dialog-focus regression tests.
+- `src/ui/completion.rs`, `tests/autocomplete.rs`: comma-aware identity resolution, lookup scheduling, and autocomplete regression tests.
 
 Licensed under Apache-2.0. tui-lipan is a separate MPL-2.0 dependency; using it does not change this application's license.

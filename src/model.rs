@@ -65,6 +65,41 @@ pub struct User {
     pub name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LookupKind {
+    Users,
+    Milestones,
+    Iterations,
+    Projects,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupOption {
+    pub id: u64,
+    pub label: String,
+    pub value: String,
+    pub description: String,
+}
+
+impl LookupOption {
+    pub fn user(user: &User) -> Self {
+        Self {
+            id: user.id,
+            label: user.name.clone(),
+            value: format!("@{}", user.username),
+            description: format!("@{} · ID {}", user.username, user.id),
+        }
+    }
+    pub fn project(project: &Project) -> Self {
+        Self {
+            id: project.id,
+            label: project.name().to_owned(),
+            value: project.path.clone(),
+            description: format!("{} · ID {}", project.path, project.id),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pipeline {
@@ -85,7 +120,9 @@ pub struct WorkItem {
     pub assignees: Vec<User>,
     pub reviewers: Vec<User>,
     pub milestone: String,
+    pub milestone_id: Option<u64>,
     pub iteration: String,
+    pub iteration_id: Option<u64>,
     pub source_branch: String,
     pub target_branch: String,
     pub updated_at: String,

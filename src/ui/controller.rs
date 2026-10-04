@@ -89,6 +89,8 @@ impl Component for Cronk {
             failures: 0,
             blocked_until: Duration::ZERO,
             tick: 0,
+            lookup_epoch: 0,
+            lookup_inflight: None,
         }
     }
 
@@ -595,22 +597,81 @@ impl Component for Cronk {
                 if let Some(d) = &mut ctx.state.dialog
                     && index < d.fields.len()
                 {
+                    if let Some(c) = d
+                        .fields
+                        .get_mut(d.selected)
+                        .and_then(|f| f.completion.as_mut())
+                    {
+                        c.dismiss();
+                    }
                     d.selected = index;
                     d.reveal_selection = true;
                     ctx.request_focus(format!("dialog-field-{index}"));
                 }
             }
+
+            Msg::LookupStart(epoch, index) => return self.start_lookup(ctx, epoch, index),
+            Msg::LookupLoaded(epoch, index, result) => {
+                return self.lookup_loaded(ctx, epoch, index, result);
+            }
+            Msg::LookupMove(index, delta) => {
+                if let Some(c) = completion::active_completion_mut(&mut ctx.state, index) {
+                    if !c.open {
+                        return self.schedule_lookup(ctx, index);
+                    }
+                    c.selected = c
+                        .selected
+                        .saturating_add_signed(delta)
+                        .min(c.options.len().saturating_sub(1));
+                }
+                if let Some(d) = &mut ctx.state.dialog {
+                    d.reveal_selection = true;
+                }
+            }
+            Msg::LookupAccept(index, epoch, selected) => {
+                if let Some(d) = &mut ctx.state.dialog
+                    && d.selected == index
+                    && let Some(field) = d.fields.get_mut(index)
+                    && let Some(c) = &mut field.completion
+                    && c.epoch == epoch
+                {
+                    c.accept(&mut field.input, selected);
+                    d.reveal_selection = true;
+                    d.error = None;
+                    ctx.request_focus(format!("dialog-field-{index}"));
+                }
+            }
+            Msg::LookupEnter(index) => {
+                if let Some(c) = completion::active_completion(&ctx.state, index)
+                    && c.open
+                {
+                    if c.pending {
+                        return Update::none();
+                    }
+                    if !c.options.is_empty() {
+                        return self.update(Msg::LookupAccept(index, c.epoch, c.selected), ctx);
+                    }
+                }
+                return self.submit(ctx);
+            }
             Msg::Input(index, event) => {
+                let mut lookup_changed = false;
                 if let Some(d) = &mut ctx.state.dialog {
                     d.reveal_selection = true;
                     if let Some(f) = d.fields.get_mut(index) {
                         let previous = f.input.text().to_owned();
+                        let previous_cursor = f.input.cursor();
                         event.apply_to(&mut f.input);
+                        lookup_changed = f.completion.is_some()
+                            && (previous != f.input.text() || previous_cursor != f.input.cursor());
                         if matches!(d.kind, DialogKind::Commands) && previous != f.input.text() {
                             d.selected = 0;
                         }
                     }
                     d.error = None;
+                }
+                if lookup_changed {
+                    return self.schedule_lookup(ctx, index);
                 }
             }
             Msg::Editor(index, event) => {
@@ -764,7 +825,7 @@ impl Cronk {
         }
     }
 
-    fn network_error(&self, ctx: &mut Context<Self>, error: String) {
+    pub(super) fn network_error(&self, ctx: &mut Context<Self>, error: String) {
         ctx.state.failures = (ctx.state.failures + 1).min(6);
         let seconds = 5 * (1u64 << ctx.state.failures);
         let retry_after = retry_after(&error, std::time::SystemTime::now());
@@ -1037,10 +1098,10 @@ impl Cronk {
         let help = match *name {
             "state_event" => "Enter close or reopen. Enter commits · Esc cancels",
             "milestone_id" | "iteration_id" => {
-                "GitLab numeric ID (current name shown in details). Empty clears. Enter commits · Esc cancels"
+                "Type a name · ↑/↓ suggestions · Enter chooses, then saves · Empty clears · Esc cancels"
             }
             "assignee_ids" | "reviewer_ids" => {
-                "Comma-separated GitLab user IDs; empty clears. Enter commits · Esc cancels"
+                "Type names separated by commas · ↑/↓ suggestions · Enter chooses, then saves · Empty clears"
             }
             _ => "Enter commits · Esc cancels",
         };
@@ -1049,12 +1110,45 @@ impl Cronk {
         } else {
             value
         };
+        let mut field = FormField::new(label, initial, false);
+        let lookup_kind = match *name {
+            "assignee_ids" | "reviewer_ids" => Some(LookupKind::Users),
+            "milestone_id" => Some(LookupKind::Milestones),
+            "iteration_id" => Some(LookupKind::Iterations),
+            _ => None,
+        };
+        if let Some(kind) = lookup_kind {
+            let mut c = Completion::new(kind, key.project, kind == LookupKind::Users);
+            if let Some(details) = &ctx.state.details {
+                let item = &details.item;
+                match kind {
+                    LookupKind::Users => c.seed(
+                        item.assignees
+                            .iter()
+                            .chain(&item.reviewers)
+                            .map(LookupOption::user),
+                    ),
+                    LookupKind::Milestones | LookupKind::Iterations => {
+                        let id = if kind == LookupKind::Milestones {
+                            item.milestone_id
+                        } else {
+                            item.iteration_id
+                        };
+                        if let Some(id) = id {
+                            c.resolved.insert(initial.trim().to_owned(), id);
+                        }
+                    }
+                    LookupKind::Projects => {}
+                }
+            }
+            field.completion = Some(c);
+        }
         self.show_dialog(
             ctx,
             DialogKind::Edit(key, (*name).into()),
             &format!("Edit {label}"),
             help,
-            vec![FormField::new(label, initial, false)],
+            vec![field],
         );
     }
 
@@ -1089,7 +1183,7 @@ impl Cronk {
                     }
                 } else { self.dialog_error(ctx, "The four built-in tabs cannot be renamed or removed"); }
             }
-            Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Use its full group/subgroup/project path or numeric ID; this does not create a GitLab project", vec![FormField::new("Project path or ID", "", false), FormField::new("Short alias (optional)", "", false)]),
+            Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Search by name · Enter chooses a suggestion, then adds · Full paths and IDs also work", vec![FormField::lookup("Project", "", Completion::new(LookupKind::Projects, 0, false)), FormField::new("Short alias (optional)", "", false)]),
             Action::AliasProject | Action::RemoveProject => {
                 if ctx.state.config.active_tab != 1 { self.dialog_error(ctx, "Select a project in the Projects tab first"); }
                 else if let Some(project) = ctx.state.config.projects.get(ctx.state.scroll.selected) {
@@ -1104,8 +1198,11 @@ impl Cronk {
                     .or_else(|| if ctx.state.config.active_tab == 1 { ctx.state.config.projects.get(ctx.state.scroll.selected).map(|p| p.id) } else { ctx.state.visible_items().get(ctx.state.scroll.selected).map(|i| i.key.project) })
                     .or_else(|| ctx.state.config.projects.iter().find(|p| p.visible).map(|p| p.id));
                 let Some(project) = project else { self.dialog_error(ctx, "Add a project first"); return Update::full(); };
-                let project = project.to_string();
-                let mut fields = vec![FormField::new("Project ID (from Projects)", &project, false), FormField::new("Title", "", false)];
+                let project = ctx.state.project(project).map(|p| p.path.clone()).unwrap_or_else(|| project.to_string());
+                let mut completion = Completion::new(LookupKind::Projects, 0, false);
+                completion.workspace_only = true;
+                completion.seed(ctx.state.config.projects.iter().map(LookupOption::project));
+                let mut fields = vec![FormField::lookup("Project (workspace)", &project, completion), FormField::new("Title", "", false)];
                 if matches!(action, Action::NewMergeRequest) {
                     fields.push(FormField::new("Source branch (must already exist)", "", false));
                     fields.push(FormField::new("Target branch", "main", false));
@@ -1153,7 +1250,24 @@ impl Cronk {
             return Update::none();
         };
         let kind = dialog.kind.clone();
-        let values: Vec<String> = dialog.fields.iter().map(|f| f.value().to_owned()).collect();
+        let values = dialog
+            .fields
+            .iter()
+            .map(|f| {
+                if matches!(kind, DialogKind::AddProject) {
+                    Ok(f.value().to_owned())
+                } else {
+                    f.api_value()
+                }
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let values = match values {
+            Ok(values) => values,
+            Err(error) => {
+                self.dialog_error(ctx, &error);
+                return Update::full();
+            }
+        };
         let selected = dialog.selected;
         let first = values.first().map_or("", String::as_str);
         let mutation = match kind {
@@ -1307,7 +1421,7 @@ impl Cronk {
                     .ok()
                     .filter(|id| ctx.state.project(*id).is_some())
                 else {
-                    self.dialog_error(ctx, "Use a project ID from your Projects tab");
+                    self.dialog_error(ctx, "Choose a project from your workspace suggestions");
                     return Update::full();
                 };
                 if values[1].trim().is_empty() {

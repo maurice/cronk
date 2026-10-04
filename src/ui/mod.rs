@@ -1,5 +1,8 @@
+mod completion;
 mod controller;
 mod view;
+
+pub use completion::Completion;
 
 use crate::{config::Config, filter::Query, gitlab::GitLab, model::*, scroll::BoundaryScroll};
 use std::result::Result;
@@ -51,6 +54,8 @@ pub struct State {
     pub failures: u32,
     pub blocked_until: Duration,
     pub tick: u64,
+    pub lookup_epoch: u64,
+    pub lookup_inflight: Option<u64>,
 }
 
 #[derive(Default)]
@@ -66,6 +71,7 @@ pub struct FormField {
     pub input: TextInput,
     pub editor: TextEditor,
     pub multiline: bool,
+    pub completion: Option<Completion>,
 }
 impl FormField {
     pub fn new(label: &str, value: &str, multiline: bool) -> Self {
@@ -74,6 +80,7 @@ impl FormField {
             input: TextInput::new(value),
             editor: TextEditor::new(value),
             multiline,
+            completion: None,
         }
     }
     pub fn value(&self) -> &str {
@@ -199,6 +206,12 @@ pub enum Msg {
     Input(usize, InputEvent),
     Editor(usize, TextAreaEvent),
     Newline(usize),
+
+    LookupStart(u64, usize),
+    LookupLoaded(u64, usize, Result<Vec<LookupOption>, String>),
+    LookupMove(usize, isize),
+    LookupAccept(usize, u64, usize),
+    LookupEnter(usize),
 }
 
 impl State {
@@ -337,29 +350,29 @@ impl State {
                     .join(", "),
             ),
             (
-                "Assignees (IDs)",
+                "Assignees",
                 "assignee_ids",
                 i.assignees
                     .iter()
-                    .map(|u| u.id.to_string())
+                    .map(|u| format!("@{}", u.username))
                     .collect::<Vec<_>>()
-                    .join(","),
+                    .join(", "),
             ),
-            ("Milestone (ID)", "milestone_id", String::new()),
+            ("Milestone", "milestone_id", i.milestone.clone()),
         ];
         if i.key.kind == ItemKind::MergeRequest {
             fields.push(("Target branch", "target_branch", i.target_branch.clone()));
             fields.push((
-                "Reviewers (IDs)",
+                "Reviewers",
                 "reviewer_ids",
                 i.reviewers
                     .iter()
-                    .map(|u| u.id.to_string())
+                    .map(|u| format!("@{}", u.username))
                     .collect::<Vec<_>>()
-                    .join(","),
+                    .join(", "),
             ));
         } else {
-            fields.push(("Iteration (ID)", "iteration_id", String::new()));
+            fields.push(("Iteration", "iteration_id", i.iteration.clone()));
         }
         fields
     }

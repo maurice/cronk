@@ -34,8 +34,8 @@
 //! A trailing incomplete UTF-8 character (at most three bytes) is held until another poll.
 
 use crate::model::{
-    Details, Diff, Discussion, ItemKey, ItemKind, Label, Mutation, Pipeline, Project, TraceChunk,
-    User, WorkItem,
+    Details, Diff, Discussion, ItemKey, ItemKind, Label, LookupKind, LookupOption, Mutation,
+    Pipeline, Project, TraceChunk, User, WorkItem,
 };
 use anyhow::{Result, anyhow, bail};
 use reqwest::{
@@ -226,6 +226,106 @@ impl GitLab {
             .pop_if_empty()
             .extend(segments.iter().copied());
         url
+    }
+
+    /// Bounded, first-page typeahead. Refine the query rather than fetching every page.
+    pub fn lookup(&self, project: u64, kind: LookupKind, query: &str) -> Result<Vec<LookupOption>> {
+        let project = project.to_string();
+        let mut url = match kind {
+            LookupKind::Users => self.url(&["projects", &project, "users"]),
+            LookupKind::Milestones => self.url(&["projects", &project, "milestones"]),
+            LookupKind::Iterations => self.url(&["projects", &project, "iterations"]),
+            LookupKind::Projects => self.url(&["projects"]),
+        };
+        let query = query.trim();
+        let query = if kind == LookupKind::Users {
+            query.trim_start_matches('@')
+        } else {
+            query
+        };
+        url.query_pairs_mut()
+            .append_pair("per_page", "20")
+            .append_pair("page", "1");
+        if !query.is_empty() {
+            url.query_pairs_mut().append_pair("search", query);
+        }
+        match kind {
+            LookupKind::Users => {
+                let users: Vec<User> = self.get(&url)?;
+                Ok(users.iter().take(20).map(LookupOption::user).collect())
+            }
+            LookupKind::Projects => {
+                url.query_pairs_mut()
+                    .append_pair("membership", "true")
+                    .append_pair("simple", "true")
+                    .append_pair("search_namespaces", "true");
+                #[derive(Deserialize)]
+                struct Match {
+                    id: u64,
+                    name: String,
+                    path_with_namespace: String,
+                }
+                let projects: Vec<Match> = self.get(&url)?;
+                Ok(projects
+                    .into_iter()
+                    .take(20)
+                    .map(|p| LookupOption {
+                        id: p.id,
+                        label: p.name,
+                        description: format!("{} · ID {}", p.path_with_namespace, p.id),
+                        value: p.path_with_namespace,
+                    })
+                    .collect())
+            }
+            LookupKind::Milestones | LookupKind::Iterations => {
+                url.query_pairs_mut()
+                    .append_pair("include_ancestors", "true");
+                if kind == LookupKind::Iterations {
+                    url.query_pairs_mut()
+                        .append_pair("state", "all")
+                        .append_pair("in[]", "title")
+                        .append_pair("in[]", "cadence_title");
+                }
+                #[derive(Deserialize)]
+                struct Match {
+                    id: u64,
+                    title: Option<String>,
+                    start_date: Option<String>,
+                    due_date: Option<String>,
+                    #[serde(default)]
+                    group_id: Option<u64>,
+                    #[serde(default)]
+                    project_id: Option<u64>,
+                }
+                let entries: Vec<Match> = self.get(&url)?;
+                Ok(entries
+                    .into_iter()
+                    .take(20)
+                    .map(|entry| {
+                        let dates = format!(
+                            "{} – {}",
+                            entry.start_date.as_deref().unwrap_or("?"),
+                            entry.due_date.as_deref().unwrap_or("?")
+                        );
+                        let title = entry
+                            .title
+                            .filter(|title| !title.trim().is_empty())
+                            .unwrap_or_else(|| format!("Iteration {dates}"));
+                        let scope = entry
+                            .group_id
+                            .map(|id| format!("group {id}"))
+                            .or_else(|| entry.project_id.map(|id| format!("project {id}")))
+                            .unwrap_or_default();
+                        LookupOption {
+                            id: entry.id,
+                            value: title.clone(),
+                            label: title,
+                            description: format!("{dates} · {scope} · ID {}", entry.id),
+                        }
+                    })
+                    .collect())
+            }
+        }
     }
 
     fn item_url(&self, key: &ItemKey, suffix: &[&str]) -> Url {
@@ -1157,6 +1257,8 @@ enum ApiLabel {
 #[derive(Deserialize)]
 struct Title {
     #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     iid: Option<u64>,
@@ -1239,12 +1341,23 @@ impl ApiItem {
             author: self.author.unwrap_or_default(),
             assignees: self.assignees,
             reviewers: self.reviewers,
-            milestone: self.milestone.and_then(|m| m.title).unwrap_or_default(),
+            milestone_id: self.milestone.as_ref().and_then(|m| m.id),
+            iteration_id: self.iteration.as_ref().and_then(|i| i.id),
+            milestone: self
+                .milestone
+                .map(|m| {
+                    m.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+                        m.id.map(|id| format!("Milestone #{id}"))
+                            .unwrap_or_default()
+                    })
+                })
+                .unwrap_or_default(),
             iteration: self
                 .iteration
                 .map(|i| {
-                    i.title.filter(|t| !t.is_empty()).unwrap_or_else(|| {
+                    i.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
                         i.iid
+                            .or(i.id)
                             .map(|id| format!("Iteration #{id}"))
                             .unwrap_or_default()
                     })
@@ -1450,6 +1563,246 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
         thread::{self, JoinHandle},
     };
+
+    #[test]
+    fn lookups_use_scoped_search_encoded_queries_and_bounded_pages() {
+        let mock = Mock::new(|request| {
+            let url = request.url();
+            let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(params["per_page"], "20");
+            assert_eq!(params["page"], "1");
+            assert_eq!(params["search"], "Équipe & sprint/next");
+            let value = if url.path().ends_with("/users") {
+                assert_eq!(url.path(), "/gitlab/api/v4/projects/7/users");
+                json!({"id": 90, "name": "Alex", "username": "alex"})
+            } else if url.path().ends_with("/projects") {
+                assert_eq!(params["membership"], "true");
+                assert_eq!(params["search_namespaces"], "true");
+                json!({"id": 50, "name": "Service", "path_with_namespace": "deep/group/service"})
+            } else {
+                assert_eq!(params["include_ancestors"], "true");
+                if url.path().ends_with("/iterations") {
+                    assert!(
+                        url.query_pairs()
+                            .any(|(k, v)| k == "in[]" && v == "cadence_title")
+                    );
+                }
+                json!({"id": 42, "title": "Sprint", "group_id": 6, "start_date": "2026-10-01", "due_date": "2026-10-14"})
+            };
+            Reply::json(Value::Array(vec![value; 25])).header("X-Next-Page", "2")
+        });
+        let api = GitLab::new(&format!("{}/gitlab", mock.base), "test-private-secret").unwrap();
+        for kind in [
+            LookupKind::Users,
+            LookupKind::Milestones,
+            LookupKind::Iterations,
+            LookupKind::Projects,
+        ] {
+            let matches = api.lookup(7, kind, "  Équipe & sprint/next  ").unwrap();
+            assert_eq!(matches.len(), 20);
+            assert!(matches[0].id > 0);
+        }
+        assert_eq!(
+            mock.requests.lock().unwrap().len(),
+            4,
+            "typeahead must not paginate all history"
+        );
+    }
+
+    #[test]
+    fn lookups_keep_duplicate_names_distinct_and_handle_untitled_iterations() {
+        let mock = Mock::new(|request| {
+            if request.url().path().ends_with("/users") {
+                assert!(
+                    request
+                        .url()
+                        .query_pairs()
+                        .any(|(k, v)| k == "search" && v == "alex")
+                );
+                Reply::json(json!([
+                    {"id":1,"name":"Alex","username":"alex-one"},
+                    {"id":2,"name":"Alex","username":"alex-two"}
+                ]))
+            } else {
+                Reply::json(
+                    json!([{"id":9,"title":null,"start_date":"2026-10-01","due_date":"2026-10-14","group_id":6}]),
+                )
+            }
+        });
+        let users = mock.client().lookup(7, LookupKind::Users, "@alex").unwrap();
+        assert_ne!(users[0].value, users[1].value);
+        assert_eq!(users[0].label, users[1].label);
+        let iterations = mock.client().lookup(7, LookupKind::Iterations, "").unwrap();
+        assert!(iterations[0].label.contains("2026-10-01"));
+        assert!(iterations[0].description.contains("group 6"));
+        let limited = Mock::new(|_| Reply::bytes(429, Vec::new()).header("Retry-After", "30"));
+        assert!(
+            limited
+                .client()
+                .lookup(7, LookupKind::Users, "alex")
+                .unwrap_err()
+                .to_string()
+                .contains("Retry-After: 30")
+        );
+    }
+
+    #[test]
+    fn autocomplete_ui_debounces_search_and_submits_selected_user_ids() {
+        use crate::{
+            config::Config,
+            ui::{Cronk, Msg, Scope},
+        };
+        use tui_lipan::{TestBackend, prelude::*};
+        let mock = Mock::new(|request| {
+            if request.method == "PUT" {
+                assert_eq!(request.url().path(), "/api/v4/projects/7/issues/1");
+                return Reply::json(json!({}));
+            }
+            match request.url().path() {
+                "/api/v4/user" => {
+                    Reply::json(json!({"id":1,"name":"Example","username":"example"}))
+                }
+                "/api/v4/projects/7/users" => {
+                    assert!(
+                        request
+                            .url()
+                            .query_pairs()
+                            .any(|(k, v)| k == "search" && v == "Alex")
+                    );
+                    Reply::json(json!([
+                        {"id":41,"name":"Alex","username":"alex-one"},
+                        {"id":42,"name":"Alex","username":"alex-two"}
+                    ]))
+                }
+                "/api/v4/projects/7/issues/1" => Reply::json(raw_item(1, "opened")),
+                _ => Reply::json(json!([])),
+            }
+        });
+        let mut ui = TestBackend::new_with_app(
+            App::new().focus_policy(FocusPolicy::Manual),
+            Cronk {
+                config: Config::default(),
+                path: None,
+                api: Some(mock.client()),
+            },
+            (),
+        );
+        ui.pump().unwrap();
+        let mut item = serde_json::from_value::<ApiItem>(raw_item(1, "opened"))
+            .unwrap()
+            .into_item(7, ItemKind::Issue);
+        item.assignees.push(User {
+            id: 1,
+            username: "example".into(),
+            name: "Example".into(),
+        });
+        ui.state_mut().config.projects = vec![project()];
+        ui.state_mut().config.route = Some(item.key.clone());
+        ui.state_mut().scope = Scope::Section;
+        ui.state_mut().details = Some(Details {
+            item,
+            ..Details::default()
+        });
+        ui.dispatch(Msg::Field(3)).unwrap();
+        ui.send_key(KeyEvent {
+            code: KeyCode::Home,
+            mods: KeyMods::NONE,
+        })
+        .unwrap();
+        ui.send_key(KeyEvent {
+            code: KeyCode::End,
+            mods: KeyMods::SHIFT,
+        })
+        .unwrap();
+        ui.send_paste("@example,   Al").unwrap();
+        ui.advance(Duration::from_millis(100));
+        ui.send_paste("ex ").unwrap();
+        ui.advance(Duration::from_millis(250));
+        assert!(
+            !mock
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.target.contains("/users?"))
+        );
+        ui.advance(Duration::from_millis(100));
+        for _ in 0..40 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if !ui.state().dialog.as_ref().unwrap().fields[0]
+                .completion
+                .as_ref()
+                .unwrap()
+                .pending
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            ui.state().dialog.as_ref().unwrap().fields[0]
+                .completion
+                .as_ref()
+                .unwrap()
+                .options
+                .len(),
+            2
+        );
+        for code in [KeyCode::Down, KeyCode::Enter] {
+            ui.send_key(KeyEvent {
+                code,
+                mods: KeyMods::NONE,
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            ui.state().dialog.as_ref().unwrap().fields[0].value(),
+            "@example,   @alex-two "
+        );
+        assert!(
+            !mock
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.method == "PUT")
+        );
+        ui.send_key(KeyEvent {
+            code: KeyCode::Enter,
+            mods: KeyMods::NONE,
+        })
+        .unwrap();
+        for _ in 0..40 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if !ui.state().mutation_pending {
+                break;
+            }
+        }
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.target.contains("/users?"))
+                .count(),
+            1
+        );
+        let writes: Vec<_> = requests.iter().filter(|r| r.method == "PUT").collect();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].json(), json!({"assignee_ids":[1,42]}));
+    }
+
+    #[test]
+    fn item_parsing_retains_assignment_ids_not_iids() {
+        let mut value = raw_item(1, "opened");
+        value["milestone"] = json!({"id":123,"iid":3,"title":"Release"});
+        value["iteration"] = json!({"id":456,"iid":6,"title":"Sprint"});
+        let item = serde_json::from_value::<ApiItem>(value)
+            .unwrap()
+            .into_item(7, ItemKind::Issue);
+        assert_eq!(item.milestone_id, Some(123));
+        assert_eq!(item.iteration_id, Some(456));
+        assert_eq!(item.milestone, "Release");
+        assert_eq!(item.iteration, "Sprint");
+    }
 
     #[derive(Debug)]
     struct Request {

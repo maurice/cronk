@@ -1,4 +1,4 @@
-use super::{Cronk, Dialog, DialogKind, Msg, Scope, State, list_height};
+use super::{Completion, Cronk, Dialog, DialogKind, Msg, Scope, State, list_height};
 use crate::{build_info, config::Config, model::*};
 use tui_lipan::{
     prelude::*,
@@ -1591,9 +1591,18 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         let selected = dialog.selected;
         let count = dialog.fields.len();
         let multiline = field.multiline;
-        let interceptor = ctx
-            .link()
-            .key_handler(move |key| dialog_key(key, index, selected, count, multiline, commands));
+        let lookup = field.completion.is_some();
+        let interceptor = ctx.link().key_handler(move |key| {
+            if lookup {
+                match key.code {
+                    KeyCode::Down => return Some(Msg::LookupMove(index, 1)),
+                    KeyCode::Up => return Some(Msg::LookupMove(index, -1)),
+                    KeyCode::Enter => return Some(Msg::LookupEnter(index)),
+                    _ => {}
+                }
+            }
+            dialog_key(key, index, selected, count, multiline, commands)
+        });
         let normal = Style::new().fg(colors.foreground).bg(colors.background);
         let focus = Style::new().fg(colors.foreground).bg(colors.selection);
         let editor: Element = if field.multiline {
@@ -1642,7 +1651,17 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                             colors.muted
                         }),
                     ))
-                    .child(editor.key(format!("dialog-field-{index}"))),
+                    .child(editor.key(format!("dialog-field-{index}")))
+                    .child(if selected == index {
+                        field
+                            .completion
+                            .as_ref()
+                            .filter(|c| c.open)
+                            .map(|c| completion_view(ctx, index, c, colors))
+                            .unwrap_or_else(|| VStack::new().height(Length::Px(0)).into())
+                    } else {
+                        VStack::new().height(Length::Px(0)).into()
+                    }),
             )
             .child(blank());
     }
@@ -1809,6 +1828,88 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
     .key("dialog")
 }
 
+fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: Colors) -> Element {
+    let message = if c.pending {
+        Some("Searching GitLab…")
+    } else if let Some(error) = &c.error {
+        Some(error.as_str())
+    } else if c.options.is_empty() {
+        Some("No matches. Refine the name, or enter an ID.")
+    } else {
+        None
+    };
+    if let Some(message) = message {
+        return Text::new(message.to_owned())
+            .height(Length::Auto)
+            .width(Length::Flex(1))
+            .overflow(Overflow::Wrap)
+            .style(Style::new().fg(if c.error.is_some() {
+                colors.red
+            } else {
+                colors.muted
+            }))
+            .into();
+    }
+    let mut rows = Vec::new();
+    for (option_index, option) in c.options.iter().enumerate() {
+        let style = if c.selected == option_index {
+            colors.selected()
+        } else {
+            Style::new().fg(colors.foreground).bg(colors.surface)
+        };
+        let epoch = c.epoch;
+        rows.push(click(
+            ctx,
+            format!("lookup-{index}-{}", option.id),
+            VStack::new()
+                .height(Length::Px(2))
+                .style(style)
+                .child(line(
+                    format!(
+                        " {} {}",
+                        if c.selected == option_index {
+                            "›"
+                        } else {
+                            " "
+                        },
+                        option.label
+                    ),
+                    style,
+                ))
+                .child(line(
+                    format!("   {}", option.description),
+                    style.fg(colors.muted),
+                )),
+            move || Msg::LookupAccept(index, epoch, option_index),
+        ));
+    }
+    let mut choices = ScrollView::new()
+        .height(Length::Px((ctx.viewport().h / 4).clamp(2, 8)))
+        .scrollbar(true)
+        .scrollbar_config(vertical_scrollbar(colors))
+        .scroll_keys(ScrollKeymap::NONE)
+        .focusable(false)
+        .tab_stop(false)
+        .smooth_wheel_scroll(false)
+        .estimated_child_height(2)
+        .children(rows);
+    if let Some(option) = c.options.get(c.selected) {
+        choices = choices.reveal_key(format!("lookup-{index}-{}", option.id));
+    }
+    VStack::new()
+        .height(Length::Auto)
+        .child(line(
+            "↑/↓ choose · Enter accept · Tab next field · Esc cancel",
+            Style::new().fg(colors.accent),
+        ))
+        .child(choices.key(format!("lookup-options-{index}")))
+        .child(line(
+            "Up to 20 matches · type more to narrow the search",
+            Style::new().fg(colors.muted),
+        ))
+        .into()
+}
+
 fn dialog_option(
     ctx: &Context<Cronk>,
     index: usize,
@@ -1856,6 +1957,8 @@ const HELP: &str = "\
 ## Forms and live data
 - **Enter** submits the whole form. **Tab / Shift+Tab** switch fields.
 - **Ctrl+J** inserts a newline in multiline fields. **Esc** cancels.
+- ID-backed fields suggest names: **Up / Down** choose, **Enter** accepts, then saves.
+- Separate assignees/reviewers with commas; only the trimmed token at the caret is searched.
 - Running jobs expand automatically. Pipeline shows all running traces.
 - Job logs follow their trailing output; finished jobs expand on demand.
 - **DEMO** uses fictional offline data, never a live GitLab workspace.

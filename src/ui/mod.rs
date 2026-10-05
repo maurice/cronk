@@ -101,12 +101,34 @@ impl FormField {
             completion: None,
         }
     }
+    pub fn uses_editor(&self) -> bool {
+        self.multiline
+            || self
+                .completion
+                .as_ref()
+                .is_some_and(|c| c.kind == LookupKind::Labels)
+    }
     pub fn value(&self) -> &str {
-        if self.multiline {
+        if self.uses_editor() {
             self.editor.text()
         } else {
             self.input.text()
         }
+    }
+    pub fn cursor(&self) -> usize {
+        if self.uses_editor() {
+            self.editor.cursor()
+        } else {
+            self.input.cursor()
+        }
+    }
+    pub fn set_text_and_cursor(&mut self, text: String, cursor: usize) {
+        if self.uses_editor() {
+            self.editor.set_text(&text);
+            self.editor.set_cursor(cursor);
+        }
+        self.input = TextInput::new(text);
+        self.input.set_cursor(cursor);
     }
 }
 

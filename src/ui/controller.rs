@@ -707,13 +707,19 @@ impl Component for Cronk {
                 if let Some(d) = &mut ctx.state.dialog
                     && d.selected == index
                     && let Some(field) = d.fields.get_mut(index)
-                    && let Some(c) = &mut field.completion
-                    && c.epoch == epoch
                 {
-                    c.accept(&mut field.input, selected);
-                    d.reveal_selection = true;
-                    d.error = None;
-                    ctx.request_focus(format!("dialog-field-{index}"));
+                    let text = field.value().to_owned();
+                    let cursor = field.cursor();
+                    if let Some(c) = &mut field.completion
+                        && c.epoch == epoch
+                    {
+                        if let Some((text, cursor)) = c.accept_text(&text, cursor, selected) {
+                            field.set_text_and_cursor(text, cursor);
+                        }
+                        d.reveal_selection = true;
+                        d.error = None;
+                        ctx.request_focus(format!("dialog-field-{index}"));
+                    }
                 }
             }
             Msg::LookupEnter(index) => {
@@ -750,12 +756,21 @@ impl Component for Cronk {
                 }
             }
             Msg::Editor(index, event) => {
+                let mut lookup_changed = false;
                 if let Some(d) = &mut ctx.state.dialog {
                     d.reveal_selection = true;
                     if let Some(f) = d.fields.get_mut(index) {
+                        let previous = f.editor.text().to_owned();
+                        let previous_cursor = f.editor.cursor();
                         event.apply_to(&mut f.editor);
+                        lookup_changed = f.completion.is_some()
+                            && (previous != f.editor.text()
+                                || previous_cursor != f.editor.cursor());
                     }
                     d.error = None;
+                }
+                if lookup_changed {
+                    return self.schedule_lookup(ctx, index);
                 }
             }
             Msg::Newline(index) => {
@@ -1303,6 +1318,9 @@ impl Cronk {
             "assignee_ids" | "reviewer_ids" => {
                 "Type names separated by commas · ↑/↓ suggestions · Enter chooses, then saves · Empty clears"
             }
+            "labels" => {
+                "Type known labels separated by commas · ↑/↓ suggestions · Enter chooses, then saves · Empty clears"
+            }
             _ => "Enter commits · Esc cancels",
         };
         let initial = if *name == "state_event" {
@@ -1312,16 +1330,22 @@ impl Cronk {
         };
         let mut field = FormField::new(label, initial, false);
         let lookup_kind = match *name {
+            "labels" => Some(LookupKind::Labels),
             "assignee_ids" | "reviewer_ids" => Some(LookupKind::Users),
             "milestone_id" => Some(LookupKind::Milestones),
             "iteration_id" => Some(LookupKind::Iterations),
             _ => None,
         };
         if let Some(kind) = lookup_kind {
-            let mut c = Completion::new(kind, key.project, kind == LookupKind::Users);
+            let mut c = Completion::new(
+                kind,
+                key.project,
+                matches!(kind, LookupKind::Users | LookupKind::Labels),
+            );
             if let Some(details) = &ctx.state.details {
                 let item = &details.item;
                 match kind {
+                    LookupKind::Labels => c.seed(item.labels.iter().map(LookupOption::label)),
                     LookupKind::Users => c.seed(
                         item.assignees
                             .iter()
@@ -1335,13 +1359,16 @@ impl Cronk {
                             item.iteration_id
                         };
                         if let Some(id) = id {
-                            c.resolved.insert(initial.trim().to_owned(), id);
+                            c.resolved.insert(initial.trim().to_owned(), id.to_string());
                         }
                     }
                     LookupKind::Projects => {}
                 }
             }
             field.completion = Some(c);
+        }
+        if *name == "labels" {
+            field.editor.set_cursor(initial.len());
         }
         self.show_dialog(
             ctx,

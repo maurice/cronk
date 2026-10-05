@@ -90,7 +90,10 @@ fn option(id: u64, name: &str, value: &str) -> LookupOption {
         id,
         label: name.into(),
         value: value.into(),
+        api_value: id.to_string(),
         description: format!("ID {id}"),
+        color: String::new(),
+        text_color: String::new(),
     }
 }
 
@@ -126,6 +129,37 @@ fn people_complete_trimmed_comma_tokens_without_submitting_or_losing_previous_va
             .as_ref()
             .unwrap()
             .contains("Demo is read-only")
+    );
+}
+
+#[test]
+fn labels_require_known_choices_and_accept_colored_suggestions() {
+    let mut ui = mount(ItemKind::Issue, 2);
+    assert_eq!(completion(&ui).kind, LookupKind::Labels);
+    assert!(value(&ui).contains("demo::fictional"));
+    replace(&mut ui, "demo::fictional, type");
+    wait(&mut ui);
+    assert!(
+        completion(&ui)
+            .options
+            .iter()
+            .any(|option| option.value == "type::bug" && !option.color.is_empty())
+    );
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(value(&ui), "demo::fictional, type::bug");
+    assert_eq!(ids(&ui), "demo::fictional,type::bug");
+    replace(&mut ui, "demo::fictional, typo");
+    wait(&mut ui);
+    key(&mut ui, KeyCode::Enter);
+    assert!(
+        ui.state()
+            .dialog
+            .as_ref()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("known label")
     );
 }
 

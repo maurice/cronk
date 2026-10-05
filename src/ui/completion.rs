@@ -1,4 +1,4 @@
-//! Text tokens keep their display values; only explicitly chosen identities become API IDs.
+//! Text tokens keep their display values; only explicitly chosen identities become API values.
 use super::*;
 use std::ops::Range;
 
@@ -7,7 +7,8 @@ pub struct Completion {
     pub project: u64,
     pub multiple: bool,
     pub workspace_only: bool,
-    pub resolved: HashMap<String, u64>,
+    pub resolved: HashMap<String, String>,
+    pub swatches: HashMap<String, Label>,
     pub options: Vec<LookupOption>,
     pub selected: usize,
     pub open: bool,
@@ -27,6 +28,7 @@ impl Completion {
             multiple,
             workspace_only: false,
             resolved: HashMap::new(),
+            swatches: HashMap::new(),
             options: vec![],
             selected: 0,
             open: false,
@@ -43,7 +45,17 @@ impl Completion {
         for option in options {
             if option.id > 0 && !option.value.trim().is_empty() {
                 self.resolved
-                    .insert(option.value.trim().to_owned(), option.id);
+                    .insert(option.value.trim().to_owned(), option.api_value.clone());
+            }
+            if !option.color.is_empty() {
+                self.swatches.insert(
+                    option.value.trim().to_owned(),
+                    Label {
+                        name: option.value.trim().to_owned(),
+                        color: option.color.clone(),
+                        text_color: option.text_color.clone(),
+                    },
+                );
             }
         }
     }
@@ -54,37 +66,72 @@ impl Completion {
         } else {
             vec![text]
         };
-        let mut ids = Vec::new();
+        let mut values = Vec::new();
         for token in tokens.into_iter().map(str::trim).filter(|s| !s.is_empty()) {
-            let id = self.resolved.get(token).copied()
-                .or_else(|| token.parse::<u64>().ok().filter(|id| *id > 0))
-                .ok_or_else(|| "Choose a lookup suggestion for each value before submitting (or enter a numeric ID).".to_owned())?;
-            if !ids.contains(&id) {
-                ids.push(id);
+            let value = self
+                .resolved
+                .get(token)
+                .cloned()
+                .or_else(|| {
+                    (self.kind == LookupKind::Labels && self.swatches.contains_key(token))
+                        .then(|| token.to_owned())
+                })
+                .or_else(|| {
+                    (self.kind != LookupKind::Labels)
+                        .then(|| token.parse::<u64>().ok().filter(|id| *id > 0))
+                        .flatten()
+                        .map(|id| id.to_string())
+                })
+                .ok_or_else(|| {
+                    if self.kind == LookupKind::Labels {
+                        "Choose a known label suggestion for each value before submitting."
+                            .to_owned()
+                    } else {
+                        "Choose a lookup suggestion for each value before submitting (or enter a numeric ID).".to_owned()
+                    }
+                })?;
+            if !values.contains(&value) {
+                values.push(value);
             }
         }
-        Ok(ids
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(","))
+        Ok(values.join(","))
+    }
+
+    pub fn accept_text(
+        &mut self,
+        text: &str,
+        cursor: usize,
+        index: usize,
+    ) -> Option<(String, usize)> {
+        let option = self.options.get(index).cloned().filter(|option| {
+            self.open && !self.pending && option.id > 0 && !option.value.trim().is_empty()
+        })?;
+        let range = token_range(text, cursor, self.multiple);
+        let mut next = text.to_owned();
+        let start = range.start;
+        next.replace_range(range, &option.value);
+        self.resolved
+            .insert(option.value.trim().to_owned(), option.api_value.clone());
+        if !option.color.is_empty() {
+            self.swatches.insert(
+                option.value.trim().to_owned(),
+                Label {
+                    name: option.value.trim().to_owned(),
+                    color: option.color.clone(),
+                    text_color: option.text_color.clone(),
+                },
+            );
+        }
+        self.dismiss();
+        Some((next, start + option.value.len()))
     }
 
     pub fn accept(&mut self, input: &mut TextInput, index: usize) -> bool {
-        let Some(option) = self.options.get(index).cloned().filter(|option| {
-            self.open && !self.pending && option.id > 0 && !option.value.trim().is_empty()
-        }) else {
+        let Some((text, cursor)) = self.accept_text(input.text(), input.cursor(), index) else {
             return false;
         };
-        let range = token_range(input.text(), input.cursor(), self.multiple);
-        let mut text = input.text().to_owned();
-        let start = range.start;
-        text.replace_range(range, &option.value);
         *input = TextInput::new(text);
-        input.set_cursor(start + option.value.len());
-        self.resolved
-            .insert(option.value.trim().to_owned(), option.id);
-        self.dismiss();
+        input.set_cursor(cursor);
         true
     }
 
@@ -132,11 +179,13 @@ impl Cronk {
         let Some(field) = dialog.fields.get_mut(index) else {
             return Update::none();
         };
+        let text = field.value().to_owned();
+        let cursor = field.cursor();
         let Some(c) = &mut field.completion else {
             return Update::none();
         };
-        let range = token_range(field.input.text(), field.input.cursor(), c.multiple);
-        let query = field.input.text()[range].to_owned();
+        let range = token_range(&text, cursor, c.multiple);
+        let query = text[range].to_owned();
         if c.open && c.error.is_none() && c.query.as_ref() == Some(&query) {
             return Update::full();
         }
@@ -237,6 +286,18 @@ impl Cronk {
                         .filter(|option| option.id > 0 && !option.value.trim().is_empty())
                         .take(20)
                         .collect();
+                    for option in &c.options {
+                        if !option.color.is_empty() {
+                            c.swatches.insert(
+                                option.value.trim().to_owned(),
+                                Label {
+                                    name: option.value.trim().to_owned(),
+                                    color: option.color.clone(),
+                                    text_color: option.text_color.clone(),
+                                },
+                            );
+                        }
+                    }
                     c.selected = 0;
                     if c.cache.len() >= 32 {
                         c.cache.clear();
@@ -304,11 +365,15 @@ fn local_options(state: &State, c: &Completion) -> Vec<LookupOption> {
                     id,
                     label: label.clone(),
                     value: label.clone(),
+                    api_value: id.to_string(),
                     description: format!("Demo · ID {id}"),
+                    color: String::new(),
+                    text_color: String::new(),
                 })
                 .into_iter()
                 .collect()
             }
+            LookupKind::Labels => item.labels.iter().map(LookupOption::label).collect(),
             LookupKind::Projects => unreachable!(),
         };
         for option in candidates {
@@ -349,7 +414,10 @@ mod tests {
             id: 2,
             label: "Élise".into(),
             value: "@elise".into(),
+            api_value: "2".into(),
             description: String::new(),
+            color: String::new(),
+            text_color: String::new(),
         }];
         completion.open = true;
         let mut input = TextInput::new(text);
@@ -367,15 +435,15 @@ mod tests {
     #[test]
     fn resolve_only_chosen_names_or_ids_trim_deduplicate_and_clear() {
         let mut c = Completion::new(LookupKind::Users, 1, true);
-        c.resolved.insert("@one".into(), 42);
+        c.resolved.insert("@one".into(), "42".into());
         assert_eq!(c.api_value(" @one, 7, @one, ").unwrap(), "42,7");
         assert_eq!(c.api_value("  , ").unwrap(), "");
         assert!(c.api_value("@one, missing").is_err());
         assert!(c.api_value("0").is_err());
         c.multiple = false;
-        c.resolved.insert("Release, two".into(), 12);
+        c.resolved.insert("Release, two".into(), "12".into());
         assert_eq!(c.api_value("Release, two").unwrap(), "12");
-        c.resolved.insert("2026".into(), 50);
+        c.resolved.insert("2026".into(), "50".into());
         assert_eq!(c.api_value("2026").unwrap(), "50");
     }
 }

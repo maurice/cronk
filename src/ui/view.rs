@@ -6,7 +6,9 @@ use crate::{
     config::{Config, UserFormatter},
     model::*,
 };
+use std::{any::Any, collections::HashMap};
 use tui_lipan::{
+    TextAreaColorInput, TextAreaColorLines, TextAreaColorStrategy,
     prelude::*,
     style::{RowStylePolicy, ThemePalette},
 };
@@ -210,22 +212,100 @@ fn status_span(status: &str, colors: Colors) -> Span {
     Span::new(format!("{symbol} {status}")).fg(color)
 }
 
+fn label_style(label: &Label, colors: Colors) -> Style {
+    // GitLab supplies both colors. Neither selection nor contrast correction may change them.
+    Style::new()
+        .bg(parse_color(&label.color).unwrap_or(colors.surface))
+        .fg(parse_color(&label.text_color).unwrap_or(colors.foreground))
+        .contrast_policy(ContrastPolicy::Off)
+}
+
+fn label_pill_span(label: &Label, colors: Colors) -> Span {
+    Span::new(format!(" {} ", label.name))
+        .style(label_style(label, colors))
+        .row_style_policy(RowStylePolicy::Disabled)
+}
+
+fn label_text_span(text: &str, label: &Label, colors: Colors) -> Span {
+    Span::new(text.to_owned())
+        .style(label_style(label, colors))
+        .row_style_policy(RowStylePolicy::Disabled)
+}
+
 fn label_spans(labels: &[Label], colors: Colors) -> Vec<Span> {
     let mut spans = Vec::with_capacity(labels.len() * 2);
     for label in labels {
-        // GitLab supplies both colors. Neither selection nor contrast correction may change them.
-        let style = Style::new()
-            .bg(parse_color(&label.color).unwrap_or(colors.surface))
-            .fg(parse_color(&label.text_color).unwrap_or(colors.foreground))
-            .contrast_policy(ContrastPolicy::Off);
-        spans.push(
-            Span::new(format!(" {} ", label.name))
-                .style(style)
-                .row_style_policy(RowStylePolicy::Disabled),
-        );
+        spans.push(label_pill_span(label, colors));
         spans.push(Span::new(" "));
     }
     spans
+}
+
+#[derive(Clone)]
+struct LabelColorStrategy {
+    swatches: HashMap<String, Label>,
+    colors: Colors,
+}
+
+impl LabelColorStrategy {
+    fn line_spans(&self, line: &str) -> Vec<Span> {
+        if line.is_empty() {
+            return vec![Span::new("")];
+        }
+        let mut spans = Vec::new();
+        let mut start = 0;
+        for (index, ch) in line.char_indices() {
+            if ch == ',' {
+                self.push_token(&mut spans, &line[start..index]);
+                spans.push(Span::new(","));
+                start = index + ch.len_utf8();
+            }
+        }
+        self.push_token(&mut spans, &line[start..]);
+        spans
+    }
+
+    fn push_token(&self, spans: &mut Vec<Span>, token: &str) {
+        if token.is_empty() {
+            return;
+        }
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            spans.push(Span::new(token.to_owned()));
+            return;
+        }
+        let leading = token.len() - token.trim_start().len();
+        let trailing = token.len() - token.trim_end().len();
+        if leading > 0 {
+            spans.push(Span::new(token[..leading].to_owned()));
+        }
+        if let Some(label) = self.swatches.get(trimmed) {
+            spans.push(label_text_span(trimmed, label, self.colors));
+        } else {
+            spans.push(Span::new(trimmed.to_owned()));
+        }
+        if trailing > 0 {
+            spans.push(Span::new(token[token.len() - trailing..].to_owned()));
+        }
+    }
+}
+
+impl TextAreaColorStrategy for LabelColorStrategy {
+    fn highlight(&self, input: TextAreaColorInput<'_>) -> TextAreaColorLines {
+        input
+            .value
+            .split('\n')
+            .map(|line| self.line_spans(line))
+            .collect()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 pub(super) fn view(ctx: &Context<Cronk>) -> Element {
@@ -1433,15 +1513,23 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         });
         let normal = Style::new().fg(colors.foreground).bg(colors.background);
         let focus = Style::new().fg(colors.foreground).bg(colors.selection);
-        let editor: Element = if field.multiline {
-            TextArea::bound(&field.editor)
-                .height(Length::Px((ctx.viewport().h / 5).clamp(3, 8)))
+        let editor: Element = if field.uses_editor() {
+            let mut editor = TextArea::bound(&field.editor)
+                .height(if field.multiline {
+                    Length::Px((ctx.viewport().h / 5).clamp(3, 8))
+                } else {
+                    Length::Px(1)
+                })
                 .border(false)
-                .padding(content_padding(1))
-                .scrollbar(true)
+                .padding(if field.multiline {
+                    content_padding(1)
+                } else {
+                    (0, 1).into()
+                })
+                .scrollbar(field.multiline)
                 .scrollbar_config(vertical_scrollbar(colors))
                 .line_numbers(false)
-                .wrap(true)
+                .wrap(field.multiline)
                 .style(normal)
                 .focus_style(focus)
                 .focus_content_style(focus)
@@ -1450,8 +1538,18 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                 .key_interceptor(interceptor)
                 .insert_tab(false)
                 .on_click(ctx.link().callback(move |_| Msg::DialogField(index)))
-                .on_change(ctx.link().callback(move |event| Msg::Editor(index, event)))
-                .into()
+                .on_change(ctx.link().callback(move |event| Msg::Editor(index, event)));
+            if let Some(c) = field
+                .completion
+                .as_ref()
+                .filter(|c| c.kind == LookupKind::Labels)
+            {
+                editor = editor.color_strategy(LabelColorStrategy {
+                    swatches: c.swatches.clone(),
+                    colors,
+                });
+            }
+            editor.into()
         } else {
             Input::bound(&field.input)
                 .height(Length::Px(1))
@@ -1664,7 +1762,11 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
     } else if let Some(error) = &c.error {
         Some(error.as_str())
     } else if c.options.is_empty() {
-        Some("No matches. Refine the name, or enter an ID.")
+        Some(if c.kind == LookupKind::Labels {
+            "No matches. Refine the label name."
+        } else {
+            "No matches. Refine the name, or enter an ID."
+        })
     } else {
         None
     };
@@ -1688,28 +1790,59 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
             Style::new().fg(colors.foreground).bg(colors.surface)
         };
         let epoch = c.epoch;
+        let header: Element = if c.kind == LookupKind::Labels {
+            let label = Label {
+                name: option.label.clone(),
+                color: option.color.clone(),
+                text_color: option.text_color.clone(),
+            };
+            let mut spans = vec![
+                Span::new(format!(
+                    " {} ",
+                    if c.selected == option_index {
+                        "›"
+                    } else {
+                        " "
+                    }
+                ))
+                .style(style),
+            ];
+            if option.color.is_empty() {
+                spans.push(Span::new(option.label.clone()).style(style));
+            } else {
+                spans.push(label_pill_span(&label, colors));
+            }
+            Text::from_spans(spans)
+                .width(Length::Flex(1))
+                .height(Length::Px(1))
+                .style(style)
+                .into()
+        } else {
+            line(
+                format!(
+                    " {} {}",
+                    if c.selected == option_index {
+                        "›"
+                    } else {
+                        " "
+                    },
+                    if c.kind == LookupKind::Users {
+                        ctx.state.user_formatter.render_lookup(option)
+                    } else {
+                        option.label.clone()
+                    }
+                ),
+                style,
+            )
+            .into()
+        };
         rows.push(click(
             ctx,
             format!("lookup-{index}-{}", option.id),
             VStack::new()
                 .height(Length::Px(2))
                 .style(style)
-                .child(line(
-                    format!(
-                        " {} {}",
-                        if c.selected == option_index {
-                            "›"
-                        } else {
-                            " "
-                        },
-                        if c.kind == LookupKind::Users {
-                            ctx.state.user_formatter.render_lookup(option)
-                        } else {
-                            option.label.clone()
-                        }
-                    ),
-                    style,
-                ))
+                .child(header)
                 .child(line(
                     format!("   {}", option.description),
                     style.fg(colors.muted),

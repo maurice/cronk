@@ -236,6 +236,7 @@ impl GitLab {
             LookupKind::Milestones => self.url(&["projects", &project, "milestones"]),
             LookupKind::Iterations => self.url(&["projects", &project, "iterations"]),
             LookupKind::Projects => self.url(&["projects"]),
+            LookupKind::Labels => self.url(&["projects", &project, "labels"]),
         };
         let query = query.trim();
         let query = if kind == LookupKind::Users {
@@ -269,11 +270,17 @@ impl GitLab {
                 Ok(projects
                     .into_iter()
                     .take(20)
-                    .map(|p| LookupOption {
-                        id: p.id,
-                        label: p.name,
-                        description: format!("{} · ID {}", p.path_with_namespace, p.id),
-                        value: p.path_with_namespace,
+                    .map(|p| {
+                        let description = format!("{} · ID {}", p.path_with_namespace, p.id);
+                        LookupOption {
+                            id: p.id,
+                            label: p.name,
+                            value: p.path_with_namespace,
+                            api_value: p.id.to_string(),
+                            description,
+                            color: String::new(),
+                            text_color: String::new(),
+                        }
                     })
                     .collect())
             }
@@ -320,9 +327,23 @@ impl GitLab {
                             id: entry.id,
                             value: title.clone(),
                             label: title,
+                            api_value: entry.id.to_string(),
                             description: format!("{dates} · {scope} · ID {}", entry.id),
+                            color: String::new(),
+                            text_color: String::new(),
                         }
                     })
+                    .collect())
+            }
+            LookupKind::Labels => {
+                url.query_pairs_mut()
+                    .append_pair("include_ancestor_groups", "true");
+                let labels: Vec<Label> = self.get(&url)?;
+                Ok(labels
+                    .into_iter()
+                    .take(20)
+                    .map(label_contrast)
+                    .map(|label| LookupOption::label(&label))
                     .collect())
             }
         }
@@ -1579,6 +1600,9 @@ mod tests {
                 assert_eq!(params["membership"], "true");
                 assert_eq!(params["search_namespaces"], "true");
                 json!({"id": 50, "name": "Service", "path_with_namespace": "deep/group/service"})
+            } else if url.path().ends_with("/labels") {
+                assert_eq!(params["include_ancestor_groups"], "true");
+                json!({"name": "team::platform", "color": "#123456", "text_color": "#ffffff"})
             } else {
                 assert_eq!(params["include_ancestors"], "true");
                 if url.path().ends_with("/iterations") {
@@ -1597,6 +1621,7 @@ mod tests {
             LookupKind::Milestones,
             LookupKind::Iterations,
             LookupKind::Projects,
+            LookupKind::Labels,
         ] {
             let matches = api.lookup(7, kind, "  Équipe & sprint/next  ").unwrap();
             assert_eq!(matches.len(), 20);
@@ -1604,7 +1629,7 @@ mod tests {
         }
         assert_eq!(
             mock.requests.lock().unwrap().len(),
-            4,
+            5,
             "typeahead must not paginate all history"
         );
     }
@@ -1623,6 +1648,11 @@ mod tests {
                     {"id":1,"name":"Alex","username":"alex-one"},
                     {"id":2,"name":"Alex","username":"alex-two"}
                 ]))
+            } else if request.url().path().ends_with("/labels") {
+                Reply::json(json!([
+                    {"name":"bug","color":"#d9534f","text_color":"#ffffff"},
+                    {"name":"bug","color":"#d9534f","text_color":"#ffffff"}
+                ]))
             } else {
                 Reply::json(
                     json!([{"id":9,"title":null,"start_date":"2026-10-01","due_date":"2026-10-14","group_id":6}]),
@@ -1635,6 +1665,10 @@ mod tests {
         let iterations = mock.client().lookup(7, LookupKind::Iterations, "").unwrap();
         assert!(iterations[0].label.contains("2026-10-01"));
         assert!(iterations[0].description.contains("group 6"));
+        let labels = mock.client().lookup(7, LookupKind::Labels, "bug").unwrap();
+        assert_eq!(labels[0].value, "bug");
+        assert_eq!(labels[0].api_value, "bug");
+        assert_eq!(labels[0].color, "#d9534f");
         let limited = Mock::new(|_| Reply::bytes(429, Vec::new()).header("Retry-After", "30"));
         assert!(
             limited

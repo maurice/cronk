@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +72,7 @@ pub enum LookupKind {
     Milestones,
     Iterations,
     Projects,
+    Labels,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,7 +80,10 @@ pub struct LookupOption {
     pub id: u64,
     pub label: String,
     pub value: String,
+    pub api_value: String,
     pub description: String,
+    pub color: String,
+    pub text_color: String,
 }
 
 impl LookupOption {
@@ -87,7 +92,10 @@ impl LookupOption {
             id: user.id,
             label: user.name.clone(),
             value: format!("@{}", user.username),
+            api_value: user.id.to_string(),
             description: format!("@{} · ID {}", user.username, user.id),
+            color: String::new(),
+            text_color: String::new(),
         }
     }
     pub fn project(project: &Project) -> Self {
@@ -95,9 +103,29 @@ impl LookupOption {
             id: project.id,
             label: project.name().to_owned(),
             value: project.path.clone(),
+            api_value: project.id.to_string(),
             description: format!("{} · ID {}", project.path, project.id),
+            color: String::new(),
+            text_color: String::new(),
         }
     }
+    pub fn label(label: &Label) -> Self {
+        Self {
+            id: lookup_id(&label.name),
+            label: label.name.clone(),
+            value: label.name.clone(),
+            api_value: label.name.clone(),
+            description: "Known label".into(),
+            color: label.color.clone(),
+            text_color: label.text_color.clone(),
+        }
+    }
+}
+
+fn lookup_id(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish().max(1)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

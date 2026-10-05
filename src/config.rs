@@ -399,7 +399,10 @@ mod tests {
             id: user.id,
             label: user.name.clone(),
             value: "@jdoe".into(),
+            api_value: "42".into(),
             description: "@jdoe · ID 42".into(),
+            color: String::new(),
+            text_color: String::new(),
         };
         assert_eq!(formatter.render_lookup(&option), "John");
         user.name = "Jane Example".into();

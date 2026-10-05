@@ -597,6 +597,21 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
         .into()
 }
 
+/// Keep the selection edge on the normal canvas, outside the row's selection/hover fill.
+fn list_selection_line(content: impl Into<Element>, selected: bool, colors: Colors) -> Element {
+    HStack::new()
+        .height(Length::Px(1))
+        .style(colors.base())
+        .child(
+            Text::new(if selected { "▕" } else { " " })
+                .width(Length::Px(1))
+                .height(Length::Px(1))
+                .style(colors.base().fg(colors.accent)),
+        )
+        .child(content)
+        .into()
+}
+
 fn work_row(
     ctx: &Context<Cronk>,
     item: &WorkItem,
@@ -613,12 +628,7 @@ fn work_row(
     let style = interaction::style(ctx, &format!("item-{}", item_key(&item.key)), style);
     let (circle, color) = colors.status(&item.state);
     let mut title = vec![
-        Span::new(if selected && state.scope == Scope::List {
-            "▎ "
-        } else {
-            "  "
-        })
-        .fg(colors.accent),
+        Span::new(" "),
         Span::new(format!("{circle} ")).fg(color),
         Span::new(format!("{}  ", item_id(&item.key))).fg(colors.accent),
     ];
@@ -626,7 +636,7 @@ fn work_row(
         title.push(Span::new("Draft · ").fg(colors.yellow));
     }
     title.push(Span::new(item.title.clone()).bold());
-    let mut labels = vec![Span::new("    ")];
+    let mut labels = vec![Span::new("   ")];
     labels.extend(label_spans(&item.labels, colors));
     if let Some(pipeline) = &item.pipeline {
         labels.push(status_span(&pipeline.status, colors));
@@ -636,7 +646,7 @@ fn work_row(
     let mut attention = Vec::new();
     if state.config.active_tab == 0 {
         let roles = item.dashboard_roles(state.user.id);
-        attention.push(Span::new("    Why: ").fg(colors.muted));
+        attention.push(Span::new("   Why: ").fg(colors.muted));
         for (index, reason) in item
             .attention_reasons(state.user.id)
             .into_iter()
@@ -652,11 +662,8 @@ fn work_row(
             attention.push(Span::new(roles.join(" + ")).fg(colors.accent));
         }
     }
-    let attention_line = if attention.is_empty() {
-        blank()
-    } else {
-        rich(attention, style).into()
-    };
+    let marked = selected && state.scope == Scope::List;
+    let attention_line = list_selection_line(rich(attention, style), marked, colors);
     let identity = project_name(state, item.key.project);
     let top = HStack::new()
         .height(Length::Px(1))
@@ -673,8 +680,8 @@ fn work_row(
     let mut row = VStack::new()
         .height(Length::Px(if dashboard { 4 } else { 3 }))
         .style(colors.base())
-        .child(top)
-        .child(rich(labels, style));
+        .child(list_selection_line(top, marked, colors))
+        .child(list_selection_line(rich(labels, style), marked, colors));
     row = if dashboard {
         row.child(attention_line).child(blank())
     } else {

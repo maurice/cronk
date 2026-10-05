@@ -892,7 +892,7 @@ fn tab_and_both_shift_tab_encodings_move_the_list_not_widget_focus() {
     key(&mut ui, KeyCode::Tab);
     assert_eq!(ui.state().scroll.selected, last, "selection must not wrap");
     ui.render();
-    assert!(ui.capture_frame().plain_text().contains('▎'));
+    assert!(ui.capture_frame().plain_text().contains('▕'));
     key(&mut ui, KeyCode::Home);
     assert_eq!(
         (ui.state().scroll.selected, ui.state().scroll.offset),
@@ -2699,7 +2699,7 @@ fn dashboard_rows_show_user_role_separately_from_attention_reason() {
         .collect();
 
     assert!(
-        attention_line.starts_with("    Why: Pipeline failed"),
+        attention_line.starts_with("▕   Why: Pipeline failed"),
         "{text}"
     );
     assert!(

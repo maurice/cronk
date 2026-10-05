@@ -123,6 +123,60 @@ fn tabs_lists_checkboxes_and_dialog_controls_have_hover_in_every_theme() {
 }
 
 #[test]
+fn work_list_selection_edge_covers_content_rows_without_background_fill() {
+    for theme in THEMES {
+        for tab in [0, 2, 3] {
+            let mut ui = mount(config(theme, tab));
+            let keys: Vec<_> = ui
+                .state()
+                .visible_items()
+                .iter()
+                .take(2)
+                .map(|item| {
+                    format!(
+                        "item-{}-{}-{}",
+                        item.key.project,
+                        item.key.kind.segment(),
+                        item.key.iid
+                    )
+                })
+                .collect();
+            assert_eq!(keys.len(), 2);
+            let content_rows = if tab == 0 { 3 } else { 2 };
+            let (x, y) = point(&ui, &keys[0]);
+            let background = ui.capture_frame().cell(x, y + content_rows).bg;
+            for selected in 0..2 {
+                ui.dispatch(Msg::Select(selected)).unwrap();
+                settle(&mut ui);
+                for hovered in [false, true] {
+                    let (hx, hy) = if hovered {
+                        point(&ui, &keys[selected])
+                    } else {
+                        (0, 0)
+                    };
+                    mouse(&mut ui, hx, hy, MouseKind::Moved);
+                    let frame = ui.capture_frame();
+                    for (index, key) in keys.iter().enumerate() {
+                        let (x, y) = point(&ui, key);
+                        for row in 0..content_rows {
+                            let edge = frame.cell(x, y + row);
+                            assert_eq!(edge.symbol, if index == selected { "▕" } else { " " });
+                            assert_eq!(edge.bg, background, "{theme}, tab {tab}, row {row}");
+                            if index == selected {
+                                assert_ne!(frame.cell(x + 1, y + row).bg, background);
+                                assert_eq!(edge.fg, frame.cell(x, y).fg);
+                            }
+                        }
+                        assert_eq!(frame.cell(x, y + content_rows).symbol, " ");
+                        assert_eq!(frame.cell(x, y + content_rows).bg, background);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn work_row_hover_is_not_selection_and_preserves_every_label_cell() {
     for theme in THEMES {
         let mut ui = mount(config(theme, 2));
@@ -143,7 +197,7 @@ fn work_row_hover_is_not_selection_and_preserves_every_label_cell() {
         let selected_point = point(&ui, &keys[0]);
         let selection_bg = ui
             .capture_frame()
-            .cell(selected_point.0, selected_point.1)
+            .cell(selected_point.0 + 1, selected_point.1)
             .bg;
         for key in keys {
             mouse(&mut ui, 0, 0, MouseKind::Moved);
@@ -151,16 +205,17 @@ fn work_row_hover_is_not_selection_and_preserves_every_label_cell() {
             let before = ui.capture_frame();
             mouse(&mut ui, x, y, MouseKind::Moved);
             let hovered = ui.capture_frame();
-            assert_ne!(hovered.cell(x, y).bg, before.cell(x, y).bg);
+            assert_eq!(hovered.cell(x, y), before.cell(x, y));
+            assert_ne!(hovered.cell(x + 1, y).bg, before.cell(x + 1, y).bg);
             assert_ne!(
-                hovered.cell(x, y).bg,
+                hovered.cell(x + 1, y).bg,
                 selection_bg,
                 "hover is not a selection replacement"
             );
-            for column in 0..ui.viewport().w - 2 {
+            for column in 1..ui.viewport().w - 2 {
                 let cell = before.cell(column, y + 1);
                 // Label pills have a background different from the row's background.
-                if cell.bg != before.cell(0, y + 1).bg {
+                if cell.bg != before.cell(1, y + 1).bg {
                     assert_eq!(hovered.cell(column, y + 1), cell, "label pill changed");
                 }
                 assert_eq!(hovered.cell(column, y).fg, before.cell(column, y).fg);

@@ -4,7 +4,13 @@ mod view;
 
 pub use completion::Completion;
 
-use crate::{config::Config, filter::Query, gitlab::GitLab, model::*, scroll::BoundaryScroll};
+use crate::{
+    config::{Config, UserFormatter},
+    filter::Query,
+    gitlab::GitLab,
+    model::*,
+    scroll::BoundaryScroll,
+};
 use std::result::Result;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -32,6 +38,7 @@ pub struct State {
     pub scope: Scope,
     pub items: Vec<WorkItem>,
     pub user: User,
+    user_formatter: UserFormatter,
     pub details: Option<Details>,
     pub scroll: BoundaryScroll,
     pub section_cursor: usize,
@@ -274,6 +281,9 @@ impl State {
             n if n >= 4 => self.config.views.get(n - 4).map(|v| v.kind),
             _ => None,
         }
+    }
+    pub fn render_user(&self, user: &User) -> String {
+        self.user_formatter.render(user)
     }
     pub fn project(&self, id: u64) -> Option<&Project> {
         self.config.projects.iter().find(|p| p.id == id)

@@ -12,6 +12,8 @@ impl Component for Cronk {
 
     fn create_state(&self, _: &()) -> State {
         let mut config = self.config.clone();
+        let user_formatter = UserFormatter::from_config(&config)
+            .expect("configuration is validated before creating UI state");
         config.active_tab = config.active_tab.min(3 + config.views.len());
         if config.route.as_ref().is_some_and(|key| {
             !config
@@ -76,6 +78,7 @@ impl Component for Cronk {
             } else {
                 User::default()
             },
+            user_formatter,
             details,
             scroll: BoundaryScroll {
                 selected,

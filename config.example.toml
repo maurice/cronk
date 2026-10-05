@@ -3,6 +3,10 @@
 gitlab_url = "https://gitlab.company.example"
 token_env = "GITLAB_TOKEN"
 theme = "midnight" # midnight | dracula | light
+user_display = "username" # username | name | id
+# When user_display = "name", optionally transform GitLab names with named regex captures:
+# user_name_pattern = '^(?P<surname>\S+)\s+(?P<firstname>\S+)\s+(?P<staff_id>\d+)$'
+# user_name_format = '$firstname'
 list_refresh_secs = 60 # minimum 15
 detail_refresh_secs = 10 # minimum 2; use 5 for faster details
 

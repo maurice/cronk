@@ -1,7 +1,11 @@
 use super::{
     Completion, Cronk, Dialog, DialogKind, Msg, Scope, State, list_height_for_tab, list_row_height,
 };
-use crate::{build_info, config::Config, model::*};
+use crate::{
+    build_info,
+    config::{Config, UserFormatter},
+    model::*,
+};
 use tui_lipan::{
     prelude::*,
     style::{RowStylePolicy, ThemePalette},
@@ -315,6 +319,12 @@ fn brand(state: &State, colors: Colors) -> Element {
     } else {
         "GitLab workspace"
     };
+    let identity =
+        if state.user.id == 0 && state.user.username.is_empty() && state.user.name.is_empty() {
+            None
+        } else {
+            Some(state.render_user(&state.user))
+        };
     HStack::new()
         .height(Length::Px(1))
         .padding((0, 2))
@@ -327,16 +337,15 @@ fn brand(state: &State, colors: Colors) -> Element {
             Style::new(),
         ))
         .child(
-            Text::new(if state.user.username.is_empty() {
+            Text::new(if let Some(identity) = identity {
                 format!(
-                    "{}  ·  {}",
+                    "{identity}  ·  {}  ·  {}",
                     state.config.theme,
                     build_info::display_version()
                 )
             } else {
                 format!(
-                    "@{}  ·  {}  ·  {}",
-                    state.user.username,
+                    "{}  ·  {}",
                     state.config.theme,
                     build_info::display_version()
                 )
@@ -541,7 +550,7 @@ fn work_row(
         labels.push(status_span(&pipeline.status, colors));
         labels.push(Span::new("  ·  ").fg(colors.muted));
     }
-    labels.push(Span::new(format!("@{}", item.author.username)).fg(colors.muted));
+    labels.push(Span::new(state.render_user(&item.author)).fg(colors.muted));
     let mut attention = Vec::new();
     if state.config.active_tab == 0 {
         let roles = item.dashboard_roles(state.user.id);
@@ -808,7 +817,7 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                 } else {
                     notes
                         .into_iter()
-                        .map(|note| note_view(note, section_colors))
+                        .map(|note| note_view(note, &ctx.state.user_formatter, section_colors))
                         .collect()
                 }
             }
@@ -890,6 +899,24 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
         ];
         if label == "Labels" {
             spans.extend(label_spans(&details.item.labels, colors));
+        } else if label == "Assignees" {
+            let users = details
+                .item
+                .assignees
+                .iter()
+                .map(|user| ctx.state.render_user(user))
+                .collect::<Vec<_>>()
+                .join(", ");
+            spans.push(Span::new(if users.is_empty() { "—" } else { &users }));
+        } else if label == "Reviewers" {
+            let users = details
+                .item
+                .reviewers
+                .iter()
+                .map(|user| ctx.state.render_user(user))
+                .collect::<Vec<_>>()
+                .join(", ");
+            spans.push(Span::new(if users.is_empty() { "—" } else { &users }));
         } else {
             spans.push(Span::new(if value.is_empty() {
                 "—".into()
@@ -923,7 +950,7 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
     }
     content.push(metadata(
         "Author",
-        format!("@{}", item.author.username),
+        ctx.state.render_user(&item.author),
         colors,
     ));
     content.push(metadata("Updated", item.updated_at.clone(), colors));
@@ -959,9 +986,9 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
     content
 }
 
-fn note_view(note: &Note, colors: Colors) -> Element {
+fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> Element {
     let mut header = vec![
-        Span::new(format!("@{}", note.author.username))
+        Span::new(formatter.render(&note.author))
             .fg(colors.cyan)
             .bold(),
         Span::new(format!("   {}", note.created_at)).fg(colors.muted),
@@ -1189,10 +1216,10 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<E
         } else {
             colors.base()
         };
-        let author = discussion
-            .notes
-            .first()
-            .map_or("unknown", |n| n.author.username.as_str());
+        let author = discussion.notes.first().map_or_else(
+            || "unknown".into(),
+            |note| ctx.state.render_user(&note.author),
+        );
         let link = ctx.link().clone();
         content.push(click(
             ctx,
@@ -1200,7 +1227,7 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<E
             rich(
                 vec![
                     Span::new(format!(
-                        " {} @{}  ",
+                        " {} {}  ",
                         if selected { "›" } else { " " },
                         author
                     ))
@@ -1215,7 +1242,12 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<E
                 Msg::Select(index)
             },
         ));
-        content.extend(discussion.notes.iter().map(|note| note_view(note, colors)));
+        content.extend(
+            discussion
+                .notes
+                .iter()
+                .map(|note| note_view(note, &ctx.state.user_formatter, colors)),
+        );
         content.push(blank());
     }
     content
@@ -1670,7 +1702,11 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
                         } else {
                             " "
                         },
-                        option.label
+                        if c.kind == LookupKind::Users {
+                            ctx.state.user_formatter.render_lookup(option)
+                        } else {
+                            option.label.clone()
+                        }
                     ),
                     style,
                 ))

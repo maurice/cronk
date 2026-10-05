@@ -6,9 +6,9 @@ use std::{
 
 use cronk::{
     build_info,
-    config::{Config, SavedView, TabState},
+    config::{Config, SavedView, TabState, UserDisplay},
     demo,
-    model::{ItemKey, ItemKind, Mutation, TraceChunk},
+    model::{ItemKey, ItemKind, Mutation, TraceChunk, User},
     ui::{Confirmation, Cronk, Dialog, DialogKind, Msg, Scope, State},
 };
 use tui_lipan::{
@@ -2625,6 +2625,32 @@ fn failed_mutation_clears_pending_but_keeps_all_dialog_fields_and_an_editable_dr
     );
     assert_eq!(ui.state().scope, Scope::Details);
     assert_eq!(ui.state().config.route.as_ref(), Some(&route));
+}
+
+#[test]
+fn configured_user_name_pattern_is_used_in_the_interface() {
+    let config = Config {
+        user_display: UserDisplay::Name,
+        user_name_pattern: Some(
+            r"^(?P<surname>\S+)\s+(?P<firstname>\S+)\s+(?P<staff_id>\d+)$".into(),
+        ),
+        user_name_format: Some("$firstname".into()),
+        ..config()
+    };
+    let mut ui = mount(config, None);
+    let user = User {
+        id: 9876,
+        username: "jdoe".into(),
+        name: "Doe John 12345678".into(),
+    };
+    ui.state_mut().user = user.clone();
+    ui.state_mut().items[0].author = user;
+    ui.render();
+
+    let text = ui.capture_frame().plain_text();
+    assert!(text.contains("John"), "{text}");
+    assert!(!text.contains("@jdoe"), "{text}");
+    assert!(!text.contains("Doe John 12345678"), "{text}");
 }
 
 #[test]

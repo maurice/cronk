@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use directories::ProjectDirs;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::filter::Query;
-use crate::model::{ItemKey, ItemKind, Project};
+use crate::model::{ItemKey, ItemKind, LookupOption, Project, User};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -24,6 +25,9 @@ pub struct Config {
     pub projects: Vec<Project>,
     pub views: Vec<SavedView>,
     pub theme: String,
+    pub user_display: UserDisplay,
+    pub user_name_pattern: Option<String>,
+    pub user_name_format: Option<String>,
     pub colors: ThemeColors,
     pub list_refresh_secs: u64,
     pub detail_refresh_secs: u64,
@@ -56,6 +60,15 @@ pub struct SavedView {
     pub query: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserDisplay {
+    #[default]
+    Username,
+    Name,
+    Id,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeColors {
@@ -75,6 +88,9 @@ impl Default for Config {
             projects: Vec::new(),
             views: Vec::new(),
             theme: "midnight".into(),
+            user_display: UserDisplay::default(),
+            user_name_pattern: None,
+            user_name_format: None,
             colors: ThemeColors::default(),
             list_refresh_secs: 60,
             detail_refresh_secs: 10,
@@ -86,6 +102,90 @@ impl Default for Config {
             field: 0,
             filters: BTreeMap::new(),
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct UserFormatter {
+    display: UserDisplay,
+    pattern: Option<Regex>,
+    format: Option<String>,
+}
+
+impl UserFormatter {
+    pub(crate) fn from_config(config: &Config) -> Result<Self> {
+        ensure!(
+            config.user_name_pattern.is_some() == config.user_name_format.is_some(),
+            "user_name_pattern and user_name_format must be configured together"
+        );
+        let pattern = config
+            .user_name_pattern
+            .as_deref()
+            .map(|pattern| {
+                ensure!(
+                    pattern.len() <= 1024,
+                    "user_name_pattern must be at most 1024 bytes"
+                );
+                RegexBuilder::new(pattern)
+                    .size_limit(1 << 20)
+                    .build()
+                    .context("user_name_pattern is not a valid Rust regex")
+            })
+            .transpose()?;
+        if let Some(format) = &config.user_name_format {
+            ensure!(
+                format.len() <= 1024,
+                "user_name_format must be at most 1024 bytes"
+            );
+        }
+        Ok(Self {
+            display: config.user_display,
+            pattern,
+            format: config.user_name_format.clone(),
+        })
+    }
+
+    pub fn render_lookup(&self, option: &LookupOption) -> String {
+        if self.display == UserDisplay::Username && !option.label.trim().is_empty() {
+            return option.label.clone();
+        }
+        self.render(&User {
+            id: option.id,
+            username: option.value.trim_start_matches('@').into(),
+            name: option.label.clone(),
+        })
+    }
+
+    pub fn render(&self, user: &User) -> String {
+        match self.display {
+            UserDisplay::Username if !user.username.is_empty() => format!("@{}", user.username),
+            UserDisplay::Name if !user.name.trim().is_empty() => {
+                if let (Some(pattern), Some(format)) = (&self.pattern, &self.format)
+                    && let Some(captures) = pattern.captures(&user.name)
+                {
+                    let mut rendered = String::new();
+                    captures.expand(format, &mut rendered);
+                    if !rendered.trim().is_empty() {
+                        return rendered;
+                    }
+                }
+                user.name.clone()
+            }
+            UserDisplay::Id if user.id > 0 => user.id.to_string(),
+            _ => fallback_user(user),
+        }
+    }
+}
+
+fn fallback_user(user: &User) -> String {
+    if !user.username.is_empty() {
+        format!("@{}", user.username)
+    } else if !user.name.trim().is_empty() {
+        user.name.clone()
+    } else if user.id > 0 {
+        user.id.to_string()
+    } else {
+        "unknown".into()
     }
 }
 
@@ -190,6 +290,7 @@ impl Config {
             matches!(self.theme.as_str(), "midnight" | "dracula" | "light"),
             "theme must be midnight, dracula, or light"
         );
+        UserFormatter::from_config(self)?;
 
         let url =
             reqwest::Url::parse(&self.gitlab_url).context("gitlab_url must be a valid URL")?;
@@ -271,8 +372,65 @@ mod tests {
         assert_eq!(config.gitlab_url, "https://gitlab.com");
         assert_eq!(config.token_env, "GITLAB_TOKEN");
         assert_eq!(config.theme, "midnight");
+        assert_eq!(config.user_display, UserDisplay::Username);
         assert!(config.route.is_none());
         assert!(!directory.path().join("missing").exists());
+    }
+
+    #[test]
+    fn user_formatter_supports_named_capture_replacements_and_safe_fallbacks() {
+        let mut config = Config {
+            user_display: UserDisplay::Name,
+            user_name_pattern: Some(
+                r"^(?P<surname>\S+)\s+(?P<firstname>\S+)\s+(?P<staff_id>\d+)$".into(),
+            ),
+            user_name_format: Some("$firstname".into()),
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        let formatter = UserFormatter::from_config(&config).unwrap();
+        let mut user = User {
+            id: 42,
+            username: "jdoe".into(),
+            name: "Doe John 12345678".into(),
+        };
+        assert_eq!(formatter.render(&user), "John");
+        let option = LookupOption {
+            id: user.id,
+            label: user.name.clone(),
+            value: "@jdoe".into(),
+            description: "@jdoe · ID 42".into(),
+        };
+        assert_eq!(formatter.render_lookup(&option), "John");
+        user.name = "Jane Example".into();
+        assert_eq!(formatter.render(&user), "Jane Example");
+
+        config.user_display = UserDisplay::Id;
+        assert_eq!(
+            UserFormatter::from_config(&config).unwrap().render(&user),
+            "42"
+        );
+        config.user_display = UserDisplay::Username;
+        assert_eq!(
+            UserFormatter::from_config(&config).unwrap().render(&user),
+            "@jdoe"
+        );
+    }
+
+    #[test]
+    fn user_name_pattern_and_format_are_validated_together() {
+        for (pattern, format) in [
+            (Some("[".into()), Some("$firstname".into())),
+            (Some("(?P<name>.*)".into()), None),
+            (None, Some("$firstname".into())),
+        ] {
+            let config = Config {
+                user_name_pattern: pattern,
+                user_name_format: format,
+                ..Config::default()
+            };
+            assert!(config.validate().is_err());
+        }
     }
 
     #[test]
@@ -331,6 +489,11 @@ mod tests {
                 query: "reviewer:@me draft:false".into(),
             }],
             theme: "light".into(),
+            user_display: UserDisplay::Name,
+            user_name_pattern: Some(
+                r"^(?P<surname>\S+)\s+(?P<firstname>\S+)\s+(?P<staff_id>\d+)$".into(),
+            ),
+            user_name_format: Some("$firstname".into()),
             colors: ThemeColors {
                 background: Some("#000001".into()),
                 surface: Some("#000002".into()),

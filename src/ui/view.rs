@@ -546,8 +546,16 @@ fn work_row(
     if state.config.active_tab == 0 {
         let roles = item.dashboard_roles(state.user.id);
         attention.push(Span::new("    Why: ").fg(colors.muted));
-        attention
-            .push(Span::new(item.attention_reasons(state.user.id).join(" · ")).fg(colors.accent));
+        for (index, reason) in item
+            .attention_reasons(state.user.id)
+            .into_iter()
+            .enumerate()
+        {
+            if index > 0 {
+                attention.push(Span::new(", ").fg(colors.muted));
+            }
+            attention.push(Span::new(reason).fg(colors.accent));
+        }
         if !roles.is_empty() {
             attention.push(Span::new("  ·  You: ").fg(colors.muted));
             attention.push(Span::new(roles.join(" + ")).fg(colors.accent));

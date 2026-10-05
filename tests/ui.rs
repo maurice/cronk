@@ -2607,6 +2607,10 @@ fn dashboard_rows_show_user_role_separately_from_attention_reason() {
         attention_line.starts_with("    Why: Pipeline failed"),
         "{text}"
     );
+    assert!(
+        attention_line.contains("Pipeline failed, 2 unresolved threads"),
+        "{text}"
+    );
     assert!(attention_line.contains(" ·  You: author"), "{text}");
     assert!(spacer_line.trim().is_empty(), "{text}");
     assert!(lines[attention_index + 2].contains("!101"), "{text}");

@@ -107,6 +107,49 @@ fn assert_hover(ui: &mut Ui, key: &str) {
 }
 
 #[test]
+fn header_brand_is_inverted_and_running_status_is_royal_blue_in_every_theme() {
+    for (theme, surface, accent, blue) in [
+        ("midnight", 0x192131, 0x9b9fff, 0x7799ff),
+        ("dracula", 0x21222c, 0xbd93f9, 0x82aaff),
+        ("light", 0xeceff6, 0x5746bd, 0x315bc9),
+    ] {
+        let ui = mount(config(theme, 0));
+        let frame = ui.capture_frame();
+        let header = &frame.to_lines()[0];
+        let x = header.find("CRONK").unwrap() as u16;
+        for offset in 0..5 {
+            let cell = frame.cell(x + offset, 0);
+            assert_eq!(cell.fg, Color::hex_u24(surface), "{theme}");
+            assert_eq!(cell.bg, Color::hex_u24(accent), "{theme}");
+        }
+        assert_eq!(frame.cell(x + 5, 0).bg, Color::hex_u24(surface));
+        let mut running = 0;
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                let cell = frame.cell(x, y);
+                if cell.symbol == "◐" {
+                    assert_eq!(cell.fg, Color::hex_u24(blue), "{theme}");
+                    running += 1;
+                }
+            }
+        }
+        assert!(running > 0, "running pipeline must be visible in {theme}");
+    }
+}
+
+#[test]
+fn inverted_header_brand_respects_custom_theme_colors() {
+    let mut config = config("dracula", 0);
+    config.colors.surface = Some("#111213".into());
+    config.colors.accent = Some("#919293".into());
+    let ui = mount(config);
+    let frame = ui.capture_frame();
+    let x = frame.to_lines()[0].find("CRONK").unwrap() as u16;
+    assert_eq!(frame.cell(x, 0).fg, Color::hex_u24(0x111213));
+    assert_eq!(frame.cell(x, 0).bg, Color::hex_u24(0x919293));
+}
+
+#[test]
 fn tabs_lists_checkboxes_and_dialog_controls_have_hover_in_every_theme() {
     for theme in THEMES {
         let mut ui = mount(config(theme, 1));

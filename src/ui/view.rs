@@ -26,7 +26,7 @@ struct Colors {
     green: Color,
     yellow: Color,
     red: Color,
-    cyan: Color,
+    blue: Color,
     purple: Color,
     pending: Color,
 }
@@ -36,15 +36,15 @@ impl Colors {
         let values = match config.theme.as_str() {
             "dracula" => [
                 0x282a36, 0x21222c, 0x44475a, 0xf8f8f2, 0xa5a8c0, 0xbd93f9, 0x50fa7b, 0xf1fa8c,
-                0xff5555, 0x8be9fd, 0xff79c6,
+                0xff5555, 0x82aaff, 0xff79c6,
             ],
             "light" => [
                 0xf7f8fc, 0xeceff6, 0xdce5fa, 0x24283b, 0x626b83, 0x5746bd, 0x187348, 0x946200,
-                0xc2354b, 0x007a91, 0x9146ae,
+                0xc2354b, 0x315bc9, 0x9146ae,
             ],
             _ => [
                 0x101521, 0x192131, 0x293654, 0xe5eaf5, 0x96a3bc, 0x9b9fff, 0x63dba5, 0xf0c674,
-                0xff758f, 0x70d7ec, 0xc69cf4,
+                0xff758f, 0x7799ff, 0xc69cf4,
             ],
         };
         let c = &config.colors;
@@ -64,7 +64,7 @@ impl Colors {
             green: Color::hex_u24(values[6]),
             yellow: Color::hex_u24(values[7]),
             red: Color::hex_u24(values[8]),
-            cyan: Color::hex_u24(values[9]),
+            blue: Color::hex_u24(values[9]),
             purple: Color::hex_u24(values[10]),
             // A darker neutral keeps the light theme readable without using a warning color.
             pending: Color::hex_u24(if config.theme == "light" {
@@ -90,7 +90,7 @@ impl Colors {
             .success(self.green)
             .warning(self.yellow)
             .error(self.red)
-            .info(self.cyan)
+            .info(self.blue)
             .into_theme();
         theme.primary = self.base();
         theme.hover = interaction::hover_style();
@@ -101,9 +101,9 @@ impl Colors {
         theme.surface.menu = self.surface;
         theme.focus_decoration = false;
         theme.document.heading_styles = [Style::new().fg(self.accent).bold(); 6];
-        theme.document.code_inline = Style::new().fg(self.cyan).bg(self.surface);
+        theme.document.code_inline = Style::new().fg(self.blue).bg(self.surface);
         theme.document.code_block = Style::new().fg(self.foreground).bg(self.surface);
-        theme.document.link = Style::new().fg(self.cyan).underline();
+        theme.document.link = Style::new().fg(self.blue).underline();
         theme.document.blockquote_bar = Style::new().fg(self.purple);
         theme.document.table_header = Style::new().fg(self.accent).bold();
         theme.document.table_border = Style::new().fg(self.muted);
@@ -114,7 +114,7 @@ impl Colors {
     fn status(self, status: &str) -> (char, Color) {
         match status {
             "opened" | "success" | "passed" | "resolved" => ('●', self.green),
-            "running" => ('◐', self.cyan),
+            "running" => ('◐', self.blue),
             "failed" | "error" | "unresolved" => ('●', self.red),
             "merged" => ('●', self.purple),
             "pending" | "created" | "waiting_for_resource" | "preparing" => ('○', self.pending),
@@ -569,7 +569,10 @@ fn brand(state: &State, colors: Colors) -> Element {
         .style(Style::new().bg(colors.surface))
         .child(rich(
             vec![
-                Span::new("CRONK").fg(colors.accent).bold(),
+                Span::new("CRONK")
+                    .fg(colors.surface)
+                    .bg(colors.accent)
+                    .bold(),
                 Span::new(format!("   {mode}")).fg(colors.muted),
             ],
             Style::new(),
@@ -1543,7 +1546,7 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
 fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> DetailRow {
     let mut header = vec![
         Span::new(formatter.render(&note.author))
-            .fg(colors.cyan)
+            .fg(colors.blue)
             .bold(),
         Span::new(format!("   {}", note.created_at)).fg(colors.muted),
     ];
@@ -1806,7 +1809,7 @@ fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> E
             }
             panel = panel.child(log_window(ctx, job, lines, colors));
             panel = if job.running() {
-                let style = colors.base().bg(colors.surface).fg(colors.cyan);
+                let style = colors.base().bg(colors.surface).fg(colors.blue);
                 panel.child(
                     HStack::new()
                         .height(Length::Px(1))
@@ -1816,7 +1819,7 @@ fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> E
                             ctx,
                             format!("job-{}-live-status", job.id),
                             '◐',
-                            colors.cyan,
+                            colors.blue,
                             "Live log: Output is polled while this job is running",
                             style,
                         ))
@@ -1969,7 +1972,7 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<D
                 format!("discussion-{}", discussion.id),
                 rich(
                     vec![
-                        Span::new(format!("{author}  ")).fg(colors.cyan),
+                        Span::new(format!("{author}  ")).fg(colors.blue),
                         Span::new(discussion_state(discussion))
                             .fg(colors.status(discussion_state(discussion)).1),
                         Span::new(format!("  ·  {} notes", discussion.notes.len()))
@@ -2041,7 +2044,7 @@ fn changes(details: &Details, colors: Colors) -> Vec<DetailRow> {
         }
         for (number, text) in diff.diff.lines().enumerate() {
             let foreground = if text.starts_with("@@") {
-                colors.cyan
+                colors.blue
             } else if text.starts_with('+') {
                 colors.green
             } else if text.starts_with('-') {
@@ -2099,14 +2102,14 @@ fn footer(ctx: &Context<Cronk>, colors: Colors) -> Element {
                 } else {
                     '○'
                 },
-                colors.cyan,
+                colors.blue,
                 "Syncing: Requests to GitLab are in progress",
                 style,
             ))
             .child(
                 Text::new(" Syncing  ")
                     .height(Length::Px(1))
-                    .style(style.fg(colors.cyan)),
+                    .style(style.fg(colors.blue)),
             );
     }
     status_line = status_line.child(
@@ -2314,7 +2317,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         }
     } else if matches!(dialog.kind, DialogKind::Themes) {
         for (index, (name, hint)) in [
-            ("Midnight", "Cool ink · violet · glacier blue"),
+            ("Midnight", "Cool ink · violet · royal blue"),
             ("Dracula", "Charcoal · orchid · electric green"),
             ("Light", "Paper · indigo · forest green"),
         ]
@@ -2704,7 +2707,18 @@ mod tests {
                 theme: theme.into(),
                 ..Config::default()
             });
-            assert_eq!(colors.status("running"), ('◐', colors.cyan));
+            let royal_blue = Color::hex_u24(match theme {
+                "dracula" => 0x82aaff,
+                "light" => 0x315bc9,
+                _ => 0x7799ff,
+            });
+            assert_eq!(colors.blue, royal_blue);
+            assert_eq!(colors.status("running"), ('◐', royal_blue));
+            assert_eq!(colors.theme().document.link.fg, Some(royal_blue.into()));
+            assert_eq!(
+                colors.theme().document.code_inline.fg,
+                Some(royal_blue.into())
+            );
             let neutral = Color::hex_u24(if theme == "light" { 0x626262 } else { 0xc7c7c7 });
             for status in ["pending", "created", "waiting_for_resource", "preparing"] {
                 assert_eq!(colors.status(status), ('○', neutral));

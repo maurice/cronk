@@ -291,24 +291,18 @@ impl State {
                 {
                     return false;
                 }
-                if self.config.active_tab == 0 {
-                    let mine = item.author.id == self.user.id
-                        || item
-                            .assignees
-                            .iter()
-                            .chain(&item.reviewers)
-                            .any(|u| u.id == self.user.id);
-                    if item.state != "opened" || !mine {
-                        return false;
-                    }
+                if self.config.active_tab == 0
+                    && (item.state != "opened" || !item.on_dashboard_for(self.user.id))
+                {
+                    return false;
                 }
                 query.matches(item, project, &self.user.username)
             })
             .collect();
         if self.config.active_tab == 0 {
             items.sort_by(|a, b| {
-                a.attention_rank()
-                    .cmp(&b.attention_rank())
+                a.attention_rank(self.user.id)
+                    .cmp(&b.attention_rank(self.user.id))
                     .then(b.updated_at.cmp(&a.updated_at))
                     .then(a.key.iid.cmp(&b.key.iid))
             });

@@ -134,9 +134,36 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
-    pub fn attention_rank(&self) -> u8 {
+    pub fn dashboard_roles(&self, current_user: u64) -> Vec<&'static str> {
+        if current_user == 0 {
+            return Vec::new();
+        }
+        let mut roles = Vec::new();
+        if self.author.id == current_user {
+            roles.push("author");
+        }
+        if self.assignees.iter().any(|user| user.id == current_user) {
+            roles.push("assignee");
+        }
+        if self.key.kind == ItemKind::MergeRequest
+            && self.reviewers.iter().any(|user| user.id == current_user)
+        {
+            roles.push("reviewer");
+        }
+        roles
+    }
+
+    pub fn on_dashboard_for(&self, current_user: u64) -> bool {
+        current_user != 0
+            && (self.author.id == current_user
+                || self.assignees.iter().any(|user| user.id == current_user)
+                || (self.key.kind == ItemKind::MergeRequest
+                    && self.reviewers.iter().any(|user| user.id == current_user)))
+    }
+
+    pub fn attention_rank(&self, current_user: u64) -> u8 {
         if self.state != "opened" {
-            return 5;
+            return 9;
         }
         if self.pipeline.as_ref().is_some_and(|p| p.status == "failed") {
             return 0;
@@ -144,28 +171,206 @@ impl WorkItem {
         if self.unresolved.is_some_and(|n| n > 0) {
             return 1;
         }
-        if !self.draft
+        if self.key.kind == ItemKind::MergeRequest
+            && self
+                .reviewers
+                .iter()
+                .any(|user| user.id == current_user && current_user != 0)
+        {
+            return 2;
+        }
+        if self.needs_reviewers(current_user) {
+            return 3;
+        }
+        if self.is_merge_request()
+            && !self.draft
             && self
                 .pipeline
                 .as_ref()
                 .is_some_and(|p| p.status == "success")
         {
-            return 2;
+            return 4;
         }
-        if self.key.kind == ItemKind::MergeRequest {
-            3
-        } else {
-            4
+        if self.is_merge_request()
+            && self.pipeline.as_ref().is_some_and(|p| {
+                matches!(
+                    p.status.as_str(),
+                    "created" | "pending" | "preparing" | "running" | "waiting_for_resource"
+                )
+            })
+        {
+            return 5;
+        }
+        if self.is_merge_request() && self.draft {
+            return 6;
+        }
+        if self.is_merge_request() { 7 } else { 8 }
+    }
+
+    pub fn attention_reasons(&self, current_user: u64) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if self.pipeline.as_ref().is_some_and(|p| p.status == "failed") {
+            reasons.push("Pipeline failed".into());
+        }
+        if let Some(count) = self.unresolved.filter(|count| *count > 0) {
+            reasons.push(format!("{count} unresolved threads"));
+        }
+        if self.key.kind == ItemKind::MergeRequest
+            && self
+                .reviewers
+                .iter()
+                .any(|user| user.id == current_user && current_user != 0)
+        {
+            reasons.push("Review assigned".into());
+        }
+        if self.needs_reviewers(current_user) {
+            reasons.push("Reviewers needed".into());
+        }
+        if self.is_merge_request()
+            && !self.draft
+            && self
+                .pipeline
+                .as_ref()
+                .is_some_and(|p| p.status == "success")
+        {
+            reasons.push("Checks passed".into());
+        }
+        if self.is_merge_request()
+            && self.pipeline.as_ref().is_some_and(|p| {
+                matches!(
+                    p.status.as_str(),
+                    "created" | "pending" | "preparing" | "running" | "waiting_for_resource"
+                )
+            })
+        {
+            reasons.push("Checks in progress".into());
+        }
+        if self.is_merge_request() && self.draft {
+            reasons.push("Draft".into());
+        }
+        if reasons.is_empty() {
+            reasons.push(if self.is_merge_request() {
+                "Open merge request".into()
+            } else {
+                "Open issue".into()
+            });
+        }
+        reasons
+    }
+
+    fn is_merge_request(&self) -> bool {
+        self.key.kind == ItemKind::MergeRequest
+    }
+
+    fn needs_reviewers(&self, current_user: u64) -> bool {
+        self.is_merge_request()
+            && !self.draft
+            && self.reviewers.is_empty()
+            && current_user != 0
+            && (self.author.id == current_user
+                || self.assignees.iter().any(|user| user.id == current_user))
+    }
+}
+
+#[cfg(test)]
+mod dashboard_tests {
+    use super::*;
+
+    const ME: u64 = 1;
+
+    fn mr() -> WorkItem {
+        WorkItem {
+            key: ItemKey {
+                project: 1,
+                iid: 1,
+                kind: ItemKind::MergeRequest,
+            },
+            state: "opened".into(),
+            author: User {
+                id: ME,
+                ..User::default()
+            },
+            ..WorkItem::default()
         }
     }
-    pub fn attention_reason(&self) -> &'static str {
-        match self.attention_rank() {
-            0 => "Pipeline failed",
-            1 => "Unresolved discussions",
-            2 => "Pipeline passed · review candidate",
-            3 => "In progress",
-            _ => "Assigned work",
-        }
+
+    #[test]
+    fn dashboard_reasons_and_roles_are_distinct() {
+        let mut item = mr();
+        item.assignees.push(User {
+            id: ME,
+            ..User::default()
+        });
+        item.reviewers.push(User {
+            id: ME,
+            ..User::default()
+        });
+        item.unresolved = Some(2);
+        item.pipeline = Some(Pipeline {
+            status: "failed".into(),
+            ..Pipeline::default()
+        });
+
+        assert_eq!(item.dashboard_roles(ME), ["author", "assignee", "reviewer"]);
+        assert_eq!(
+            item.attention_reasons(ME),
+            ["Pipeline failed", "2 unresolved threads", "Review assigned"]
+        );
+    }
+
+    #[test]
+    fn urgency_puts_actionable_signals_before_waiting_and_drafts() {
+        let mut failed = mr();
+        failed.pipeline = Some(Pipeline {
+            status: "failed".into(),
+            ..Pipeline::default()
+        });
+        let mut discussions = mr();
+        discussions.unresolved = Some(2);
+        let mut review = mr();
+        review.reviewers.push(User {
+            id: ME,
+            ..User::default()
+        });
+        let needs_reviewers = mr();
+        let mut running = mr();
+        running.reviewers.push(User {
+            id: 2,
+            ..User::default()
+        });
+        running.pipeline = Some(Pipeline {
+            status: "running".into(),
+            ..Pipeline::default()
+        });
+        let mut draft = mr();
+        draft.draft = true;
+        let issue = WorkItem {
+            key: ItemKey {
+                kind: ItemKind::Issue,
+                ..mr().key
+            },
+            ..mr()
+        };
+
+        assert!(failed.attention_rank(ME) < discussions.attention_rank(ME));
+        assert!(discussions.attention_rank(ME) < review.attention_rank(ME));
+        assert!(review.attention_rank(ME) < needs_reviewers.attention_rank(ME));
+        assert!(needs_reviewers.attention_rank(ME) < running.attention_rank(ME));
+        assert!(running.attention_rank(ME) < draft.attention_rank(ME));
+        assert!(draft.attention_rank(ME) < issue.attention_rank(ME));
+        assert_eq!(needs_reviewers.attention_reasons(ME), ["Reviewers needed"]);
+        assert_eq!(running.attention_reasons(ME), ["Checks in progress"]);
+        assert_eq!(draft.attention_reasons(ME), ["Draft"]);
+    }
+
+    #[test]
+    fn missing_discussion_count_is_unknown_and_missing_identity_does_not_match() {
+        let mut item = mr();
+        item.unresolved = None;
+        item.author.id = 2;
+        assert!(!item.dashboard_roles(0).contains(&"author"));
+        assert!(!item.on_dashboard_for(0));
+        assert_eq!(item.attention_reasons(ME), ["Open merge request"]);
     }
 }
 

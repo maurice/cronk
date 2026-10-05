@@ -385,7 +385,7 @@ fn context_line(state: &State, colors: Colors) -> Element {
                 if !query.is_empty() {
                     format!("Filter: {query}")
                 } else if state.config.active_tab == 0 {
-                    "Your open work · ordered by attention".into()
+                    "Your open work · role and reason · ordered by urgency".into()
                 } else {
                     "Across visible projects · most recently updated first".into()
                 },
@@ -537,9 +537,23 @@ fn work_row(
         labels.push(Span::new("  ·  ").fg(colors.muted));
     }
     labels.push(Span::new(format!("@{}", item.author.username)).fg(colors.muted));
+    let mut attention = Vec::new();
     if state.config.active_tab == 0 {
-        labels.push(Span::new(format!("  ·  {}", item.attention_reason())).fg(colors.muted));
+        let roles = item.dashboard_roles(state.user.id);
+        if !roles.is_empty() {
+            attention.push(Span::new("You: ").fg(colors.muted));
+            attention.push(Span::new(roles.join(" + ")).fg(colors.accent));
+            attention.push(Span::new("  ·  ").fg(colors.muted));
+        }
+        attention.push(Span::new("Why: ").fg(colors.muted));
+        attention
+            .push(Span::new(item.attention_reasons(state.user.id).join(" · ")).fg(colors.muted));
     }
+    let attention_line = if attention.is_empty() {
+        blank()
+    } else {
+        rich(attention, style).into()
+    };
     let identity = project_name(state, item.key.project);
     let top = HStack::new()
         .height(Length::Px(1))
@@ -560,7 +574,7 @@ fn work_row(
             .style(colors.base())
             .child(top)
             .child(rich(labels, style))
-            .child(blank()),
+            .child(attention_line),
         move || Msg::Activate(index),
     )
 }

@@ -2588,6 +2588,15 @@ fn failed_mutation_clears_pending_but_keeps_all_dialog_fields_and_an_editable_dr
 }
 
 #[test]
+fn dashboard_rows_show_user_role_separately_from_attention_reason() {
+    let ui = mount(config(), None);
+    let text = ui.capture_frame().plain_text();
+
+    assert!(text.contains("You: author"), "{text}");
+    assert!(text.contains("Why: Pipeline failed"), "{text}");
+}
+
+#[test]
 fn small_project_viewport_snapshot() {
     let mut ui = mount(config(), None);
     ui.set_viewport(Rect {

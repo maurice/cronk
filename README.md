@@ -200,15 +200,28 @@ No background service, telemetry, third-party data service, or agent invocation 
 
 ## Development
 
+Install [cargo-nextest](https://nexte.st/docs/installation/) once (CI uses version 0.9.146):
+
+```sh
+cargo install cargo-nextest --locked --version 0.9.146
+```
+
+Pre-built binaries are also available from the installation link above to avoid compiling the runner.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test --locked --all-targets
+cargo nextest run --locked --all-targets
+cargo test --locked --doc
 cargo run --locked -- --demo --snapshot dashboard.png
 cargo run --locked --example gallery
 ```
 
-The pre-commit hook runs the formatting check and Clippy with warnings denied. It is installed by `cargo-husky` the first time you run `cargo test` after fetching dependencies.
+Nextest runs the existing unit/integration tests without changes, scheduling tests across binaries with one process per test. `.config/nextest.toml` uses the available logical CPUs and disables retries; CI uses `--profile ci` to collect all failures. Nextest does not run doctests, so keep the separate `cargo test --locked --doc` command. The original `cargo test --locked --all-targets` remains a supported fallback if nextest is unavailable.
+
+For a focused iteration, use `cargo nextest run --locked --test ui` (one integration-test target) or `cargo nextest run --locked --all-targets -E 'test(tab_switches)'` (matching test names). Avoid `--no-capture` when benchmarking: nextest runs tests serially in that mode. See [the runner comparison](docs/test-performance.md) for measured timings and reproduction steps.
+
+The pre-commit hook runs the formatting check and Clippy with warnings denied. It is installed by `cargo-husky` the first time you build tests with `cargo nextest run` or `cargo test` after fetching dependencies.
 
 `gallery` writes five deterministic PNG/Markdown captures to `.snapshots/` without touching your workspace or opening a terminal. Small-viewport and keyboard/mouse integration tests run through tui-lipan's actual headless runtime.
 

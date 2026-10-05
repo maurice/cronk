@@ -1,0 +1,9 @@
+[profile.default]
+# Schedule tests across binaries, using the available logical CPUs.
+test-threads = "num-cpus"
+# Do not hide regressions by automatically retrying failed tests.
+retries = 0
+
+[profile.ci]
+# Report every failure in CI rather than stopping at the first one.
+fail-fast = false

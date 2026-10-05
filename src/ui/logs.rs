@@ -9,6 +9,9 @@ use tui_lipan::{
     style::{RowStylePolicy, ansi::parse_ansi},
 };
 
+const CURRENT_MATCH_BG: Color = Color::Rgb(255, 215, 0);
+const OTHER_MATCH_BG: Color = Color::Rgb(225, 211, 150);
+
 #[derive(Default)]
 pub struct TraceIndex {
     bytes: usize,
@@ -96,6 +99,15 @@ impl Trace {
     }
 
     pub fn line_spans(&self, row: usize, query: &str) -> Vec<Span> {
+        self.line_spans_with_current(row, query, false)
+    }
+
+    pub(crate) fn line_spans_with_current(
+        &self,
+        row: usize,
+        query: &str,
+        current: bool,
+    ) -> Vec<Span> {
         self.ensure_index();
         let prefix = {
             let index = self.index.borrow();
@@ -107,7 +119,7 @@ impl Trace {
                 .unwrap_or_default()
         };
         let spans = parse_ansi(&format!("{prefix}{}", self.line(row)));
-        highlight(spans, query)
+        highlight(spans, query, current)
     }
 
     pub fn line(&self, row: usize) -> &str {
@@ -165,7 +177,7 @@ fn match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
     ranges
 }
 
-fn highlight(spans: Vec<Span>, query: &str) -> Vec<Span> {
+fn highlight(spans: Vec<Span>, query: &str, current: bool) -> Vec<Span> {
     let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
     let matches = match_ranges(&text, query);
     let mut result = Vec::new();
@@ -174,7 +186,11 @@ fn highlight(spans: Vec<Span>, query: &str) -> Vec<Span> {
         let end = base + span.content.len();
         let mut cursor = base;
         let normal = span.style.contrast_policy(ContrastPolicy::Off);
-        let mut marked = normal.fg(Color::Black).bg(Color::Yellow);
+        let mut marked = normal.fg(Color::Black).bg(if current {
+            CURRENT_MATCH_BG
+        } else {
+            OTHER_MATCH_BG
+        });
         marked.reverse = Some(false);
         marked.dim = Some(false);
         for range in matches.iter().filter(|r| r.start < end && r.end > base) {
@@ -434,10 +450,23 @@ mod tests {
         );
         let highlighted: String = spans
             .iter()
-            .filter(|s| s.style.bg == Style::new().bg(Color::Yellow).bg)
+            .filter(|s| s.style.bg == Style::new().bg(OTHER_MATCH_BG).bg)
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(highlighted, "needleNEEDLE");
+        let active = trace.line_spans_with_current(0, "needle", true);
+        for (active, other) in active.iter().zip(&spans) {
+            assert_eq!(active.content, other.content);
+            if other.style.bg == Style::new().bg(OTHER_MATCH_BG).bg {
+                assert_eq!(active.style.bg, Style::new().bg(CURRENT_MATCH_BG).bg);
+                assert_eq!(active.style.fg, Style::new().fg(Color::Black).fg);
+            } else {
+                assert_eq!(
+                    active.style, other.style,
+                    "non-matching ANSI styles are unchanged"
+                );
+            }
+        }
         assert_eq!(
             spans.first().unwrap().style.fg,
             Style::new().fg(Color::Red).fg
@@ -468,7 +497,7 @@ mod tests {
         let spans = trace.line_spans(0, "i");
         let highlighted: String = spans
             .iter()
-            .filter(|s| s.style.bg == Style::new().bg(Color::Yellow).bg)
+            .filter(|s| s.style.bg == Style::new().bg(OTHER_MATCH_BG).bg)
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(highlighted, "İİ");
@@ -484,7 +513,7 @@ mod tests {
         assert_eq!(view.matches, vec![0]);
         trace.append("ΟΣ", true);
         let spans = trace.line_spans(0, "ΟΣ");
-        assert_eq!(spans[0].style.bg, Style::new().bg(Color::Yellow).bg);
+        assert_eq!(spans[0].style.bg, Style::new().bg(OTHER_MATCH_BG).bg);
     }
 
     #[test]

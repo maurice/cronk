@@ -1636,6 +1636,10 @@ fn log_window(ctx: &Context<Cronk>, job: &Job, height: usize, colors: Colors) ->
     .min(u16::MAX as usize / 3);
     let offset = view.position(total, height);
     let style = colors.base().bg(colors.surface);
+    let current_match = view
+        .current_match
+        .and_then(|i| view.matches.get(i))
+        .copied();
     let mut visible = Vec::new();
     for row in offset..offset + height {
         if row > offset {
@@ -1648,7 +1652,11 @@ fn log_window(ctx: &Context<Cronk>, job: &Job, height: usize, colors: Colors) ->
                 "  Waiting for log output…"
             }));
         } else if let Some(trace) = trace {
-            visible.extend(trace.line_spans(row, &view.query));
+            visible.extend(trace.line_spans_with_current(
+                row,
+                &view.query,
+                current_match == Some(row),
+            ));
         }
     }
     let rows = Text::from_spans(visible)

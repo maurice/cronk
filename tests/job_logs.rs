@@ -612,15 +612,41 @@ fn ansi_colors_and_yellow_substring_highlights_render_inline_and_fullscreen() {
             for offset in (4..10).chain(17..23) {
                 assert_eq!(
                     frame.cell(x + offset, y).bg,
-                    Color::Yellow,
-                    "{theme}, zoom={zoom}: match column {offset}"
+                    Color::Rgb(255, 215, 0),
+                    "{theme}, zoom={zoom}: current match column {offset}"
                 );
                 assert_eq!(frame.cell(x + offset, y).fg, Color::Black);
             }
+            assert_eq!(
+                frame.cell(x + 4, y + 1).bg,
+                Color::Rgb(225, 211, 150),
+                "other matching lines use a softer yellow"
+            );
             assert!(
                 !text(&ui).contains("▶"),
                 "matching text is highlighted without altering log content"
             );
+            key(&mut ui, KeyCode::Char('n'));
+            key(&mut ui, KeyCode::Up);
+            let frame = ui.capture_frame();
+            assert_eq!(
+                frame.cell(x + 4, y).bg,
+                Color::Rgb(225, 211, 150),
+                "the previous match becomes soft yellow"
+            );
+            assert_eq!(
+                frame.cell(x + 4, y + 1).bg,
+                Color::Rgb(255, 215, 0),
+                "the next match becomes strong yellow even after manual scrolling"
+            );
+            key(&mut ui, KeyCode::Char('N'));
+            let frame = ui.capture_frame();
+            assert_eq!(
+                frame.cell(x + 4, y).bg,
+                Color::Rgb(255, 215, 0),
+                "previous-match navigation restores the strong highlight"
+            );
+            assert_eq!(frame.cell(x + 4, y + 1).bg, Color::Rgb(225, 211, 150));
             key(&mut ui, KeyCode::Char('/'));
             key(&mut ui, KeyCode::Home);
             modified(&mut ui, KeyCode::End, KeyMods::SHIFT);

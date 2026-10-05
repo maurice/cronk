@@ -9,11 +9,19 @@ use super::{Cronk, Msg};
 
 pub(super) const CLICK_FLASH: Duration = Duration::from_millis(140);
 
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct StatusTooltip {
+    pub key: String,
+    pub text: String,
+    pub position: (u16, u16),
+}
+
 #[derive(Default)]
 pub(super) struct Feedback {
     hovered: HashSet<String>,
     flashes: HashMap<String, u64>,
     generation: u64,
+    pub tooltip: Option<StatusTooltip>,
 }
 
 impl Feedback {
@@ -25,7 +33,29 @@ impl Feedback {
         }
     }
 
+    pub fn status_hover(
+        &mut self,
+        key: String,
+        text: String,
+        position: Option<(u16, u16)>,
+    ) -> bool {
+        if position.is_none() && self.tooltip.as_ref().is_none_or(|tip| tip.key != key) {
+            return false;
+        }
+        let tooltip = position.map(|position| StatusTooltip {
+            key,
+            text,
+            position,
+        });
+        if self.tooltip == tooltip {
+            return false;
+        }
+        self.tooltip = tooltip;
+        true
+    }
+
     pub fn clear(&mut self) {
+        self.tooltip = None;
         self.hovered.clear();
         self.flashes.clear();
     }

@@ -119,6 +119,7 @@ impl Colors {
             "merged" => ('●', self.purple),
             "pending" | "created" | "waiting_for_resource" | "preparing" => ('○', self.pending),
             "manual" | "scheduled" => ('○', self.accent),
+            "warning" => ('○', self.yellow),
             _ => ('○', self.muted),
         }
     }
@@ -198,9 +199,78 @@ fn item_key(key: &ItemKey) -> String {
     format!("{}-{}-{}", key.project, key.kind.segment(), key.iid)
 }
 
-fn status_span(status: &str, colors: Colors) -> Span {
+fn status_help(subject: &str, status: &str) -> String {
+    let explanation = match status {
+        "opened" => "Open and active",
+        "closed" => "Closed",
+        "merged" => "Changes have been merged",
+        "locked" => "Temporarily locked while being updated",
+        "success" | "passed" => "Completed successfully",
+        "running" => "Currently running",
+        "failed" | "error" => "Finished with an error",
+        "pending" => "Waiting for an available runner",
+        "created" => "Created, not yet queued for execution",
+        "waiting_for_resource" => "Waiting for a required resource",
+        "preparing" => "Runner is preparing execution",
+        "manual" => "Requires manual action to start",
+        "scheduled" => "Scheduled to run later",
+        "canceled" | "cancelled" => "Canceled before completion",
+        "skipped" => "Not run because its conditions were not met",
+        "resolved" => "All resolvable comments have been resolved",
+        "unresolved" => "Contains comments that still need resolution",
+        "comment" => "Comment that does not require resolution",
+        "warning" => "See the adjacent message for additional information",
+        _ => "Status reported by GitLab",
+    };
+    format!("{subject}: {status} — {explanation}")
+}
+
+/// Only the single glyph is the trigger: adjacent padding/text never opens the tip.
+/// A passive mouse region observes hover without intercepting the surrounding row click.
+fn dot_tooltip(
+    ctx: &Context<Cronk>,
+    key: impl Into<String>,
+    symbol: char,
+    color: Color,
+    help: impl Into<String>,
+    style: Style,
+) -> Element {
+    let key = key.into();
+    let move_key = key.clone();
+    let leave_key = key.clone();
+    let help = help.into();
+    let link = ctx.link().clone();
+    Element::from(
+        MouseRegion::new()
+            .hover_style(Style::new())
+            .on_mouse_move(ctx.link().callback(move |event: MouseMoveEvent| {
+                Msg::StatusHover(move_key.clone(), help.clone(), Some((event.x, event.y)))
+            }))
+            .on_hover_change(Callback::new(move |entered: bool| {
+                if !entered {
+                    link.send(Msg::StatusHover(leave_key.clone(), String::new(), None));
+                }
+            }))
+            .child(
+                Text::new(symbol.to_string())
+                    .width(Length::Px(1))
+                    .height(Length::Px(1))
+                    .style(style.fg(color)),
+            ),
+    )
+    .key(key)
+}
+
+fn status_dot(
+    ctx: &Context<Cronk>,
+    key: impl Into<String>,
+    subject: &str,
+    status: &str,
+    style: Style,
+    colors: Colors,
+) -> Element {
     let (symbol, color) = colors.status(status);
-    Span::new(format!("{symbol} {status}")).fg(color)
+    dot_tooltip(ctx, key, symbol, color, status_help(subject, status), style)
 }
 
 fn label_style(label: &Label, colors: Colors) -> Style {
@@ -315,8 +385,65 @@ pub(super) fn view(ctx: &Context<Cronk>) -> Element {
         .child(context_line(state, colors))
         .child(blank())
         .child(content)
-        .child(footer(state, colors));
-    let mut layers = ZStack::new().child(shell);
+        .child(footer(ctx, colors));
+    let mut layers = ZStack::new().passthrough(true).child(shell);
+    {
+        // Keep the shared popup anchor mounted so opening it never reparents
+        // hovered rows. Only its non-focus-capturing portal content is transient.
+        let tip = state.feedback.tooltip.as_ref();
+        let position = tip.map_or((0, 0), |tip| tip.position);
+        let above = position.1 >= ctx.viewport().h / 2;
+        layers = layers.child(
+            Canvas::new().passthrough(true).child_at(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0,
+                },
+                Element::from(
+                    Popover::new()
+                        .trigger(Spacer::new().width(Length::Px(0)).height(Length::Px(0)))
+                        .anchor(Some((
+                            position.0,
+                            if above {
+                                position.1
+                            } else {
+                                position.1.saturating_add(1)
+                            },
+                        )))
+                        .placement(if above {
+                            PopoverPlacement::AboveStart
+                        } else {
+                            PopoverPlacement::BelowStart
+                        })
+                        .auto_flip(false)
+                        .open(tip.is_some() && state.dialog.is_none())
+                        .capture_focus(false)
+                        .auto_focus(false)
+                        .min_trigger_width(false)
+                        .max_width(Length::Px(80))
+                        .content(
+                            Element::from(
+                                Frame::new()
+                                    .border(true)
+                                    .padding((0, 1))
+                                    .style(colors.base().bg(colors.surface))
+                                    .child(
+                                        Text::new(
+                                            tip.map_or_else(String::new, |tip| tip.text.clone()),
+                                        )
+                                        .overflow(Overflow::Wrap)
+                                        .style(colors.base().bg(colors.surface)),
+                                    ),
+                            )
+                            .key("status-tooltip"),
+                        ),
+                )
+                .key("status-tooltip-anchor"),
+            ),
+        );
+    }
     if let Some(dialog) = &state.dialog {
         layers = layers.child(dialog_view(ctx, dialog, colors));
     }
@@ -626,23 +753,40 @@ fn work_row(
         colors.base()
     };
     let style = interaction::style(ctx, &format!("item-{}", item_key(&item.key)), style);
-    let (circle, color) = colors.status(&item.state);
-    let mut title = vec![
-        Span::new(" "),
-        Span::new(format!("{circle} ")).fg(color),
-        Span::new(format!("{}  ", item_id(&item.key))).fg(colors.accent),
-    ];
+    let mut title = vec![Span::new(format!("{}  ", item_id(&item.key))).fg(colors.accent)];
     if item.draft {
         title.push(Span::new("Draft · ").fg(colors.yellow));
     }
     title.push(Span::new(item.title.clone()).bold());
     let mut labels = vec![Span::new("   ")];
     labels.extend(label_spans(&item.labels, colors));
+    let mut labels_line = HStack::new()
+        .height(Length::Px(1))
+        .style(style)
+        .child(Text::from_spans(labels).height(Length::Px(1)).style(style));
     if let Some(pipeline) = &item.pipeline {
-        labels.push(status_span(&pipeline.status, colors));
-        labels.push(Span::new("  ·  ").fg(colors.muted));
+        labels_line = labels_line
+            .child(status_dot(
+                ctx,
+                format!("item-{}-pipeline-status", item_key(&item.key)),
+                "Pipeline",
+                &pipeline.status,
+                style,
+                colors,
+            ))
+            .child(
+                Text::new(format!(" {}  ·  ", pipeline.status))
+                    .height(Length::Px(1))
+                    .style(style.fg(colors.status(&pipeline.status).1)),
+            );
     }
-    labels.push(Span::new(state.render_user(&item.author)).fg(colors.muted));
+    labels_line = labels_line.child(
+        Text::new(state.render_user(&item.author))
+            .width(Length::Flex(1))
+            .height(Length::Px(1))
+            .overflow(Overflow::Ellipsis)
+            .style(style.fg(colors.muted)),
+    );
     let mut attention = Vec::new();
     if state.config.active_tab == 0 {
         let roles = item.dashboard_roles(state.user.id);
@@ -668,6 +812,20 @@ fn work_row(
     let top = HStack::new()
         .height(Length::Px(1))
         .style(style)
+        .child(Text::new(" ").width(Length::Px(1)).style(style))
+        .child(status_dot(
+            ctx,
+            format!("item-{}-status", item_key(&item.key)),
+            if item.key.kind == ItemKind::Issue {
+                "Issue"
+            } else {
+                "Merge request"
+            },
+            &item.state,
+            style,
+            colors,
+        ))
+        .child(Text::new(" ").width(Length::Px(1)).style(style))
         .child(rich(title, style))
         .child(
             Text::new(format!(" {identity}  "))
@@ -681,7 +839,7 @@ fn work_row(
         .height(Length::Px(if dashboard { 4 } else { 3 }))
         .style(colors.base())
         .child(list_selection_line(top, marked, colors))
-        .child(list_selection_line(rich(labels, style), marked, colors));
+        .child(list_selection_line(labels_line, marked, colors));
     row = if dashboard {
         row.child(attention_line).child(blank())
     } else {
@@ -872,6 +1030,7 @@ struct DetailRow {
     key: Option<String>,
     focused: bool,
     on_click: Option<Box<dyn Fn() -> Msg>>,
+    status: Option<(String, String, String)>,
 }
 
 impl<T: Into<Element>> From<T> for DetailRow {
@@ -881,11 +1040,17 @@ impl<T: Into<Element>> From<T> for DetailRow {
             key: None,
             focused: false,
             on_click: None,
+            status: None,
         }
     }
 }
 
 impl DetailRow {
+    fn with_status(mut self, key: impl Into<String>, subject: &str, status: &str) -> Self {
+        self.status = Some((key.into(), subject.into(), status.into()));
+        self
+    }
+
     fn keyed(key: String, content: impl Into<Element>) -> Self {
         Self {
             key: Some(key),
@@ -907,7 +1072,13 @@ impl DetailRow {
     }
 }
 
-fn detail_selection_row(content: Element, edge: Color, style: Style, colors: Colors) -> Element {
+fn detail_selection_row(
+    content: Element,
+    status: Option<Element>,
+    edge: Color,
+    style: Style,
+    colors: Colors,
+) -> Element {
     HStack::new()
         .height(Length::Auto)
         .style(colors.base())
@@ -921,10 +1092,28 @@ fn detail_selection_row(content: Element, edge: Color, style: Style, colors: Col
                 .style(colors.base().fg(edge)),
         )
         .child(
-            VStack::new()
+            HStack::new()
                 .height(Length::Auto)
                 .style(style)
-                .child(content),
+                .child(Spacer::new().width(Length::Px(1)))
+                .child(
+                    VStack::new()
+                        .width(Length::Px(1))
+                        .height(Length::Auto)
+                        .child(status.unwrap_or_else(|| {
+                            Spacer::new()
+                                .width(Length::Px(1))
+                                .height(Length::Px(1))
+                                .into()
+                        })),
+                )
+                .child(Spacer::new().width(Length::Px(1)))
+                .child(
+                    VStack::new()
+                        .height(Length::Auto)
+                        .style(style)
+                        .child(content),
+                ),
         )
         .into()
 }
@@ -998,6 +1187,7 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                     .child(Text::new(format!("{section} ")).style(style.fg(colors.accent).bold()))
                     .child(Divider::horizontal().style(style.fg(colors.muted)))
                     .into(),
+                None,
                 edge,
                 style,
                 colors,
@@ -1025,7 +1215,7 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                         .collect()
                 }
             }
-            "Pipeline" => pipeline(details, section_colors),
+            "Pipeline" => pipeline(ctx, details, section_colors),
             "Jobs" => jobs(ctx, details, section_colors),
             "Discussions" => discussions(ctx, details, section_colors),
             "Changes" => changes(details, section_colors),
@@ -1042,8 +1232,13 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
             } else {
                 section_colors.base()
             };
+            let row_style = interaction::style(ctx, &key, row_style);
+            let status = child.status.map(|(key, subject, status)| {
+                status_dot(ctx, key, &subject, &status, row_style, colors)
+            });
             let row = detail_selection_row(
                 child.content,
+                status,
                 if child.focused { colors.accent } else { edge },
                 row_style,
                 colors,
@@ -1116,14 +1311,22 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
 fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
     let item = &details.item;
     let mut content = vec![
-        rich(
+        DetailRow::from(rich(
             vec![
-                status_span(&item.state, colors),
+                Span::new(item.state.clone()).fg(colors.status(&item.state).1),
                 Span::new(format!("   {}", item_id(&item.key))).fg(colors.accent),
             ],
             colors.base(),
-        )
-        .into(),
+        ))
+        .with_status(
+            "detail-item-status",
+            if item.key.kind == ItemKind::Issue {
+                "Issue"
+            } else {
+                "Merge request"
+            },
+            &item.state,
+        ),
         metadata(
             "Project path",
             ctx.state
@@ -1225,12 +1428,18 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
     content.push(metadata("Web URL", item.web_url.clone(), colors).into());
     for warning in &details.warnings {
         content.push(
-            Text::new(format!("○ {warning}"))
-                .width(Length::Flex(1))
-                .height(Length::Auto)
-                .overflow(Overflow::Wrap)
-                .style(colors.base().fg(colors.yellow))
-                .into(),
+            DetailRow::from(
+                Text::new(warning.clone())
+                    .width(Length::Flex(1))
+                    .height(Length::Auto)
+                    .overflow(Overflow::Wrap)
+                    .style(colors.base().fg(colors.yellow)),
+            )
+            .with_status(
+                format!("detail-warning-{}-status", content.len()),
+                "Details warning",
+                "warning",
+            ),
         );
     }
     content
@@ -1246,16 +1455,16 @@ fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> DetailRo
     if note.system {
         header.push(Span::new("  ·  system").fg(colors.muted));
     }
+    let status = if !note.resolvable {
+        "comment"
+    } else if note.resolved {
+        "resolved"
+    } else {
+        "unresolved"
+    };
     if note.resolvable {
         header.push(Span::new("  ·  "));
-        header.push(status_span(
-            if note.resolved {
-                "resolved"
-            } else {
-                "unresolved"
-            },
-            colors,
-        ));
+        header.push(Span::new(status).fg(colors.status(status).1));
     }
     DetailRow::keyed(
         format!("note-{}", note.id),
@@ -1271,20 +1480,29 @@ fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> DetailRo
             )
             .child(blank()),
     )
+    .with_status(
+        format!("note-{}-status", note.id),
+        if note.system {
+            "System note"
+        } else {
+            "Comment"
+        },
+        status,
+    )
 }
 
-fn pipeline(details: &Details, colors: Colors) -> Vec<DetailRow> {
+fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
     let mut content = Vec::new();
     if let Some(pipeline) = &details.item.pipeline {
         content.push(
-            rich(
+            DetailRow::from(rich(
                 vec![
                     Span::new(format!("Pipeline #{}   ", pipeline.id)).bold(),
-                    status_span(&pipeline.status, colors),
+                    Span::new(pipeline.status.clone()).fg(colors.status(&pipeline.status).1),
                 ],
                 colors.base(),
-            )
-            .into(),
+            ))
+            .with_status("detail-pipeline-status", "Pipeline", &pipeline.status),
         );
         content.push(metadata("Web URL", pipeline.web_url.clone(), colors).into());
     } else {
@@ -1297,22 +1515,36 @@ fn pipeline(details: &Details, colors: Colors) -> Vec<DetailRow> {
         );
     }
     let count = |status: &str| details.jobs.iter().filter(|j| j.status == status).count();
+    let mut summary = HStack::new().height(Length::Px(1)).style(colors.base());
+    for (status, label, count) in [
+        ("running", "running", count("running")),
+        ("pending", "pending", count("pending") + count("created")),
+        ("success", "passed", count("success")),
+        ("failed", "failed", count("failed")),
+    ] {
+        summary = summary
+            .child(status_dot(
+                ctx,
+                format!("pipeline-summary-{status}-status"),
+                "Jobs",
+                status,
+                colors.base(),
+                colors,
+            ))
+            .child(
+                Text::new(format!(" {count} {label}   "))
+                    .height(Length::Px(1))
+                    .style(colors.base().fg(colors.status(status).1)),
+            );
+    }
     content.push(
-        rich(
-            vec![
-                Span::new(format!("◐ {} running   ", count("running"))).fg(colors.cyan),
-                Span::new(format!(
-                    "○ {} pending   ",
-                    count("pending") + count("created")
-                ))
-                .fg(colors.pending),
-                Span::new(format!("● {} passed   ", count("success"))).fg(colors.green),
-                Span::new(format!("● {} failed   ", count("failed"))).fg(colors.red),
-                Span::new(format!("{} total", details.jobs.len())).fg(colors.muted),
-            ],
-            colors.base(),
-        )
-        .into(),
+        summary
+            .child(
+                Text::new(format!("{} total", details.jobs.len()))
+                    .height(Length::Px(1))
+                    .style(colors.base().fg(colors.muted)),
+            )
+            .into(),
     );
     content
 }
@@ -1322,7 +1554,7 @@ fn job_header(job: &Job, expanded: bool, colors: Colors) -> Vec<Span> {
         Span::new(if expanded { "− " } else { "+ " }).fg(colors.muted),
         Span::new(job.name.clone()).bold(),
         Span::new(format!("  {}  #{}  ", job.stage, job.id)).fg(colors.muted),
-        status_span(&job.status, colors),
+        Span::new(job.status.clone()).fg(colors.status(&job.status).1),
     ];
     if job.allow_failure {
         spans.push(Span::new("  ·  allowed failure").fg(colors.yellow));
@@ -1363,20 +1595,33 @@ fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> E
                         .style(Style::new().fg(colors.foreground).bg(colors.surface)),
                 );
             }
-            panel = panel.child(line(
-                if job.running() {
-                    "  ◐ LIVE · trailing output"
-                } else if trace.finished {
-                    "  End of trace"
-                } else {
-                    "  Loading trace…"
-                },
-                Style::new().fg(if job.running() {
-                    colors.cyan
-                } else {
-                    colors.muted
-                }),
-            ));
+            panel = if job.running() {
+                let style = colors.base().bg(colors.surface).fg(colors.cyan);
+                panel.child(
+                    HStack::new()
+                        .height(Length::Px(1))
+                        .style(style)
+                        .child(Text::new("  ").style(style))
+                        .child(dot_tooltip(
+                            ctx,
+                            format!("job-{}-live-status", job.id),
+                            '◐',
+                            colors.cyan,
+                            "Live log: Output is polled while this job is running",
+                            style,
+                        ))
+                        .child(Text::new(" LIVE · trailing output").style(style)),
+                )
+            } else {
+                panel.child(line(
+                    if trace.finished {
+                        "  End of trace"
+                    } else {
+                        "  Loading trace…"
+                    },
+                    Style::new().fg(colors.muted),
+                ))
+            };
         }
         None => {
             panel = panel.child(line("  Waiting for trace…", Style::new().fg(colors.muted)));
@@ -1410,27 +1655,38 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRo
         let expanded = job.running() || ctx.state.expanded.contains(&job.id);
         let id = job.id;
         let link = ctx.link().clone();
-        content.push(DetailRow::interactive(
-            format!("job-{id}"),
-            rich(
-                job_header(job, expanded, colors),
-                interaction::style(
-                    ctx,
-                    &format!("job-{id}"),
-                    if selected {
-                        colors.selected()
-                    } else {
-                        colors.base()
-                    },
+        content.push(
+            DetailRow::interactive(
+                format!("job-{id}"),
+                rich(
+                    job_header(job, expanded, colors),
+                    interaction::style(
+                        ctx,
+                        &format!("job-{id}"),
+                        if selected {
+                            colors.selected()
+                        } else {
+                            colors.base()
+                        },
+                    ),
                 ),
+                selected,
+                move || {
+                    link.send(Msg::Section(3));
+                    link.send(Msg::Select(index));
+                    Msg::ToggleJob(id)
+                },
+            )
+            .with_status(
+                format!("job-{id}-status"),
+                if job.allow_failure {
+                    "Job (failure is allowed)"
+                } else {
+                    "Job"
+                },
+                &job.status,
             ),
-            selected,
-            move || {
-                link.send(Msg::Section(3));
-                link.send(Msg::Select(index));
-                Msg::ToggleJob(id)
-            },
-        ));
+        );
         if expanded {
             content.push(DetailRow::keyed(
                 format!("trace-{}", job.id),
@@ -1473,22 +1729,31 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<D
             |note| ctx.state.render_user(&note.author),
         );
         let link = ctx.link().clone();
-        content.push(DetailRow::interactive(
-            format!("discussion-{}", discussion.id),
-            rich(
-                vec![
-                    Span::new(format!("{author}  ")).fg(colors.cyan),
-                    status_span(discussion_state(discussion), colors),
-                    Span::new(format!("  ·  {} notes", discussion.notes.len())).fg(colors.muted),
-                ],
-                style,
+        content.push(
+            DetailRow::interactive(
+                format!("discussion-{}", discussion.id),
+                rich(
+                    vec![
+                        Span::new(format!("{author}  ")).fg(colors.cyan),
+                        Span::new(discussion_state(discussion))
+                            .fg(colors.status(discussion_state(discussion)).1),
+                        Span::new(format!("  ·  {} notes", discussion.notes.len()))
+                            .fg(colors.muted),
+                    ],
+                    style,
+                ),
+                selected,
+                move || {
+                    link.send(Msg::Section(4));
+                    Msg::Select(index)
+                },
+            )
+            .with_status(
+                format!("discussion-{}-status", discussion.id),
+                "Discussion",
+                discussion_state(discussion),
             ),
-            selected,
-            move || {
-                link.send(Msg::Section(4));
-                Msg::Select(index)
-            },
-        ));
+        );
         content.extend(
             discussion
                 .notes
@@ -1526,8 +1791,9 @@ fn changes(details: &Details, colors: Colors) -> Vec<DetailRow> {
             ),
         ));
         if diff.too_large || diff.collapsed {
-            content.push(line(if diff.too_large { "○ GitLab omitted this diff because it is too large." }
-                else { "○ GitLab returned a collapsed diff; open the merge request URL for the full patch." }, Style::new().fg(colors.yellow)).into());
+            content.push(DetailRow::from(line(if diff.too_large { "GitLab omitted this diff because it is too large." }
+                else { "GitLab returned a collapsed diff; open the merge request URL for the full patch." }, Style::new().fg(colors.yellow)))
+                .with_status(format!("diff-{index}-warning-status"), "Diff warning", "warning"));
         }
         if diff.diff.is_empty() && !diff.too_large && !diff.collapsed {
             content.push(
@@ -1565,7 +1831,8 @@ fn changes(details: &Details, colors: Colors) -> Vec<DetailRow> {
     content
 }
 
-fn footer(state: &State, colors: Colors) -> Element {
+fn footer(ctx: &Context<Cronk>, colors: Colors) -> Element {
+    let state = &ctx.state;
     let busy = state.mutation_pending
         || !state.list_pending.is_empty()
         || state.detail_pending.is_some()
@@ -1582,21 +1849,46 @@ fn footer(state: &State, colors: Colors) -> Element {
     if state.demo {
         status.push(Span::new("DEMO  ").fg(colors.yellow).bold());
     }
+    let style = colors.base().bg(colors.surface);
+    let mut status_line = HStack::new()
+        .height(Length::Px(1))
+        .style(style)
+        .child(Text::from_spans(status).height(Length::Px(1)).style(style));
     if busy {
-        status.push(
-            Span::new(if state.tick.is_multiple_of(2) {
-                "● Syncing  "
-            } else {
-                "○ Syncing  "
-            })
-            .fg(colors.cyan),
-        );
+        status_line = status_line
+            .child(dot_tooltip(
+                ctx,
+                "sync-status",
+                if state.tick.is_multiple_of(2) {
+                    '●'
+                } else {
+                    '○'
+                },
+                colors.cyan,
+                "Syncing: Requests to GitLab are in progress",
+                style,
+            ))
+            .child(
+                Text::new(" Syncing  ")
+                    .height(Length::Px(1))
+                    .style(style.fg(colors.cyan)),
+            );
     }
-    if let Some(error) = &state.error {
-        status.push(Span::new(format!("Error: {error}")).fg(colors.red));
-    } else {
-        status.push(Span::new(state.status.clone()).fg(colors.muted));
-    }
+    status_line = status_line.child(
+        Text::new(if let Some(error) = &state.error {
+            format!("Error: {error}")
+        } else {
+            state.status.clone()
+        })
+        .width(Length::Flex(1))
+        .height(Length::Px(1))
+        .overflow(Overflow::Ellipsis)
+        .style(style.fg(if state.error.is_some() {
+            colors.red
+        } else {
+            colors.muted
+        })),
+    );
     let shortcuts = match state.scope {
         Scope::List => "↑ ↓ move   Enter open   / filter   : commands   r refresh   ? help",
         Scope::Details => " ↑ ↓ section   Enter focus   PgUp/PgDn scroll   Esc back   : commands",
@@ -1607,7 +1899,7 @@ fn footer(state: &State, colors: Colors) -> Element {
     VStack::new()
         .height(Length::Px(2))
         .style(Style::new().bg(colors.surface))
-        .child(rich(status, Style::new().bg(colors.surface)))
+        .child(status_line)
         .child(line(
             format!(" D/P/I/M tabs   1–0 views   {shortcuts}"),
             Style::new().fg(colors.muted).bg(colors.surface),
@@ -2156,10 +2448,52 @@ mod tests {
             let neutral = Color::hex_u24(if theme == "light" { 0x626262 } else { 0xc7c7c7 });
             for status in ["pending", "created", "waiting_for_resource", "preparing"] {
                 assert_eq!(colors.status(status), ('○', neutral));
-                let span = status_span(status, colors);
-                assert_eq!(span.style.fg, Some(neutral.into()));
+                let help = status_help("Job", status);
+                assert!(help.starts_with(&format!("Job: {status} — ")));
+                assert!(!help.ends_with("Status reported by GitLab"));
             }
         }
+    }
+
+    #[test]
+    fn status_tooltips_explain_known_states_and_preserve_unknown_values() {
+        for status in [
+            "opened",
+            "closed",
+            "merged",
+            "locked",
+            "success",
+            "passed",
+            "running",
+            "failed",
+            "error",
+            "pending",
+            "created",
+            "waiting_for_resource",
+            "preparing",
+            "manual",
+            "scheduled",
+            "canceled",
+            "cancelled",
+            "skipped",
+            "resolved",
+            "unresolved",
+            "comment",
+            "warning",
+        ] {
+            let help = status_help("Status", status);
+            assert!(help.starts_with(&format!("Status: {status} — ")));
+            assert!(
+                !help.ends_with("Status reported by GitLab"),
+                "missing explanation: {status}"
+            );
+        }
+        assert_eq!(
+            status_help("Job", "custom-state"),
+            "Job: custom-state — Status reported by GitLab"
+        );
+        assert!(status_help("Discussion", "comment").contains("does not require resolution"));
+        assert!(status_help("Job", "manual").contains("manual action"));
     }
 
     #[test]

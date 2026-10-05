@@ -150,7 +150,30 @@ impl Component for Cronk {
     }
 
     fn update(&mut self, msg: Msg, ctx: &mut Context<Self>) -> Update {
+        if matches!(
+            &msg,
+            Msg::Move(_)
+                | Msg::Enter
+                | Msg::Back
+                | Msg::Section(_)
+                | Msg::DetailSection(_)
+                | Msg::Field(_)
+                | Msg::ScrollContent(_)
+                | Msg::DetailScrolled(_)
+                | Msg::Tab(_)
+                | Msg::Action(_)
+                | Msg::Palette
+        ) {
+            ctx.state.feedback.tooltip = None;
+        }
         match msg {
+            Msg::StatusHover(key, text, position) => {
+                return if ctx.state.feedback.status_hover(key, text, position) {
+                    Update::full()
+                } else {
+                    Update::none()
+                };
+            }
             Msg::Hover(key, entered) => {
                 return if ctx.state.feedback.hover(key, entered) {
                     Update::full()

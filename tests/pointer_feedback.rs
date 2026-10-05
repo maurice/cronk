@@ -262,7 +262,10 @@ fn detail_sections_have_continuous_highlights_and_contract_to_focused_fields() {
                 let selection = frame.cell(x + 1, start).bg;
                 let accent = frame.cell(x, start).fg;
                 assert_ne!(selection, base);
-                assert_eq!(frame.cell(x + 1, start).symbol, "F");
+                for column in 1..4 {
+                    assert_eq!(frame.cell(x + column, start).symbol, " ");
+                }
+                assert_eq!(frame.cell(x + 4, start).symbol, "F");
                 assert_eq!(frame.cell(ui.viewport().w - 3, start).symbol, "─");
                 for y in start..next - 1 {
                     assert_eq!(frame.cell(x, y).symbol, "▕", "{theme} {kind:?} row {y}");

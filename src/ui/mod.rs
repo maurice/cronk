@@ -218,6 +218,7 @@ pub const COMMANDS: &[(&str, Action)] = &[
 
 pub enum Msg {
     Hover(String, bool),
+    StatusHover(String, String, Option<(u16, u16)>),
     ClickFlash(String),
     EndClickFlash(String, u64),
     Tick,

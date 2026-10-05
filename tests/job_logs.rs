@@ -565,6 +565,80 @@ fn resizing_near_eof_does_not_unanchor_paused_logs_on_the_next_append() {
 }
 
 #[test]
+fn ansi_colors_and_yellow_substring_highlights_render_inline_and_fullscreen() {
+    for theme in ["midnight", "dracula", "light"] {
+        for zoom in [false, true] {
+            let mut ui = mount(theme);
+            key(
+                &mut ui,
+                if zoom {
+                    KeyCode::Char('z')
+                } else {
+                    KeyCode::Enter
+                },
+            );
+            let body = format!(
+                "\x1b[1;38;2;12;34;56;48;5;235mFIRST\n{}",
+                "rgb nee\x1b[32mdle plain NEEDLE tail\x1b[38;2;12;34;56m\n".repeat(100)
+            );
+            append(&mut ui, &body, true);
+            key(&mut ui, KeyCode::Home);
+            key(&mut ui, KeyCode::PageDown);
+            key(&mut ui, KeyCode::Char('/'));
+            ui.send_paste("needle").unwrap();
+            key(&mut ui, KeyCode::Enter);
+            let rect = ui.rect_of_key(&format!("log-window-{JOB}").into()).unwrap();
+            let frame = ui.capture_frame();
+            let phrase = "rgb needle plain NEEDLE tail";
+            let location = (rect.y.max(0) as u16
+                ..(rect.y.max(0) as u16 + rect.h).min(ui.viewport().h))
+                .find_map(|y| {
+                    let row: String = (rect.x as u16..rect.x as u16 + rect.w)
+                        .map(|x| frame.cell(x, y).symbol.as_str())
+                        .collect();
+                    row.find(phrase)
+                        .map(|column| (rect.x as u16 + column as u16, y))
+                })
+                .expect("colored log row should be visible after searching");
+            let (x, y) = location;
+            assert_eq!(
+                frame.cell(x, y).fg,
+                Color::Rgb(12, 34, 56),
+                "{theme}, zoom={zoom}: inherited truecolor"
+            );
+            assert_eq!(frame.cell(x, y).bg, Color::Indexed(235));
+            assert_eq!(frame.cell(x + 11, y).fg, Color::Green);
+            assert_eq!(frame.cell(x + 11, y).bg, Color::Indexed(235));
+            for offset in (4..10).chain(17..23) {
+                assert_eq!(
+                    frame.cell(x + offset, y).bg,
+                    Color::Yellow,
+                    "{theme}, zoom={zoom}: match column {offset}"
+                );
+                assert_eq!(frame.cell(x + offset, y).fg, Color::Black);
+            }
+            assert!(
+                !text(&ui).contains("▶"),
+                "matching text is highlighted without altering log content"
+            );
+            key(&mut ui, KeyCode::Char('/'));
+            key(&mut ui, KeyCode::Home);
+            modified(&mut ui, KeyCode::End, KeyMods::SHIFT);
+            key(&mut ui, KeyCode::Backspace);
+            key(&mut ui, KeyCode::Enter);
+            assert!(ui.state().log_views[&JOB].query.is_empty());
+            let frame = ui.capture_frame();
+            assert_eq!(
+                frame.cell(x + 4, y).bg,
+                Color::Indexed(235),
+                "clearing search restores the original background"
+            );
+            assert_eq!(frame.cell(x + 4, y).fg, Color::Rgb(12, 34, 56));
+        }
+    }
+}
+
+#[test]
 fn empty_and_error_traces_keep_fullscreen_status_visible_and_hide_the_scrollbar() {
     for theme in ["midnight", "dracula", "light"] {
         let mut ui = mount(theme);

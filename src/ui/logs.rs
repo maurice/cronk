@@ -2,11 +2,21 @@
 //! Only visible lines are rendered; even very large traces never become a terminal-
 //! sized layout tree. Fetched history is kept in memory until its route is discarded.
 use super::Trace;
+use crate::ansi::{SgrState, csi_end};
+use std::ops::Range;
+use tui_lipan::{
+    prelude::*,
+    style::{RowStylePolicy, ansi::parse_ansi},
+};
 
 #[derive(Default)]
 pub struct TraceIndex {
     bytes: usize,
     starts: Vec<usize>,
+    scanned: usize,
+    sgr: SgrState,
+    // Sparse start-of-line checkpoints: unchanged styles consume no extra space.
+    styles: Vec<(usize, String)>,
 }
 
 impl TraceIndex {
@@ -20,6 +30,31 @@ impl TraceIndex {
                 .enumerate()
                 .filter_map(|(i, b)| (*b == b'\n').then_some(from + i + 1)),
         );
+        let mut cursor = self.scanned;
+        while cursor < text.len() {
+            let byte = text.as_bytes()[cursor];
+            if byte == b'\x1b' && cursor + 1 == text.len() {
+                break;
+            }
+            if byte == b'\x1b' && text.as_bytes().get(cursor + 1) == Some(&b'[') {
+                let Some(end) = csi_end(text, cursor) else {
+                    break;
+                };
+                if text.as_bytes()[end - 1] == b'm' {
+                    self.sgr.apply(&text[cursor + 2..end - 1]);
+                }
+                cursor = end;
+                continue;
+            }
+            if byte == b'\n' {
+                let prefix = self.sgr.prefix();
+                if self.styles.last().map_or("", |(_, value)| value.as_str()) != prefix {
+                    self.styles.push((cursor + 1, prefix));
+                }
+            }
+            cursor += 1;
+        }
+        self.scanned = cursor;
         self.bytes = text.len();
     }
 }
@@ -53,6 +88,28 @@ impl Trace {
             .saturating_sub(usize::from(index.starts.last() == Some(&self.text.len())))
     }
 
+    pub fn plain_line(&self, row: usize) -> String {
+        parse_ansi(self.line(row))
+            .into_iter()
+            .map(|span| span.content.to_string())
+            .collect()
+    }
+
+    pub fn line_spans(&self, row: usize, query: &str) -> Vec<Span> {
+        self.ensure_index();
+        let prefix = {
+            let index = self.index.borrow();
+            let start = index.starts.get(row).copied().unwrap_or(self.text.len());
+            let checkpoint = index.styles.partition_point(|(offset, _)| *offset <= start);
+            checkpoint
+                .checked_sub(1)
+                .map(|i| index.styles[i].1.clone())
+                .unwrap_or_default()
+        };
+        let spans = parse_ansi(&format!("{prefix}{}", self.line(row)));
+        highlight(spans, query)
+    }
+
     pub fn line(&self, row: usize) -> &str {
         self.ensure_index();
         let index = self.index.borrow();
@@ -66,6 +123,87 @@ impl Trace {
             .unwrap_or(self.text.len());
         self.text[start..end].trim_end_matches(['\n', '\r'])
     }
+}
+
+/// Match in displayed text, never ANSI bytes. Unicode lowercase expansions are
+/// mapped back to the original UTF-8 character boundaries (e.g. İ -> i + dot).
+fn match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query = query.to_lowercase();
+    if text.is_ascii() {
+        return text
+            .to_lowercase()
+            .match_indices(&query)
+            .map(|(i, value)| i..i + value.len())
+            .collect();
+    }
+    // Use the same string-level lowercase operation as navigation (including
+    // contextual Greek sigma), while mapping length expansions back to source.
+    let folded = text.to_lowercase();
+    let mut folded_offset = 0;
+    let mut boundaries = Vec::new();
+    for (start, ch) in text.char_indices() {
+        boundaries.push((folded_offset, start, start + ch.len_utf8()));
+        folded_offset += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for (start, value) in folded.match_indices(&query) {
+        let first = boundaries.partition_point(|&(offset, _, _)| offset <= start) - 1;
+        let last = boundaries.partition_point(|&(offset, _, _)| offset < start + value.len()) - 1;
+        let range = boundaries[first].1..boundaries[last].2;
+        if let Some(previous) = ranges
+            .last_mut()
+            .filter(|previous| previous.end >= range.start)
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            ranges.push(range);
+        }
+    }
+    ranges
+}
+
+fn highlight(spans: Vec<Span>, query: &str) -> Vec<Span> {
+    let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+    let matches = match_ranges(&text, query);
+    let mut result = Vec::new();
+    let mut base = 0;
+    for span in spans {
+        let end = base + span.content.len();
+        let mut cursor = base;
+        let normal = span.style.contrast_policy(ContrastPolicy::Off);
+        let mut marked = normal.fg(Color::Black).bg(Color::Yellow);
+        marked.reverse = Some(false);
+        marked.dim = Some(false);
+        for range in matches.iter().filter(|r| r.start < end && r.end > base) {
+            let start = range.start.max(base);
+            let stop = range.end.min(end);
+            if start > cursor {
+                result.push(
+                    Span::new(span.content[cursor - base..start - base].to_owned())
+                        .style(normal)
+                        .row_style_policy(RowStylePolicy::Disabled),
+                );
+            }
+            result.push(
+                Span::new(span.content[start - base..stop - base].to_owned())
+                    .style(marked)
+                    .row_style_policy(RowStylePolicy::Disabled),
+            );
+            cursor = stop;
+        }
+        if cursor < end {
+            result.push(
+                Span::new(span.content[cursor - base..].to_owned())
+                    .style(normal)
+                    .row_style_policy(RowStylePolicy::Disabled),
+            );
+        }
+        base = end;
+    }
+    result
 }
 
 pub struct LogView {
@@ -122,7 +260,7 @@ impl LogView {
             let query = self.query.to_lowercase();
             self.matches.extend(
                 (0..trace.line_count())
-                    .filter(|&row| trace.line(row).to_lowercase().contains(&query)),
+                    .filter(|&row| trace.plain_line(row).to_lowercase().contains(&query)),
             );
         }
         self.current_match = selected.and_then(|row| self.matches.iter().position(|&r| r == row));
@@ -245,6 +383,108 @@ mod tests {
         view.find(&trace, 1, false);
         assert!(view.matches.is_empty());
         assert_eq!(view.offset, 1);
+    }
+
+    #[test]
+    fn ansi_styles_survive_scrolling_chunk_boundaries_and_resets() {
+        let mut trace = Trace::default();
+        trace.append("\x1b[1;38;2;12;34;56;48;5;235mfirst\nsecond\n", false);
+        let spans = trace.line_spans(1, "");
+        assert_eq!(
+            spans[0].style.fg,
+            Style::new().fg(Color::Rgb(12, 34, 56)).fg
+        );
+        assert_eq!(spans[0].style.bg, Style::new().bg(Color::Indexed(235)).bg);
+        assert_eq!(spans[0].style.bold, Some(true));
+        trace.append("\x1b[22;39;", false);
+        trace.append("49mnormal\nnext\n", false);
+        for row in [2, 3] {
+            let spans = trace.line_spans(row, "");
+            assert_eq!(spans[0].style.fg, None);
+            assert_eq!(spans[0].style.bg, None);
+            assert_ne!(spans[0].style.bold, Some(true));
+        }
+        trace.append("replacement\n", true);
+        assert_eq!(trace.line_spans(0, "")[0].style.fg, None);
+        let colored = "\x1b[31mλ first\nsecond\n\x1b[0mnormal";
+        for split in (0..=colored.len()).filter(|&i| colored.is_char_boundary(i)) {
+            let mut trace = Trace::default();
+            trace.append(&colored[..split], false);
+            trace.append(&colored[split..], false);
+            assert_eq!(
+                trace.line_spans(1, "")[0].style.fg,
+                Style::new().fg(Color::Red).fg,
+                "split {split}"
+            );
+            assert_eq!(trace.line_spans(2, "")[0].style.fg, None);
+        }
+    }
+
+    #[test]
+    fn highlights_match_text_across_ansi_spans_and_restore_colors_afterwards() {
+        let mut trace = Trace::default();
+        trace.append(
+            "\x1b[31mred nee\x1b[32mdle green NEEDLE end\x1b[0m\n",
+            false,
+        );
+        let spans = trace.line_spans(0, "needle");
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+            "red needle green NEEDLE end"
+        );
+        let highlighted: String = spans
+            .iter()
+            .filter(|s| s.style.bg == Style::new().bg(Color::Yellow).bg)
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(highlighted, "needleNEEDLE");
+        assert_eq!(
+            spans.first().unwrap().style.fg,
+            Style::new().fg(Color::Red).fg
+        );
+        assert_eq!(
+            spans.last().unwrap().style.fg,
+            Style::new().fg(Color::Green).fg
+        );
+        assert_eq!(spans.last().unwrap().style.bg, None);
+        let mut view = LogView {
+            query: "needle".into(),
+            ..LogView::default()
+        };
+        view.refresh_matches(&trace);
+        assert_eq!(view.matches, vec![0]);
+        view.query = "31".into();
+        view.refresh_matches(&trace);
+        assert!(
+            view.matches.is_empty(),
+            "SGR parameters are not searchable text"
+        );
+    }
+
+    #[test]
+    fn unicode_highlights_preserve_original_character_boundaries() {
+        let mut trace = Trace::default();
+        trace.append("İ λ İ\n", false);
+        let spans = trace.line_spans(0, "i");
+        let highlighted: String = spans
+            .iter()
+            .filter(|s| s.style.bg == Style::new().bg(Color::Yellow).bg)
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(highlighted, "İİ");
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+            "İ λ İ"
+        );
+        let mut view = LogView {
+            query: "i".into(),
+            ..LogView::default()
+        };
+        view.refresh_matches(&trace);
+        assert_eq!(view.matches, vec![0]);
+        trace.append("ΟΣ", true);
+        let spans = trace.line_spans(0, "ΟΣ");
+        assert_eq!(spans[0].style.bg, Style::new().bg(Color::Yellow).bg);
     }
 
     #[test]

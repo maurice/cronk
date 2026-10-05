@@ -22,7 +22,9 @@
 //! are not recursively traversed. Server-side diff limits cannot always be detected on
 //! older GitLab versions. Editing is restricted to the fields documented on `mutate`.
 //!
-//! Trace offsets count original bytes, including stripped controls. Reads return at most
+//! Trace offsets count original bytes, including stripped controls. Bounded numeric SGR
+//! color/style sequences are preserved for widget rendering; other escape commands and
+//! control-string payloads are stripped, including across fetch boundaries. Reads return at most
 //! 256 KiB of source bytes. Byte query parameters are capability-probed; older servers
 //! fall back to Range. Servers ignoring Range require streaming past the prefix, limited
 //! to 8 MiB per call (an explicit error beyond that, never silent truncation). Sequential
@@ -1630,6 +1632,8 @@ struct TraceCursor {
 struct Sanitizer {
     mode: EscapeMode,
     utf8: Vec<u8>,
+    csi: String,
+    csi_valid: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -1686,6 +1690,12 @@ impl Sanitizer {
         text
     }
 
+    fn start_csi(&mut self) {
+        self.mode = EscapeMode::Csi;
+        self.csi.clear();
+        self.csi_valid = true;
+    }
+
     fn character(&mut self, c: char, text: &mut String) {
         use EscapeMode::*;
         if c == '\u{9c}' {
@@ -1695,7 +1705,7 @@ impl Sanitizer {
         match self.mode {
             Ground => match c {
                 '\u{1b}' => self.mode = Escape,
-                '\u{9b}' => self.mode = Csi,
+                '\u{9b}' => self.start_csi(),
                 '\u{9d}' => self.mode = Osc,
                 '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => self.mode = String,
                 '\n' | '\t' => text.push(c),
@@ -1703,8 +1713,11 @@ impl Sanitizer {
                 _ => {}
             },
             Escape => {
+                if c == '[' {
+                    self.start_csi();
+                    return;
+                }
                 self.mode = match c {
-                    '[' => Csi,
                     ']' => Osc,
                     'P' | 'X' | '^' | '_' => String,
                     '\u{1b}' | '\u{20}'..='\u{2f}' => Escape,
@@ -1713,8 +1726,24 @@ impl Sanitizer {
             }
             Csi => match c {
                 '\u{1b}' => self.mode = Escape,
-                '@'..='~' => self.mode = Ground,
-                _ => {}
+                '@'..='~' => {
+                    if c == 'm'
+                        && self.csi_valid
+                        && let Some(params) = crate::ansi::normalize_sgr(&self.csi)
+                    {
+                        text.push_str("\x1b[");
+                        text.push_str(&params);
+                        text.push('m');
+                    }
+                    self.mode = Ground;
+                    self.csi.clear();
+                }
+                c if ('\u{20}'..='\u{3f}').contains(&c)
+                    && self.csi.len() < crate::ansi::SGR_LIMIT =>
+                {
+                    self.csi.push(c)
+                }
+                _ => self.csi_valid = false,
             },
             Osc => match c {
                 '\u{7}' => self.mode = Ground,
@@ -2761,7 +2790,7 @@ mod tests {
                 .unwrap()
                 .extend_from_slice(b"\x07\x1b[31mRED\x1b[0m\r\n");
             let third = client.trace(7, 42, second.next_offset).unwrap();
-            assert_eq!(third.text, "RED\n");
+            assert_eq!(third.text, "\x1b[31mRED\x1b[0m\n");
             assert_eq!(third.next_offset, data.lock().unwrap().len() as u64);
             assert!(!third.reset);
             let eof = client.trace(7, 42, third.next_offset).unwrap();
@@ -2993,7 +3022,7 @@ mod tests {
         let second = client.clone().trace(7, 42, first.next_offset).unwrap();
         assert_eq!(second.text, "é");
         let third = client.trace(7, 42, second.next_offset).unwrap();
-        assert_eq!(third.text, "RED\n");
+        assert_eq!(third.text, "\x1b[31mRED\x1b[0m\n");
         assert_eq!(third.next_offset, total as u64);
         assert!(!third.reset);
     }
@@ -3013,7 +3042,7 @@ mod tests {
         let client = mock.legacy_trace_client();
         assert_eq!(client.trace(7, 42, 0).unwrap().text, "old");
         let chunk = client.trace(7, 42, 3).unwrap();
-        assert_eq!(chunk.text, "énew\n");
+        assert_eq!(chunk.text, "é\x1b[32mnew\x1b[0m\n");
         assert_eq!(chunk.next_offset, 18);
         assert!(!chunk.reset);
         let mut first = true;
@@ -3159,13 +3188,42 @@ mod tests {
             let mut sanitizer = Sanitizer::default();
             let mut text = sanitizer.feed(&bytes[..split]);
             text.push_str(&sanitizer.feed(&bytes[split..]));
-            assert_eq!(text, "ABlinkCé\n\t", "split {split}");
+            assert_eq!(text, "ABlink\x1b[31mC\x1b[0mé\n\t", "split {split}");
         }
         let mut sanitizer = Sanitizer::default();
         assert_eq!(sanitizer.feed(b"\xc3"), "");
         assert_eq!(sanitizer.feed(b""), "");
         assert_eq!(sanitizer.feed(b"\xa9"), "é");
-        assert_eq!(sanitizer.feed(b"\x9dhidden\x07ok\x9b31mred\x9b0m"), "okred");
+        assert_eq!(
+            sanitizer.feed(b"\x9dhidden\x07ok\x9b31mred\x9b0m"),
+            "ok\x1b[31mred\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn sanitizer_preserves_sgr_but_rejects_commands_and_unbounded_parameters() {
+        let input = "start\x1b[2J\x1b[?25l\x1b[?31m\x1b[999999999999999999999m\x1b[1;91;48;5;235mRED\x1b[m\x1b]52;c;CLIPBOARD\x07\x1bPPRIVATE\x1b\\end";
+        for split in 0..=input.len() {
+            let mut sanitizer = Sanitizer::default();
+            let mut text = sanitizer.feed(&input.as_bytes()[..split]);
+            text.push_str(&sanitizer.feed(&input.as_bytes()[split..]));
+            assert_eq!(
+                text, "start\x1b[1;91;48;5;235mRED\x1b[0mend",
+                "split {split}"
+            );
+        }
+        let mut sanitizer = Sanitizer::default();
+        assert!(
+            sanitizer
+                .feed(format!("\x1b[{}", "1".repeat(20_000)).as_bytes())
+                .is_empty()
+        );
+        assert!(sanitizer.csi.len() <= crate::ansi::SGR_LIMIT);
+        assert_eq!(sanitizer.feed(b"mstill visible"), "still visible");
+        assert_eq!(
+            sanitizer.feed(b"\x1b[38:2::12:34:56mRGB\x1b[0m"),
+            "\x1b[38;2;12;34;56mRGB\x1b[0m"
+        );
     }
 
     #[test]

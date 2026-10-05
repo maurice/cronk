@@ -104,7 +104,9 @@ In Jobs, **↑/↓** choose a job. **Enter** focuses its logs; **↑/↓**, **Pa
 
 At the bottom, incoming output keeps the viewport following the live tail. Scrolling away from the bottom anchors the visible source lines while new output arrives below. Returning to the bottom, or pressing **End**, resumes following. The same rule applies to inline and zoomed logs.
 
-In focused or zoomed logs, **/** opens a literal, case-insensitive search over fetched history. **Enter** jumps to a match; **n/N** move forward/backward through matching lines with wraparound. Search does not filter or edit the log. **Esc** closes search, then zoom, then log focus, before leaving Jobs. A zoom opened directly from selection returns directly to job navigation.
+In focused or zoomed logs, **/** opens a literal, case-insensitive search over fetched history. **Enter** jumps to a match; **n/N** move forward/backward through matching lines with wraparound. All matching substrings have a yellow background and readable dark text, including matches spanning ANSI color changes. Search does not filter or edit the log. **Esc** closes search, then zoom, then log focus, before leaving Jobs. A zoom opened directly from selection returns directly to job navigation.
+
+Log rendering preserves ANSI SGR colors (standard/bright, 256-color, and truecolor) and supported text styles, inline and fullscreen. Styles carry across lines and fetch chunks, including when scrolling into the middle of colored output. Cursor movement, screen clearing, clipboard/OSC commands, and other terminal controls remain stripped; this is not a terminal emulator. Programs must actually emit ANSI color codes into the job trace—colors suppressed by the CI tool cannot be recovered.
 
 Complete fetched history is retained in memory for scrolling and search; only visible lines are rendered. Search covers output fetched so far, not bytes still being loaded. Log positions are retained across tab visits, but log history, searches, and log-focus/zoom state are not written to disk. Large traces consequently use more memory until their item cache is discarded.
 

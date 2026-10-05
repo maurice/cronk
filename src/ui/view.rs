@@ -1636,25 +1636,22 @@ fn log_window(ctx: &Context<Cronk>, job: &Job, height: usize, colors: Colors) ->
     .min(u16::MAX as usize / 3);
     let offset = view.position(total, height);
     let style = colors.base().bg(colors.surface);
-    let mut visible = String::new();
+    let mut visible = Vec::new();
     for row in offset..offset + height {
         if row > offset {
-            visible.push('\n');
+            visible.push(Span::new("\n"));
         }
         if total == 0 && row == 0 {
-            visible.push_str(if trace.is_some_and(|t| t.finished) {
+            visible.push(Span::new(if trace.is_some_and(|t| t.finished) {
                 "  Trace is empty."
             } else {
                 "  Waiting for log output…"
-            });
-        } else {
-            if view.matches.binary_search(&row).is_ok() {
-                visible.push_str("▶ ");
-            }
-            visible.push_str(trace.map_or("", |t| t.line(row)));
+            }));
+        } else if let Some(trace) = trace {
+            visible.extend(trace.line_spans(row, &view.query));
         }
     }
-    let rows = Text::from_ansi(&visible)
+    let rows = Text::from_spans(visible)
         .height(Length::Px(height as u16))
         .width(Length::Flex(1))
         .overflow(Overflow::Clip)

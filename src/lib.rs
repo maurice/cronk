@@ -1,3 +1,4 @@
+mod ansi;
 pub mod build_info;
 pub mod config;
 pub mod demo;

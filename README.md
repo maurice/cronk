@@ -75,7 +75,7 @@ Each tab restores its last list or drilled-down detail scope, including selectio
 
 Lists use a quarter-viewport boundary: the cursor moves to the lower/upper quarter margin, the viewport follows further movement, then the cursor reaches the actual final/first row. No wraparound. Three terminal rows form one list item; the margin rounds down to whole items.
 
-Overflowing lists, detail panes, dialogs, and multiline editors show a theme-colored scrollbar at their right edge. The thumb indicates the visible fraction and current position; click the track or drag the thumb to scroll. Mouse scrolling keeps list selection visible, keyboard navigation continues from there, and unchanged refreshes do not pull the viewport back. Scrollbars disappear when content fits.
+Overflowing lists, detail panes, dialogs, and multiline editors show a theme-colored scrollbar at their right edge. The thumb indicates the visible fraction and current position; click the track or drag the thumb to scroll. Mouse scrolling keeps list selection visible, keyboard navigation continues from there, and unchanged refreshes do not pull the viewport back. Scrollbars disappear when content fits. Pointer hover lifts interactive surfaces slightly so tabs, rows, checkboxes, section headers, fields, jobs, discussions, dialog actions, completion choices, and scrollbar thumbs react before a click; selected rows stay distinct from hover. Clicks briefly flash a stronger lift unless `animations = false`.
 
 The Dashboard shows open work where you are the author, assignee, or (for MRs) a reviewer. Each row separates **why it is here** (your role) from its **attention signals**: failed pipeline, known unresolved threads, reviewer assignment, missing reviewers on your ready MR, passing/in-progress checks, draft state, or otherwise open work. Multiple signals can appear together. It orders actionable blockers first, then review assignments and reviewer gaps, then checks in progress, drafts, other MRs, and issues. Reviewer assignment does not prove a review is still pending, and a missing discussion count is unknown rather than zero. Passing checks are not a claim that approvals, mergeability, or company policy checks are satisfied. Enter opens the real detail while preserving the Dashboard as the return destination.
 
@@ -130,6 +130,7 @@ A minimal configuration (or use `config.example.toml` as a reference):
 gitlab_url = "https://gitlab.company.example"
 token_env = "GITLAB_TOKEN"
 theme = "midnight"
+animations = true
 list_refresh_secs = 60
 detail_refresh_secs = 10
 
@@ -145,7 +146,7 @@ kind = "issue"
 query = 'project:planning assignee:@me state:opened'
 ```
 
-Theme names are `midnight`, `dracula`, and `light`, also selectable in the palette. Optional `[colors]` overrides: `background`, `surface`, `selection`, `foreground`, `muted`, `accent`, each `"#RRGGBB"`. Overrides remain active after choosing another preset. Label colors always come from GitLab and remain intact over selection backgrounds.
+Theme names are `midnight`, `dracula`, and `light`, also selectable in the palette. Optional `[colors]` overrides: `background`, `surface`, `selection`, `foreground`, `muted`, `accent`, each `"#RRGGBB"`. Overrides remain active after choosing another preset. Label colors always come from GitLab and remain intact over selection and hover backgrounds. Set `animations = false` to keep static hover feedback while disabling click flashes.
 
 ### Refresh and request budget
 

@@ -1,5 +1,7 @@
 use super::{
-    Completion, Cronk, Dialog, DialogKind, Msg, Scope, State, list_height_for_tab, list_row_height,
+    Completion, Cronk, Dialog, DialogKind, Msg, Scope, State,
+    interaction::{self, click},
+    list_height_for_tab, list_row_height,
 };
 use crate::{
     build_info,
@@ -91,6 +93,7 @@ impl Colors {
             .info(self.cyan)
             .into_theme();
         theme.primary = self.base();
+        theme.hover = interaction::hover_style();
         theme.selection = self.selected();
         theme.text_selection = self.selected();
         theme.surface.panel = self.surface;
@@ -121,14 +124,16 @@ impl Colors {
     }
 }
 
-fn vertical_scrollbar(colors: Colors) -> ScrollbarConfig {
+fn vertical_scrollbar(ctx: &Context<Cronk>, key: &str, colors: Colors) -> ScrollbarConfig {
+    let thumb = interaction::style(ctx, key, Style::new().fg(colors.accent).bg(colors.surface));
+    let track = interaction::style(ctx, key, Style::new().fg(colors.muted).bg(colors.surface));
     ScrollbarConfig::new()
         .variant(ScrollbarVariant::Standalone)
         .gap(1)
         .thumb('█')
-        .thumb_style(Style::new().fg(colors.accent).bg(colors.surface))
-        .thumb_focus_style(Style::new().fg(colors.accent).bg(colors.surface))
-        .track_style(Style::new().fg(colors.muted).bg(colors.surface))
+        .thumb_style(thumb)
+        .thumb_focus_style(thumb)
+        .track_style(track)
 }
 
 fn content_padding(left: u16) -> Padding {
@@ -165,20 +170,6 @@ fn rich(spans: Vec<Span>, style: Style) -> HStack {
 
 fn blank() -> Element {
     Spacer::new().height(Length::Px(1)).into()
-}
-
-fn click(
-    ctx: &Context<Cronk>,
-    key: impl Into<String>,
-    child: impl Into<Element>,
-    message: impl Fn() -> Msg + 'static,
-) -> Element {
-    Element::from(
-        MouseRegion::new()
-            .on_click(ctx.link().callback(move |_| message()))
-            .child(child),
-    )
-    .key(key.into())
 }
 
 fn project_name(state: &State, id: u64) -> String {
@@ -344,6 +335,7 @@ fn tab_bar(ctx: &Context<Cronk>, colors: Colors) -> Element {
         } else {
             Style::new().fg(colors.muted).bg(colors.surface)
         };
+        let style = interaction::style(ctx, &format!("workspace-tab-{index}"), style);
         let mut spans = vec![Span::new(" ")];
         if index < 4 {
             spans.push(Span::new(name[..1].to_owned()).style(Style::new().underline()));
@@ -443,7 +435,11 @@ fn breadcrumb(ctx: &Context<Cronk>, colors: Colors) -> Element {
         row = row.child(click(
             ctx,
             "breadcrumb-back",
-            Text::new("‹ Back  ").style(Style::new().fg(colors.accent)),
+            Text::new("‹ Back  ").style(interaction::style(
+                ctx,
+                "breadcrumb-back",
+                colors.base().fg(colors.accent),
+            )),
             || Msg::Back,
         ));
     }
@@ -569,6 +565,7 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
         }
     }
     let offset = scroll.offset;
+    let scrollbar_key = format!("main-list-{}-scrollbar", state.config.active_tab);
     let list = ScrollView::new()
         .height(Length::Px(
             (slots * row_height).min(u16::MAX as usize) as u16
@@ -578,7 +575,7 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
         .focusable(false)
         .tab_stop(false)
         .scrollbar(true)
-        .scrollbar_config(vertical_scrollbar(colors))
+        .scrollbar_config(vertical_scrollbar(ctx, &scrollbar_key, colors))
         .scroll_wheel_multiplier(row_height as u16)
         .smooth_wheel_scroll(false)
         .estimated_child_height(row_height as u16)
@@ -592,7 +589,11 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
         )
         .children(rows);
     VStack::new()
-        .child(Element::from(list).key(format!("main-list-{}", state.config.active_tab)))
+        .child(interaction::scrollbar(
+            ctx,
+            scrollbar_key,
+            Element::from(list).key(format!("main-list-{}", state.config.active_tab)),
+        ))
         .into()
 }
 
@@ -609,6 +610,7 @@ fn work_row(
     } else {
         colors.base()
     };
+    let style = interaction::style(ctx, &format!("item-{}", item_key(&item.key)), style);
     let (circle, color) = colors.status(&item.state);
     let mut title = vec![
         Span::new(if selected && state.scope == Scope::List {
@@ -699,11 +701,13 @@ fn project_row(
     } else {
         colors.base()
     };
+    let style = interaction::style(ctx, &format!("project-{}", project.id), style);
+    let checkbox_style = interaction::style(ctx, &format!("project-visible-{}", project.id), style);
     let link = ctx.link().clone();
     let checkbox = click(
         ctx,
         format!("project-visible-{}", project.id),
-        Text::new(if project.visible { " [x] " } else { " [ ] " }).style(Style::new().fg(
+        Text::new(if project.visible { " [x] " } else { " [ ] " }).style(checkbox_style.fg(
             if project.visible {
                 colors.green
             } else {
@@ -778,7 +782,7 @@ fn scroll_content(ctx: &Context<Cronk>, children: Vec<Element>, colors: Colors) 
         .focusable(false)
         .tab_stop(false)
         .scrollbar(true)
-        .scrollbar_config(vertical_scrollbar(colors))
+        .scrollbar_config(vertical_scrollbar(ctx, "detail-scrollbar", colors))
         .scroll_wheel_multiplier(3)
         .smooth_wheel_scroll(false)
         .padding(content_padding(2))
@@ -803,6 +807,8 @@ fn markdown(value: &str, colors: Colors) -> DocumentView {
     .markdown_compact(true)
     .render_diagrams(false)
     .style(colors.base())
+    // Passive document text is selectable, but is not a clickable control surface.
+    .hover_style(Style::new())
     .border(false)
     .padding(0)
     .line_numbers(false)
@@ -870,7 +876,11 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
             },
             ..colors
         };
-        let style = section_colors.base();
+        let style = interaction::style(
+            ctx,
+            &format!("detail-section-{index}"),
+            section_colors.base(),
+        );
         content.push(click(
             ctx,
             format!("detail-section-{index}"),
@@ -934,11 +944,15 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
             target.unwrap_or_else(|| format!("detail-section-{}", state.section_cursor)),
         );
     }
-    Element::from(scroll).key(format!(
-        "detail-{}-{}",
-        state.config.active_tab,
-        item_key(&details.item.key)
-    ))
+    interaction::scrollbar(
+        ctx,
+        "detail-scrollbar",
+        Element::from(scroll).key(format!(
+            "detail-{}-{}",
+            state.config.active_tab,
+            item_key(&details.item.key)
+        )),
+    )
 }
 
 fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element> {
@@ -970,6 +984,7 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
         } else {
             colors.base()
         };
+        let style = interaction::style(ctx, &format!("edit-field-{index}"), style);
         let mut spans = vec![
             Span::new(format!(
                 " {} {label:<19} ",
@@ -1246,11 +1261,15 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element>
             format!("job-{id}"),
             rich(
                 job_header(job, selected, expanded, colors),
-                if selected {
-                    colors.selected()
-                } else {
-                    colors.base()
-                },
+                interaction::style(
+                    ctx,
+                    &format!("job-{id}"),
+                    if selected {
+                        colors.selected()
+                    } else {
+                        colors.base()
+                    },
+                ),
             ),
             move || {
                 link.send(Msg::Section(3));
@@ -1296,6 +1315,7 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<E
         } else {
             colors.base()
         };
+        let style = interaction::style(ctx, &format!("discussion-{}", discussion.id), style);
         let author = discussion.notes.first().map_or_else(
             || "unknown".into(),
             |note| ctx.state.render_user(&note.author),
@@ -1511,8 +1531,10 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             }
             dialog_key(key, index, selected, count, multiline, commands)
         });
-        let normal = Style::new().fg(colors.foreground).bg(colors.background);
-        let focus = Style::new().fg(colors.foreground).bg(colors.selection);
+        let field_key = format!("dialog-field-{index}");
+        let normal = interaction::style(ctx, &field_key, colors.base());
+        let focus = interaction::style(ctx, &field_key, colors.selected());
+        let activate = interaction::activation(ctx, field_key, move || Msg::DialogField(index));
         let editor: Element = if field.uses_editor() {
             let mut editor = TextArea::bound(&field.editor)
                 .height(if field.multiline {
@@ -1527,7 +1549,11 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                     (0, 1).into()
                 })
                 .scrollbar(field.multiline)
-                .scrollbar_config(vertical_scrollbar(colors))
+                .scrollbar_config(vertical_scrollbar(
+                    ctx,
+                    &format!("dialog-field-{index}-scrollbar"),
+                    colors,
+                ))
                 .line_numbers(false)
                 .wrap(field.multiline)
                 .style(normal)
@@ -1537,7 +1563,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                 .caret_color(colors.accent)
                 .key_interceptor(interceptor)
                 .insert_tab(false)
-                .on_click(ctx.link().callback(move |_| Msg::DialogField(index)))
+                .on_click(activate)
                 .on_change(ctx.link().callback(move |event| Msg::Editor(index, event)));
             if let Some(c) = field
                 .completion
@@ -1561,7 +1587,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                 .selection_style(colors.selected())
                 .caret_color(colors.accent)
                 .key_interceptor(interceptor)
-                .on_click(ctx.link().callback(move |_| Msg::DialogField(index)))
+                .on_click(activate)
                 .on_change(ctx.link().callback(move |event| Msg::Input(index, event)))
                 .into()
         };
@@ -1577,7 +1603,15 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                             colors.muted
                         }),
                     ))
-                    .child(editor.key(format!("dialog-field-{index}")))
+                    .child(if field.multiline {
+                        interaction::scrollbar(
+                            ctx,
+                            format!("dialog-field-{index}-scrollbar"),
+                            editor.key(format!("dialog-field-{index}")),
+                        )
+                    } else {
+                        editor.key(format!("dialog-field-{index}"))
+                    })
                     .child(if selected == index {
                         field
                             .completion
@@ -1686,15 +1720,22 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         actions = actions.child(click(
             ctx,
             "dialog-submit",
-            Text::new(" Confirm ")
-                .style(Style::new().fg(colors.accent).bg(colors.selection).bold()),
+            Text::new(" Confirm ").style(interaction::style(
+                ctx,
+                "dialog-submit",
+                colors.selected().fg(colors.accent).bold(),
+            )),
             || Msg::Submit,
         ));
     }
     actions = actions.child(click(
         ctx,
         "dialog-close",
-        Text::new(" Close ").style(Style::new().fg(colors.muted)),
+        Text::new(" Close ").style(interaction::style(
+            ctx,
+            "dialog-close",
+            Style::new().fg(colors.muted).bg(colors.surface),
+        )),
         || Msg::CloseDialog,
     ));
     let mut scroll = body
@@ -1705,7 +1746,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         .focusable(false)
         .tab_stop(false)
         .scrollbar(true)
-        .scrollbar_config(vertical_scrollbar(colors))
+        .scrollbar_config(vertical_scrollbar(ctx, "dialog-scrollbar", colors))
         .smooth_wheel_scroll(false)
         .on_scroll(ctx.link().callback(|_: ScrollEvent| Msg::DialogScrolled));
     if dialog.reveal_selection {
@@ -1715,9 +1756,13 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             scroll = scroll.reveal_key(format!("dialog-field-{}", dialog.selected));
         }
     }
-    let body = Element::from(scroll)
-        .max_height(Length::Px(ctx.viewport().h.saturating_sub(6).max(1)))
-        .key("dialog-scroll");
+    let body = interaction::scrollbar(
+        ctx,
+        "dialog-scrollbar",
+        Element::from(scroll)
+            .max_height(Length::Px(ctx.viewport().h.saturating_sub(6).max(1)))
+            .key("dialog-scroll"),
+    );
     let body = if dialog.fields.is_empty() {
         // Keep modal keyboard handling outside the viewport so scrolling cannot clip its focus.
         VStack::new()
@@ -1789,6 +1834,7 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
         } else {
             Style::new().fg(colors.foreground).bg(colors.surface)
         };
+        let style = interaction::style(ctx, &format!("lookup-{index}-{}", option.id), style);
         let epoch = c.epoch;
         let header: Element = if c.kind == LookupKind::Labels {
             let label = Label {
@@ -1853,7 +1899,11 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
     let mut choices = ScrollView::new()
         .height(Length::Px((ctx.viewport().h / 4).clamp(2, 8)))
         .scrollbar(true)
-        .scrollbar_config(vertical_scrollbar(colors))
+        .scrollbar_config(vertical_scrollbar(
+            ctx,
+            &format!("lookup-options-{index}-scrollbar"),
+            colors,
+        ))
         .scroll_keys(ScrollKeymap::NONE)
         .focusable(false)
         .tab_stop(false)
@@ -1869,7 +1919,11 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
             "↑/↓ choose · Enter accept · Tab next field · Esc cancel",
             Style::new().fg(colors.accent),
         ))
-        .child(choices.key(format!("lookup-options-{index}")))
+        .child(interaction::scrollbar(
+            ctx,
+            format!("lookup-options-{index}-scrollbar"),
+            choices.key(format!("lookup-options-{index}")),
+        ))
         .child(line(
             "Up to 20 matches · type more to narrow the search",
             Style::new().fg(colors.muted),
@@ -1891,11 +1945,15 @@ fn dialog_option(
         format!("dialog-option-{index}"),
         line(
             format!(" {} {label}", if selected { "›" } else { " " }),
-            if selected {
-                colors.selected().fg(colors.accent).bold()
-            } else {
-                Style::new().fg(colors.foreground)
-            },
+            interaction::style(
+                ctx,
+                &format!("dialog-option-{index}"),
+                if selected {
+                    colors.selected().fg(colors.accent).bold()
+                } else {
+                    Style::new().fg(colors.foreground).bg(colors.surface)
+                },
+            ),
         ),
         move || {
             if submit_on_click {

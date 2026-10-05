@@ -25,6 +25,8 @@ pub struct Config {
     pub projects: Vec<Project>,
     pub views: Vec<SavedView>,
     pub theme: String,
+    /// Disable transient click flashes without disabling static hover feedback.
+    pub animations: bool,
     pub user_display: UserDisplay,
     pub user_name_pattern: Option<String>,
     pub user_name_format: Option<String>,
@@ -88,6 +90,7 @@ impl Default for Config {
             projects: Vec::new(),
             views: Vec::new(),
             theme: "midnight".into(),
+            animations: true,
             user_display: UserDisplay::default(),
             user_name_pattern: None,
             user_name_format: None,
@@ -492,6 +495,7 @@ mod tests {
                 query: "reviewer:@me draft:false".into(),
             }],
             theme: "light".into(),
+            animations: false,
             user_display: UserDisplay::Name,
             user_name_pattern: Some(
                 r"^(?P<surname>\S+)\s+(?P<firstname>\S+)\s+(?P<staff_id>\d+)$".into(),

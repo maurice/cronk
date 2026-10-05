@@ -87,6 +87,7 @@ impl Component for Cronk {
             );
         State {
             config,
+            feedback: Default::default(),
             demo: is_demo,
             scope,
             items,
@@ -148,6 +149,30 @@ impl Component for Cronk {
 
     fn update(&mut self, msg: Msg, ctx: &mut Context<Self>) -> Update {
         match msg {
+            Msg::Hover(key, entered) => {
+                return if ctx.state.feedback.hover(key, entered) {
+                    Update::full()
+                } else {
+                    Update::none()
+                };
+            }
+            Msg::ClickFlash(key) => {
+                if !ctx.state.config.animations {
+                    return Update::none();
+                }
+                let generation = ctx.state.feedback.flash(key.clone());
+                return Update::with_command(Command::after(
+                    super::interaction::CLICK_FLASH,
+                    move |link: CommandLink<Msg>| link.send(Msg::EndClickFlash(key, generation)),
+                ));
+            }
+            Msg::EndClickFlash(key, generation) => {
+                return if ctx.state.feedback.end_flash(&key, generation) {
+                    Update::full()
+                } else {
+                    Update::none()
+                };
+            }
             Msg::Tick => {
                 ctx.state.tick += 1;
                 let now = ctx.elapsed();
@@ -1052,6 +1077,7 @@ impl Cronk {
         if index == ctx.state.config.active_tab {
             return;
         }
+        ctx.state.feedback.clear();
         let key = ctx.state.tab_key();
         let tab = navigation(&ctx.state);
         ctx.state.config.tab_states.insert(key.clone(), tab);
@@ -1241,6 +1267,7 @@ impl Cronk {
         } else {
             (0, None)
         };
+        ctx.state.feedback.clear();
         ctx.state.dialog = Some(Dialog {
             kind,
             title: title.into(),
@@ -1264,6 +1291,7 @@ impl Cronk {
         {
             ctx.state.config.theme = theme;
         }
+        ctx.state.feedback.clear();
         ctx.blur();
     }
     fn dialog_error(&self, ctx: &mut Context<Self>, error: &str) {

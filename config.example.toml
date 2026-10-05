@@ -3,6 +3,7 @@
 gitlab_url = "https://gitlab.company.example"
 token_env = "GITLAB_TOKEN"
 theme = "midnight" # midnight | dracula | light
+animations = true # false keeps hover feedback but disables click flashes
 user_display = "username" # username | name | id
 # When user_display = "name", optionally transform GitLab names with named regex captures:
 # user_name_pattern = '^(?P<surname>\S+)\s+(?P<firstname>\S+)\s+(?P<staff_id>\d+)$'

@@ -1,5 +1,6 @@
 mod completion;
 mod controller;
+mod interaction;
 mod view;
 
 pub use completion::Completion;
@@ -34,6 +35,7 @@ pub enum Scope {
 
 pub struct State {
     pub config: Config,
+    feedback: interaction::Feedback,
     pub demo: bool,
     pub scope: Scope,
     pub items: Vec<WorkItem>,
@@ -213,6 +215,9 @@ pub const COMMANDS: &[(&str, Action)] = &[
 ];
 
 pub enum Msg {
+    Hover(String, bool),
+    ClickFlash(String),
+    EndClickFlash(String, u64),
     Tick,
     Refresh,
     LoadProject(u64, u64),

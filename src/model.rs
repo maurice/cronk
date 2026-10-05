@@ -75,6 +75,19 @@ pub enum LookupKind {
     Labels,
 }
 
+pub const CURRENT_ITERATION_NAME: &str = "Current";
+
+pub fn is_current_iteration_value(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case(CURRENT_ITERATION_NAME)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CurrentIteration {
+    pub id: u64,
+    pub title: String,
+    pub description: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LookupOption {
     pub id: u64,
@@ -118,6 +131,18 @@ impl LookupOption {
             description: "Known label".into(),
             color: label.color.clone(),
             text_color: label.text_color.clone(),
+        }
+    }
+
+    pub fn current_iteration(iteration: &CurrentIteration) -> Self {
+        Self {
+            id: iteration.id,
+            label: CURRENT_ITERATION_NAME.into(),
+            value: CURRENT_ITERATION_NAME.into(),
+            api_value: iteration.id.to_string(),
+            description: format!("Resolves to {}", iteration.description),
+            color: String::new(),
+            text_color: String::new(),
         }
     }
 }

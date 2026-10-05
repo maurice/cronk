@@ -34,8 +34,8 @@
 //! A trailing incomplete UTF-8 character (at most three bytes) is held until another poll.
 
 use crate::model::{
-    Details, Diff, Discussion, ItemKey, ItemKind, Label, LookupKind, LookupOption, Mutation,
-    Pipeline, Project, TraceChunk, User, WorkItem,
+    CurrentIteration, Details, Diff, Discussion, ItemKey, ItemKind, Label, LookupKind,
+    LookupOption, Mutation, Pipeline, Project, TraceChunk, User, WorkItem,
 };
 use anyhow::{Result, anyhow, bail};
 use reqwest::{
@@ -162,6 +162,69 @@ impl Cache {
     }
 }
 
+#[derive(Deserialize)]
+struct IterationMatch {
+    id: u64,
+    title: Option<String>,
+    start_date: Option<String>,
+    due_date: Option<String>,
+    #[serde(default)]
+    group_id: Option<u64>,
+    #[serde(default)]
+    project_id: Option<u64>,
+}
+
+impl IterationMatch {
+    fn dates(&self) -> String {
+        format!(
+            "{} – {}",
+            self.start_date.as_deref().unwrap_or("?"),
+            self.due_date.as_deref().unwrap_or("?")
+        )
+    }
+
+    fn title(&self) -> String {
+        self.title
+            .as_ref()
+            .filter(|title| !title.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("Iteration {}", self.dates()))
+    }
+
+    fn scope(&self) -> String {
+        self.group_id
+            .map(|id| format!("group {id}"))
+            .or_else(|| self.project_id.map(|id| format!("project {id}")))
+            .unwrap_or_default()
+    }
+
+    fn description(&self) -> String {
+        format!("{} · {} · ID {}", self.dates(), self.scope(), self.id)
+    }
+
+    fn lookup_option(&self) -> LookupOption {
+        let title = self.title();
+        LookupOption {
+            id: self.id,
+            value: title.clone(),
+            label: title,
+            api_value: self.id.to_string(),
+            description: self.description(),
+            color: String::new(),
+            text_color: String::new(),
+        }
+    }
+
+    fn current_iteration(&self) -> CurrentIteration {
+        let title = self.title();
+        CurrentIteration {
+            id: self.id,
+            description: format!("{title} · {}", self.description()),
+            title,
+        }
+    }
+}
+
 impl GitLab {
     pub fn new(base_url: &str, token: &str) -> Result<Self> {
         let mut api =
@@ -226,6 +289,21 @@ impl GitLab {
             .pop_if_empty()
             .extend(segments.iter().copied());
         url
+    }
+
+    pub fn current_iteration(&self, project: u64) -> Result<Option<CurrentIteration>> {
+        let project = project.to_string();
+        let mut url = self.url(&["projects", &project, "iterations"]);
+        url.query_pairs_mut()
+            .append_pair("per_page", "20")
+            .append_pair("page", "1")
+            .append_pair("include_ancestors", "true")
+            .append_pair("state", "current");
+        let entries: Vec<IterationMatch> = self.get(&url)?;
+        Ok(entries
+            .into_iter()
+            .next()
+            .map(|entry| entry.current_iteration()))
     }
 
     /// Bounded, first-page typeahead. Refine the query rather than fetching every page.
@@ -293,46 +371,11 @@ impl GitLab {
                         .append_pair("in[]", "title")
                         .append_pair("in[]", "cadence_title");
                 }
-                #[derive(Deserialize)]
-                struct Match {
-                    id: u64,
-                    title: Option<String>,
-                    start_date: Option<String>,
-                    due_date: Option<String>,
-                    #[serde(default)]
-                    group_id: Option<u64>,
-                    #[serde(default)]
-                    project_id: Option<u64>,
-                }
-                let entries: Vec<Match> = self.get(&url)?;
+                let entries: Vec<IterationMatch> = self.get(&url)?;
                 Ok(entries
                     .into_iter()
                     .take(20)
-                    .map(|entry| {
-                        let dates = format!(
-                            "{} – {}",
-                            entry.start_date.as_deref().unwrap_or("?"),
-                            entry.due_date.as_deref().unwrap_or("?")
-                        );
-                        let title = entry
-                            .title
-                            .filter(|title| !title.trim().is_empty())
-                            .unwrap_or_else(|| format!("Iteration {dates}"));
-                        let scope = entry
-                            .group_id
-                            .map(|id| format!("group {id}"))
-                            .or_else(|| entry.project_id.map(|id| format!("project {id}")))
-                            .unwrap_or_default();
-                        LookupOption {
-                            id: entry.id,
-                            value: title.clone(),
-                            label: title,
-                            api_value: entry.id.to_string(),
-                            description: format!("{dates} · {scope} · ID {}", entry.id),
-                            color: String::new(),
-                            text_color: String::new(),
-                        }
-                    })
+                    .map(|entry| entry.lookup_option())
                     .collect())
             }
             LookupKind::Labels => {
@@ -1678,6 +1721,24 @@ mod tests {
                 .to_string()
                 .contains("Retry-After: 30")
         );
+    }
+
+    #[test]
+    fn current_iteration_uses_symbolic_current_state() {
+        let mock = Mock::new(|request| {
+            let params: HashMap<_, _> = request.url().query_pairs().into_owned().collect();
+            assert_eq!(request.url().path(), "/api/v4/projects/7/iterations");
+            assert_eq!(params["include_ancestors"], "true");
+            assert_eq!(params["state"], "current");
+            Reply::json(json!([
+                {"id":42,"title":"Sprint","start_date":"2026-10-01","due_date":"2026-10-14","group_id":6}
+            ]))
+        });
+        let current = mock.client().current_iteration(7).unwrap().unwrap();
+        assert_eq!(current.id, 42);
+        assert_eq!(current.title, "Sprint");
+        assert!(current.description.contains("2026-10-01"));
+        assert!(current.description.contains("group 6"));
     }
 
     #[test]

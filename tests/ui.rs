@@ -8,7 +8,7 @@ use cronk::{
     build_info,
     config::{Config, SavedView, TabState, UserDisplay},
     demo,
-    model::{ItemKey, ItemKind, Mutation, TraceChunk, User},
+    model::{CurrentIteration, ItemKey, ItemKind, Mutation, TraceChunk, User},
     ui::{Confirmation, Cronk, Dialog, DialogKind, Msg, Scope, State},
 };
 use tui_lipan::{
@@ -1161,6 +1161,31 @@ fn keyboard_filter_applies_on_enter_and_invalid_drafts_cancel_without_losing_the
 }
 
 #[test]
+fn saved_views_can_keep_iteration_current_symbolic_and_resolve_per_project() {
+    let mut config = config();
+    config.views = vec![SavedView {
+        name: "Current sprint".into(),
+        kind: ItemKind::Issue,
+        query: "iteration:Current".into(),
+    }];
+    config.active_tab = 4;
+    let mut ui = mount(config, None);
+    ui.state_mut().current_iterations = [(
+        9001,
+        Some(CurrentIteration {
+            id: 1200,
+            title: "Demo iteration 12 · predictable concurrency".into(),
+            description: "Demo iteration 12 · predictable concurrency · Demo · ID 1200".into(),
+        }),
+    )]
+    .into();
+    assert_eq!(ui.state().query_text(), "iteration:Current");
+    let visible = ui.state().visible_items();
+    assert!(!visible.is_empty());
+    assert!(visible.iter().all(|item| item.key.project == 9001));
+}
+
+#[test]
 fn save_and_rename_a_view_through_focused_keyboard_dialogs() {
     let mut ui = mount(config(), None);
     key(&mut ui, KeyCode::Char('I'));
@@ -1676,7 +1701,7 @@ fn a_list_request_started_before_a_successful_write_cannot_replace_newer_rows() 
     ui.dispatch(Msg::MutationDone(Ok(()))).unwrap();
     assert!(ui.state().list_epoch > old_epoch);
     let before = ui.state().items.clone();
-    ui.dispatch(Msg::ProjectLoaded(project, old_epoch, Ok(vec![])))
+    ui.dispatch(Msg::ProjectLoaded(project, old_epoch, Ok((vec![], None))))
         .unwrap();
     assert_eq!(ui.state().items, before);
 }
@@ -1982,7 +2007,7 @@ fn failed_list_refresh_retains_last_good_rows_and_selected_identity() {
     // Simulate a queued refresh/completion without constructing a client or starting threads.
     ui.state_mut().list_epoch = 2;
     ui.state_mut().list_pending.insert(project);
-    ui.dispatch(Msg::ProjectLoaded(project, 2, Ok(refreshed)))
+    ui.dispatch(Msg::ProjectLoaded(project, 2, Ok((refreshed, None))))
         .unwrap();
     assert_eq!(selected_key(ui.state()), selected);
     assert_eq!(ui.state().scroll.selected, 0);
@@ -2001,7 +2026,7 @@ fn failed_list_refresh_retains_last_good_rows_and_selected_identity() {
     assert!(ui.state().list_pending.is_empty());
     assert!(ui.state().error.as_deref().unwrap().contains("503"));
     assert!(ui.state().blocked_until.as_secs() >= 120);
-    ui.dispatch(Msg::ProjectLoaded(project, 1, Ok(vec![])))
+    ui.dispatch(Msg::ProjectLoaded(project, 1, Ok((vec![], None))))
         .unwrap();
     assert_eq!(
         ui.state().items,
@@ -2369,8 +2394,12 @@ fn list_refresh_reordering_persists_the_new_index_of_the_selected_item() {
         .unwrap()
         .updated_at = "2099-01-01T00:00:00Z".into();
     let epoch = ui.state().list_epoch;
-    ui.dispatch(Msg::ProjectLoaded(selected.project, epoch, Ok(items)))
-        .unwrap();
+    ui.dispatch(Msg::ProjectLoaded(
+        selected.project,
+        epoch,
+        Ok((items, None)),
+    ))
+    .unwrap();
     assert_eq!(selected_key(ui.state()), selected);
     assert_eq!(ui.state().scroll.selected, 0);
     assert_eq!(

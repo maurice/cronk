@@ -7,6 +7,7 @@ pub struct Completion {
     pub project: u64,
     pub multiple: bool,
     pub workspace_only: bool,
+    pub current_iteration: Option<CurrentIteration>,
     pub resolved: HashMap<String, String>,
     pub swatches: HashMap<String, Label>,
     pub options: Vec<LookupOption>,
@@ -27,6 +28,7 @@ impl Completion {
             project,
             multiple,
             workspace_only: false,
+            current_iteration: None,
             resolved: HashMap::new(),
             swatches: HashMap::new(),
             options: vec![],
@@ -68,10 +70,26 @@ impl Completion {
         };
         let mut values = Vec::new();
         for token in tokens.into_iter().map(str::trim).filter(|s| !s.is_empty()) {
+            if self.kind == LookupKind::Iterations
+                && is_current_iteration_value(token)
+                && self.current_iteration.is_none()
+            {
+                return Err("Current iteration is unavailable for this project right now.".into());
+            }
             let value = self
                 .resolved
                 .get(token)
                 .cloned()
+                .or_else(|| {
+                    (self.kind == LookupKind::Iterations)
+                        .then(|| {
+                            self.current_iteration
+                                .as_ref()
+                                .filter(|_| is_current_iteration_value(token))
+                                .map(|iteration| iteration.id.to_string())
+                        })
+                        .flatten()
+                })
                 .or_else(|| {
                     (self.kind == LookupKind::Labels && self.swatches.contains_key(token))
                         .then(|| token.to_owned())
@@ -141,6 +159,12 @@ impl Completion {
         self.options.clear();
         self.query = None;
         self.error = None;
+    }
+
+    fn current_option(&self) -> Option<LookupOption> {
+        self.current_iteration
+            .as_ref()
+            .map(LookupOption::current_iteration)
     }
 }
 
@@ -281,11 +305,19 @@ impl Cronk {
             c.pending = false;
             match result {
                 Ok(options) => {
-                    c.options = options
+                    let query = c.query.clone().unwrap_or_default().to_lowercase();
+                    let mut options: Vec<_> = options
                         .into_iter()
                         .filter(|option| option.id > 0 && !option.value.trim().is_empty())
-                        .take(20)
                         .collect();
+                    if let Some(current) = c.current_option().filter(|option| {
+                        option.label.to_lowercase().contains(&query)
+                            || option.value.to_lowercase().contains(&query)
+                            || option.description.to_lowercase().contains(&query)
+                    }) {
+                        options.insert(0, current);
+                    }
+                    c.options = options.into_iter().take(20).collect();
                     for option in &c.options {
                         if !option.color.is_empty() {
                             c.swatches.insert(
@@ -445,5 +477,23 @@ mod tests {
         assert_eq!(c.api_value("Release, two").unwrap(), "12");
         c.resolved.insert("2026".into(), "50".into());
         assert_eq!(c.api_value("2026").unwrap(), "50");
+    }
+
+    #[test]
+    fn current_iteration_resolves_case_insensitively_and_reports_missing_current() {
+        let mut c = Completion::new(LookupKind::Iterations, 1, false);
+        c.current_iteration = Some(CurrentIteration {
+            id: 1200,
+            title: "Sprint 12".into(),
+            description: "Sprint 12 · Demo · ID 1200".into(),
+        });
+        assert_eq!(c.api_value("Current").unwrap(), "1200");
+        assert_eq!(c.api_value("current").unwrap(), "1200");
+        c.current_iteration = None;
+        assert!(
+            c.api_value("Current")
+                .unwrap_err()
+                .contains("Current iteration is unavailable")
+        );
     }
 }

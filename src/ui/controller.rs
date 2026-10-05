@@ -49,6 +49,23 @@ impl Component for Cronk {
         } else {
             None
         };
+        let items = if is_demo { demo::items() } else { vec![] };
+        let mut current_iterations = HashMap::new();
+        if is_demo {
+            for item in &items {
+                if let (Some(id), false) = (item.iteration_id, item.iteration.trim().is_empty()) {
+                    current_iterations
+                        .entry(item.key.project)
+                        .or_insert_with(|| {
+                            Some(CurrentIteration {
+                                id,
+                                title: item.iteration.clone(),
+                                description: format!("{} · Demo · ID {id}", item.iteration),
+                            })
+                        });
+                }
+            }
+        }
         let selected = config
             .selections
             .get(&config.active_tab.to_string())
@@ -72,7 +89,7 @@ impl Component for Cronk {
             config,
             demo: is_demo,
             scope,
-            items: if is_demo { demo::items() } else { vec![] },
+            items,
             user: if is_demo {
                 demo::user()
             } else {
@@ -94,6 +111,7 @@ impl Component for Cronk {
             traces: HashMap::new(),
             expanded: saved.map_or_else(HashSet::new, |tab| tab.expanded.into_iter().collect()),
             dialog: None,
+            current_iterations,
             status: if is_demo {
                 "Demo workspace · no requests or remote writes".into()
             } else {
@@ -179,11 +197,11 @@ impl Component for Cronk {
                     return Update::none();
                 };
                 return Update::with_command(ctx.link().command(move |link| {
-                    link.send(Msg::ProjectLoaded(
-                        id,
-                        epoch,
-                        api.list_project(&project).map_err(|e| e.to_string()),
-                    ));
+                    let result = api
+                        .list_project(&project)
+                        .map(|items| (items, api.current_iteration(project.id).ok().flatten()))
+                        .map_err(|e| e.to_string());
+                    link.send(Msg::ProjectLoaded(id, epoch, result));
                 }));
             }
             Msg::LoadUser => {
@@ -221,9 +239,10 @@ impl Component for Cronk {
                     .get(ctx.state.scroll.selected)
                     .map(|i| i.key.clone());
                 match result {
-                    Ok(items) => {
+                    Ok((items, current_iteration)) => {
                         ctx.state.items.retain(|i| i.key.project != id);
                         ctx.state.items.extend(items);
+                        ctx.state.current_iterations.insert(id, current_iteration);
                         if let Some(key) = selected
                             && let Some(index) =
                                 ctx.state.visible_items().iter().position(|i| i.key == key)
@@ -1342,6 +1361,9 @@ impl Cronk {
                 key.project,
                 matches!(kind, LookupKind::Users | LookupKind::Labels),
             );
+            if kind == LookupKind::Iterations {
+                c.current_iteration = ctx.state.current_iteration(key.project).cloned();
+            }
             if let Some(details) = &ctx.state.details {
                 let item = &details.item;
                 match kind {

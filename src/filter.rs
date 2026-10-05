@@ -7,7 +7,7 @@
 //! are exact; projects (path or alias), iterations, and milestones are substring
 //! matches. User fields accept `@me` and optional `@` prefixes on usernames.
 
-use crate::model::{ItemKind, Project, WorkItem};
+use crate::model::{CurrentIteration, ItemKind, Project, WorkItem, is_current_iteration_value};
 
 #[derive(Clone, Debug, Default)]
 pub struct Query {
@@ -85,7 +85,13 @@ impl Query {
 
     /// An empty query matches everything. `project` must describe the item's
     /// project; `current_user` is its GitLab username (empty if unknown).
-    pub fn matches(&self, item: &WorkItem, project: &Project, current_user: &str) -> bool {
+    pub fn matches(
+        &self,
+        item: &WorkItem,
+        project: &Project,
+        current_user: &str,
+        current_iteration: Option<&CurrentIteration>,
+    ) -> bool {
         self.terms.iter().all(|term| {
             let matches = match &term.predicate {
                 Predicate::Text(value) => {
@@ -109,7 +115,14 @@ impl Query {
                     .reviewers
                     .iter()
                     .any(|user| user_matches(&user.username, value, current_user)),
-                Predicate::Iteration(value) => contains(&item.iteration, value),
+                Predicate::Iteration(value) => {
+                    if is_current_iteration_value(value) {
+                        current_iteration
+                            .is_some_and(|current| iteration_matches_current(item, current))
+                    } else {
+                        contains(&item.iteration, value)
+                    }
+                }
                 Predicate::Milestone(value) => contains(&item.milestone, value),
                 Predicate::Pipeline(value) => item
                     .pipeline
@@ -136,6 +149,12 @@ fn user_matches(username: &str, value: &str, current_user: &str) -> bool {
     let expected = if value == "@me" { current_user } else { value };
     let expected = expected.strip_prefix('@').unwrap_or(expected);
     !expected.is_empty() && username.to_lowercase() == expected.to_lowercase()
+}
+
+fn iteration_matches_current(item: &WorkItem, current: &CurrentIteration) -> bool {
+    item.iteration_id == Some(current.id)
+        || (!current.title.trim().is_empty()
+            && item.iteration.to_lowercase() == current.title.to_lowercase())
 }
 
 /// Keep the first *unquoted* colon's byte offset, so a quoted free-text phrase
@@ -181,7 +200,7 @@ fn tokenize(source: &str) -> Result<Vec<(String, Option<usize>)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ItemKey, Label, Pipeline, User};
+    use crate::model::{CurrentIteration, ItemKey, Label, Pipeline, User};
 
     fn fixture() -> (WorkItem, Project) {
         let project = Project {
@@ -227,11 +246,19 @@ mod tests {
         (item, project)
     }
 
+    fn current_iteration() -> CurrentIteration {
+        CurrentIteration {
+            id: 456,
+            title: "Sprint 12".into(),
+            description: "Sprint 12 · 2026-10-01 – 2026-10-14 · group 6 · ID 456".into(),
+        }
+    }
+
     fn matches(source: &str) -> bool {
         let (item, project) = fixture();
         Query::parse(source)
             .unwrap()
-            .matches(&item, &project, "alice")
+            .matches(&item, &project, "alice", Some(&current_iteration()))
     }
 
     #[test]
@@ -239,7 +266,7 @@ mod tests {
         for source in ["", " ", "\t\n\r\u{2003}"] {
             assert!(matches(source));
         }
-        assert!(Query::default().matches(&WorkItem::default(), &Project::default(), ""));
+        assert!(Query::default().matches(&WorkItem::default(), &Project::default(), "", None));
     }
 
     #[test]
@@ -368,14 +395,21 @@ mod tests {
             ("-reviewer:@me", "bob", "dave"),
         ] {
             let query = Query::parse(source).unwrap();
-            assert!(query.matches(&item, &project, yes), "{source}");
-            assert!(!query.matches(&item, &project, no), "{source}");
+            assert!(
+                query.matches(&item, &project, yes, Some(&current_iteration())),
+                "{source}"
+            );
+            assert!(
+                !query.matches(&item, &project, no, Some(&current_iteration())),
+                "{source}"
+            );
         }
-        assert!(
-            Query::parse("author:@me")
-                .unwrap()
-                .matches(&item, &project, "@Alice")
-        );
+        assert!(Query::parse("author:@me").unwrap().matches(
+            &item,
+            &project,
+            "@Alice",
+            Some(&current_iteration())
+        ));
     }
 
     #[test]
@@ -388,12 +422,14 @@ mod tests {
                 assert!(!Query::parse("author:@me").unwrap().matches(
                     &item,
                     &project,
-                    current_user
+                    current_user,
+                    Some(&current_iteration())
                 ));
                 assert!(Query::parse("-author:@me").unwrap().matches(
                     &item,
                     &project,
-                    current_user
+                    current_user,
+                    Some(&current_iteration())
                 ));
             }
         }
@@ -416,22 +452,47 @@ mod tests {
     }
 
     #[test]
+    fn iteration_current_resolves_symbolically_and_case_insensitively() {
+        assert!(matches("iteration:current"));
+        assert!(matches("iteration:CURRENT"));
+        assert!(matches("-iteration:future"));
+        assert!(!matches("-iteration:current"));
+
+        let (mut item, project) = fixture();
+        item.iteration = "Sprint 12".into();
+        item.iteration_id = None;
+        assert!(Query::parse("iteration:current").unwrap().matches(
+            &item,
+            &project,
+            "alice",
+            Some(&current_iteration())
+        ));
+        assert!(
+            !Query::parse("iteration:current")
+                .unwrap()
+                .matches(&item, &project, "alice", None)
+        );
+    }
+
+    #[test]
     fn pipeline_matches_exact_status_and_missing_pipeline_only_matches_negation() {
         assert!(matches("pipeline:FAILED"));
         assert!(!matches("pipeline:fail"));
         assert!(!matches("pipeline:success"));
         let (mut item, project) = fixture();
         item.pipeline = None;
-        assert!(
-            !Query::parse("pipeline:failed")
-                .unwrap()
-                .matches(&item, &project, "alice")
-        );
-        assert!(
-            Query::parse("-pipeline:failed")
-                .unwrap()
-                .matches(&item, &project, "alice")
-        );
+        assert!(!Query::parse("pipeline:failed").unwrap().matches(
+            &item,
+            &project,
+            "alice",
+            Some(&current_iteration())
+        ));
+        assert!(Query::parse("-pipeline:failed").unwrap().matches(
+            &item,
+            &project,
+            "alice",
+            Some(&current_iteration())
+        ));
     }
 
     #[test]
@@ -446,9 +507,12 @@ mod tests {
                 ("-draft:false", draft),
             ] {
                 assert_eq!(
-                    Query::parse(source)
-                        .unwrap()
-                        .matches(&item, &project, "alice"),
+                    Query::parse(source).unwrap().matches(
+                        &item,
+                        &project,
+                        "alice",
+                        Some(&current_iteration())
+                    ),
                     expected,
                     "{source}"
                 );
@@ -474,11 +538,12 @@ mod tests {
         let (mut item, project) = fixture();
         item.key.kind = ItemKind::Issue;
         for source in ["kind:issue", "kind:issues", "-kind:mr"] {
-            assert!(
-                Query::parse(source)
-                    .unwrap()
-                    .matches(&item, &project, "alice")
-            );
+            assert!(Query::parse(source).unwrap().matches(
+                &item,
+                &project,
+                "alice",
+                Some(&current_iteration())
+            ));
         }
     }
 
@@ -563,13 +628,14 @@ mod tests {
             ..Label::default()
         }];
         let query = Query::parse(r#"label:"say \"hello\" at C:\\work""#).unwrap();
-        assert!(query.matches(&item, &project, "alice"));
+        assert!(query.matches(&item, &project, "alice", Some(&current_iteration())));
         item.description = r"Keep C:\work\new literal".into();
-        assert!(
-            Query::parse(r#""C:\work\new""#)
-                .unwrap()
-                .matches(&item, &project, "alice")
-        );
+        assert!(Query::parse(r#""C:\work\new""#).unwrap().matches(
+            &item,
+            &project,
+            "alice",
+            Some(&current_iteration())
+        ));
     }
 
     #[test]
@@ -577,11 +643,12 @@ mod tests {
         let (mut item, project) = fixture();
         item.title = "-label:bug unknown:value -dash".into();
         for source in [r#""-label:bug""#, r#""unknown:value""#, "-dash"] {
-            assert!(
-                Query::parse(source)
-                    .unwrap()
-                    .matches(&item, &project, "alice")
-            );
+            assert!(Query::parse(source).unwrap().matches(
+                &item,
+                &project,
+                "alice",
+                Some(&current_iteration())
+            ));
         }
     }
 
@@ -593,11 +660,12 @@ mod tests {
             name: "Équipe::核心".into(),
             ..Label::default()
         }];
-        assert!(
-            Query::parse("label:équipe::核心")
-                .unwrap()
-                .matches(&item, &project, "alice")
-        );
+        assert!(Query::parse("label:équipe::核心").unwrap().matches(
+            &item,
+            &project,
+            "alice",
+            Some(&current_iteration())
+        ));
     }
 
     #[test]
@@ -614,14 +682,17 @@ mod tests {
             "project",
         ] {
             assert!(
-                !Query::parse(&format!("{field}:anything"))
-                    .unwrap()
-                    .matches(&item, &project, "")
+                !Query::parse(&format!("{field}:anything")).unwrap().matches(
+                    &item,
+                    &project,
+                    "",
+                    Some(&current_iteration())
+                )
             );
             assert!(
                 Query::parse(&format!("-{field}:anything"))
                     .unwrap()
-                    .matches(&item, &project, "")
+                    .matches(&item, &project, "", Some(&current_iteration()))
             );
         }
     }

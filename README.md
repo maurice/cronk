@@ -89,7 +89,7 @@ Project rows open a project-filtered Issues list; the visibility checkbox works 
 
 Assignees, reviewers, milestones, and iterations suggest GitLab matches as you type. Use **↑ / ↓** to choose, **Enter** to insert a suggestion, then **Enter** again to save the form. Clicking a suggestion only inserts it; it never submits. **Tab / Shift+Tab** still switch fields and **Esc** cancels the editor. Press an arrow key to open suggestions without changing the text.
 
-For assignees and reviewers, separate people with commas: `@alex, Sam`. Each lookup uses the trimmed token at the caret after the previous comma, so spaces around entries are fine. Accepting a suggestion replaces only that token, leaving the other people untouched. Suggestions show display names and usernames; accepted people use unambiguous `@username` tokens. Milestones and iterations are single-valued and may contain commas in their names. Existing assignments retain their IDs behind their readable values; an empty field clears the assignment. Unresolved names must be chosen from suggestions before saving. Numeric IDs remain available as a fallback.
+For assignees and reviewers, separate people with commas: `@alex, Sam`. Each lookup uses the trimmed token at the caret after the previous comma, so spaces around entries are fine. Accepting a suggestion replaces only that token, leaving the other people untouched. Suggestions show display names and usernames; accepted people use unambiguous `@username` tokens. Milestones and iterations are single-valued and may contain commas in their names. Iteration lookups also offer a symbolic `Current` choice; typing `current` in any casing matches it, and saving resolves it to the project's current iteration ID. Existing assignments retain their IDs behind their readable values; an empty field clears the assignment. Unresolved names must be chosen from suggestions before saving. Numeric IDs remain available as a fallback.
 
 Searches are debounced for **300 ms**, with at most one lookup request in flight; obsolete responses cannot replace newer results. Each request fetches at most the first **20 matches**, and up to 32 queries are cached per field for the lifetime of the dialog. Refine your search to find more specific matches. Project members are searched by name/username; milestone and iteration lookups include ancestor groups. Untitled, automatically scheduled iterations show their date range and can be searched by cadence title where supported by GitLab. Lookup errors and rate limits retain your draft.
 
@@ -109,12 +109,12 @@ Filters run locally across the loaded visible projects. Space-separated terms ar
 
 ```text
 project:checkout label:"team::payments" label:"type::bug" state:opened
-iteration:"Sprint 24" assignee:@me -label:blocked
+iteration:Current assignee:@me -label:blocked
 reviewer:@me pipeline:success draft:false
 "lease handoff" -state:closed
 ```
 
-Supported attributes: `project`, `label`, `state` (alias `status`), `assignee`, `author`, `reviewer`, `iteration`, `milestone`, `pipeline`, `draft`, and `kind`. All matching is case-insensitive. Labels, states, usernames and pipeline statuses are exact matches; project aliases/paths, iteration/milestone names, and free text are substring matches. Use GitLab's `opened`, `closed`, or `merged` states. `@me` resolves to the authenticated username. Unknown syntax is rejected, not silently ignored.
+Supported attributes: `project`, `label`, `state` (alias `status`), `assignee`, `author`, `reviewer`, `iteration`, `milestone`, `pipeline`, `draft`, and `kind`. All matching is case-insensitive. Labels, states, usernames and pipeline statuses are exact matches; project aliases/paths, iteration/milestone names, and free text are substring matches. `iteration:current` is a special symbolic match for each project's current iteration, which makes saved tabs follow the active sprint automatically. Use GitLab's `opened`, `closed`, or `merged` states. `@me` resolves to the authenticated username. Unknown syntax is rejected, not silently ignored.
 
 Save a filter with `s` or **Save filter as a new tab**. Rename/remove it through the command palette. Changing a saved tab's active filter persists that working filter; saving again creates another named tab. The four built-in tabs cannot be renamed/deleted.
 

@@ -49,6 +49,7 @@ pub struct State {
     pub traces: HashMap<u64, Trace>,
     pub expanded: HashSet<u64>,
     pub dialog: Option<Dialog>,
+    pub current_iterations: HashMap<u64, Option<CurrentIteration>>,
     pub status: String,
     pub error: Option<String>,
     pub list_pending: HashSet<u64>,
@@ -219,7 +220,11 @@ pub enum Msg {
     LoadTraces,
     LoadUser,
     UserLoaded(Result<User, String>),
-    ProjectLoaded(u64, u64, Result<Vec<WorkItem>, String>),
+    ProjectLoaded(
+        u64,
+        u64,
+        Result<(Vec<WorkItem>, Option<CurrentIteration>), String>,
+    ),
     DetailsLoaded(ItemKey, u64, Result<Box<Details>, String>),
     TraceLoaded(ItemKey, u64, u64, bool, Result<TraceChunk, String>),
     ProjectResolved(Result<Project, String>),
@@ -310,6 +315,11 @@ impl State {
     pub fn project(&self, id: u64) -> Option<&Project> {
         self.config.projects.iter().find(|p| p.id == id)
     }
+    pub fn current_iteration(&self, project: u64) -> Option<&CurrentIteration> {
+        self.current_iterations
+            .get(&project)
+            .and_then(Option::as_ref)
+    }
     pub fn visible_items(&self) -> Vec<&WorkItem> {
         let query = Query::parse(self.query_text()).unwrap_or_default();
         let mut items: Vec<_> = self
@@ -329,7 +339,12 @@ impl State {
                 {
                     return false;
                 }
-                query.matches(item, project, &self.user.username)
+                query.matches(
+                    item,
+                    project,
+                    &self.user.username,
+                    self.current_iteration(item.key.project),
+                )
             })
             .collect();
         if self.config.active_tab == 0 {

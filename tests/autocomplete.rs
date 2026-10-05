@@ -200,6 +200,17 @@ fn milestone_iteration_and_reviewers_keep_readable_current_values_and_ids() {
 }
 
 #[test]
+fn iteration_lookup_offers_symbolic_current_and_resolves_it_case_insensitively() {
+    let mut ui = mount(ItemKind::Issue, 5);
+    replace(&mut ui, "current");
+    wait(&mut ui);
+    assert_eq!(completion(&ui).options[0].value, "Current");
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(value(&ui), "Current");
+    assert_eq!(ids(&ui), "1200");
+}
+
+#[test]
 fn suggestions_debounce_cache_and_discard_old_queries_and_closed_dialogs() {
     let mut ui = mount(ItemKind::Issue, 3);
     replace(&mut ui, "S");

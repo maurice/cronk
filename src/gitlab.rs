@@ -264,15 +264,35 @@ impl GitLab {
         auth.set_sensitive(true);
         let mut headers = HeaderMap::new();
         headers.insert("PRIVATE-TOKEN", auth);
-        // TLS roots come from reqwest's rustls-tls-native-roots Cargo feature.
-        let client = Client::builder()
+        // Keep native system roots and supplement them with an optional corporate CA bundle.
+        // Read once per client construction; clones share the resulting TLS configuration.
+        let mut builder = Client::builder();
+        if let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS").filter(|path| !path.is_empty())
+        {
+            let pem = std::fs::read(path).map_err(|_| {
+                anyhow!("Could not read the PEM CA bundle from NODE_EXTRA_CA_CERTS")
+            })?;
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                .map_err(|_| anyhow!("Invalid PEM CA bundle in NODE_EXTRA_CA_CERTS"))?;
+            if certificates.is_empty() {
+                bail!("NODE_EXTRA_CA_CERTS must contain at least one PEM certificate");
+            }
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        let client = builder
             .default_headers(headers)
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .user_agent("cronk-gitlab-tui")
             .build()
-            .map_err(|_| anyhow!("Could not initialize GitLab HTTP client/native TLS roots"))?;
+            .map_err(|_| {
+                anyhow!(
+                    "Could not initialize GitLab HTTP client/TLS roots; check native roots and NODE_EXTRA_CA_CERTS"
+                )
+            })?;
         Ok(Self {
             client,
             api,

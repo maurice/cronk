@@ -40,7 +40,14 @@ Create a personal access token with `read_api` for browsing, or `api` for editin
 
 Open **Ctrl+P → Add existing GitLab project**. Search by project name, choose a suggestion, and optionally set a short alias. A numeric ID or full `group/subgroup/project` path also works. This registers an existing project locally; it does not create a project on GitLab. Use separate `--config path/to/workspace.toml` files for different hosts. `--host` / `GITLAB_URL` cannot silently repoint a populated workspace to another host.
 
-Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTTPS and native system certificate roots are used; install your company CA into the system trust store. There is deliberately no insecure-TLS switch. Redirects are rejected rather than forwarding credentials. HTTP is permitted only for loopback development/test servers.
+Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTTPS and native system certificate roots are used. Install your company CA into the system trust store, or set `NODE_EXTRA_CA_CERTS` to a PEM file containing one or more additional trusted CA certificates:
+
+```sh
+export NODE_EXTRA_CA_CERTS=/path/to/company-ca-bundle.pem
+cargo run --locked -- --check
+```
+
+The bundle supplements (does not replace) system trust roots and is read when the GitLab client is created; restart Cronk after changing it. An unset or empty variable uses system roots only. An unreadable, malformed, or certificate-free bundle is an initialization error rather than silently ignoring the configured trust. Certificate and hostname verification remain enabled. There is deliberately no insecure-TLS switch. Redirects are rejected rather than forwarding credentials. HTTP is permitted only for loopback development/test servers.
 
 ## Navigation
 

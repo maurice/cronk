@@ -30,6 +30,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.146
+
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
 
@@ -39,8 +44,11 @@ jobs:
       - name: Lint with Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Run tests
-        run: cargo test --locked --all-targets
+      - name: Run tests with nextest
+        run: cargo nextest run --locked --all-targets --profile ci
+
+      - name: Run doctests
+        run: cargo test --locked --doc
 
       - name: Build release binary
         run: cargo build --locked --release

@@ -36,15 +36,15 @@ impl Colors {
         let values = match config.theme.as_str() {
             "dracula" => [
                 0x282a36, 0x21222c, 0x44475a, 0xf8f8f2, 0xa5a8c0, 0xbd93f9, 0x50fa7b, 0xf1fa8c,
-                0xff5555, 0x82aaff, 0xff79c6,
+                0xff5555, 0x1f78d1, 0xff79c6,
             ],
             "light" => [
                 0xf7f8fc, 0xeceff6, 0xdce5fa, 0x24283b, 0x626b83, 0x5746bd, 0x187348, 0x946200,
-                0xc2354b, 0x315bc9, 0x9146ae,
+                0xc2354b, 0x1f78d1, 0x9146ae,
             ],
             _ => [
                 0x101521, 0x192131, 0x293654, 0xe5eaf5, 0x96a3bc, 0x9b9fff, 0x63dba5, 0xf0c674,
-                0xff758f, 0x7799ff, 0xc69cf4,
+                0xff758f, 0x1f78d1, 0xc69cf4,
             ],
         };
         let c = &config.colors;
@@ -2317,7 +2317,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         }
     } else if matches!(dialog.kind, DialogKind::Themes) {
         for (index, (name, hint)) in [
-            ("Midnight", "Cool ink · violet · royal blue"),
+            ("Midnight", "Cool ink · violet · blue"),
             ("Dracula", "Charcoal · orchid · electric green"),
             ("Light", "Paper · indigo · forest green"),
         ]
@@ -2707,17 +2707,16 @@ mod tests {
                 theme: theme.into(),
                 ..Config::default()
             });
-            let royal_blue = Color::hex_u24(match theme {
-                "dracula" => 0x82aaff,
-                "light" => 0x315bc9,
-                _ => 0x7799ff,
-            });
-            assert_eq!(colors.blue, royal_blue);
-            assert_eq!(colors.status("running"), ('◐', royal_blue));
-            assert_eq!(colors.theme().document.link.fg, Some(royal_blue.into()));
+            let area_label_blue = Color::hex_u24(0x1f78d1);
+            assert_eq!(colors.blue, area_label_blue);
+            assert_eq!(colors.status("running"), ('◐', area_label_blue));
+            assert_eq!(
+                colors.theme().document.link.fg,
+                Some(area_label_blue.into())
+            );
             assert_eq!(
                 colors.theme().document.code_inline.fg,
-                Some(royal_blue.into())
+                Some(area_label_blue.into())
             );
             let neutral = Color::hex_u24(if theme == "light" { 0x626262 } else { 0xc7c7c7 });
             for status in ["pending", "created", "waiting_for_resource", "preparing"] {

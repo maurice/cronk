@@ -107,11 +107,11 @@ fn assert_hover(ui: &mut Ui, key: &str) {
 }
 
 #[test]
-fn header_brand_is_inverted_and_running_status_is_royal_blue_in_every_theme() {
+fn header_brand_is_inverted_and_running_status_matches_area_label_blue_in_every_theme() {
     for (theme, surface, accent, blue) in [
-        ("midnight", 0x192131, 0x9b9fff, 0x7799ff),
-        ("dracula", 0x21222c, 0xbd93f9, 0x82aaff),
-        ("light", 0xeceff6, 0x5746bd, 0x315bc9),
+        ("midnight", 0x192131, 0x9b9fff, 0x1f78d1),
+        ("dracula", 0x21222c, 0xbd93f9, 0x1f78d1),
+        ("light", 0xeceff6, 0x5746bd, 0x1f78d1),
     ] {
         let ui = mount(config(theme, 0));
         let frame = ui.capture_frame();

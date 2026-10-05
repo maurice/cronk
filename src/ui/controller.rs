@@ -1316,7 +1316,7 @@ impl Cronk {
                     self.dialog_error(ctx, "Choose Dashboard, Issues, Merge Requests, or a saved list first");
                 } else {
                     let query = ctx.state.query_text().to_owned();
-                    self.show_dialog(ctx, DialogKind::Filter, "Filter view", "AND terms: label:\"team::core\" state:opened assignee:@me · -label:blocked", vec![FormField::new("Query", &query, false)]);
+                    self.show_dialog(ctx, DialogKind::Filter, "Filter view", "Space-separated terms are ANDed, including repeated fields: label:foo label:bar (both labels). No OR or grouping with brackets/parentheses. Quote values with spaces: label:\"needs review\" · prefix - to exclude: -label:blocked.", vec![FormField::new("Query", &query, false)]);
                 }
             }
             Action::SaveView => {

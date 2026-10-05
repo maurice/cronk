@@ -105,7 +105,7 @@ Logs are **near-real-time REST polling**, not a push stream. Each job keeps a by
 
 ## Filters and saved tabs
 
-Filters run locally across the loaded visible projects. Space-separated terms are ANDed; repeat `label:` to require multiple labels, negate an attribute with `-`, and quote values containing spaces:
+Filters run locally across the loaded visible projects. Space-separated terms are ANDed; repeating `label:` requires every listed label (for example, `label:foo label:bar` means both labels). There is no OR or grouping syntax; brackets and parentheses are not operators. Negate an attribute with `-`, and quote values containing spaces:
 
 ```text
 project:checkout label:"team::payments" label:"type::bug" state:opened

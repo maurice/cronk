@@ -2846,3 +2846,38 @@ fn small_empty_filter_viewport_snapshot() {
     assert_eq!(ui.state().scope, Scope::List);
     assert!(ui.state().config.route.is_none());
 }
+
+#[test]
+fn selecting_the_current_tab_returns_to_its_list_and_other_tabs_restore_drill_down() {
+    let mut cfg = config();
+    cfg.active_tab = 3;
+    let mut ui = mount(cfg, None);
+    key(&mut ui, KeyCode::Enter);
+    let route = ui
+        .state()
+        .config
+        .route
+        .clone()
+        .expect("opened a merge request");
+    assert_eq!(ui.state().scope, Scope::Details);
+
+    // Leaving and returning restores the drilled-down state.
+    ui.dispatch(Msg::Tab(2)).unwrap();
+    assert!(ui.state().config.route.is_none());
+    ui.dispatch(Msg::Tab(3)).unwrap();
+    assert_eq!(ui.state().config.route.as_ref(), Some(&route));
+    assert_eq!(ui.state().scope, Scope::Details);
+
+    // Re-selecting the current tab (click or shortcut) pops back to the list.
+    ui.dispatch(Msg::Tab(3)).unwrap();
+    assert!(ui.state().config.route.is_none());
+    assert_eq!(ui.state().scope, Scope::List);
+    assert!(ui.state().details.is_none());
+
+    // From the list it is a no-op, and other tabs now restore the list too.
+    ui.dispatch(Msg::Tab(3)).unwrap();
+    assert_eq!(ui.state().scope, Scope::List);
+    ui.dispatch(Msg::Tab(2)).unwrap();
+    ui.dispatch(Msg::Tab(3)).unwrap();
+    assert!(ui.state().config.route.is_none());
+}

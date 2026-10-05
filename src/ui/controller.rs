@@ -498,13 +498,18 @@ impl Component for Cronk {
                 }
             }
             Msg::Tab(index) => {
-                if index >= ctx.state.tab_names().len()
-                    || index == ctx.state.config.active_tab
-                    || ctx.state.dialog.is_some()
-                {
+                if index >= ctx.state.tab_names().len() || ctx.state.dialog.is_some() {
                     return Update::none();
                 }
-                self.switch_tab(ctx, index);
+                if index == ctx.state.config.active_tab {
+                    // Re-selecting the current tab pops all the way back to its list.
+                    if ctx.state.config.route.is_none() {
+                        return Update::none();
+                    }
+                    self.reset_detail(ctx);
+                } else {
+                    self.switch_tab(ctx, index);
+                }
                 self.persist(ctx);
             }
             Msg::Move(delta) => {

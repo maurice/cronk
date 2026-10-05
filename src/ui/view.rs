@@ -540,14 +540,13 @@ fn work_row(
     let mut attention = Vec::new();
     if state.config.active_tab == 0 {
         let roles = item.dashboard_roles(state.user.id);
-        if !roles.is_empty() {
-            attention.push(Span::new("You: ").fg(colors.muted));
-            attention.push(Span::new(roles.join(" + ")).fg(colors.accent));
-            attention.push(Span::new("  ·  ").fg(colors.muted));
-        }
-        attention.push(Span::new("Why: ").fg(colors.muted));
+        attention.push(Span::new("    Why: ").fg(colors.muted));
         attention
             .push(Span::new(item.attention_reasons(state.user.id).join(" · ")).fg(colors.muted));
+        if !roles.is_empty() {
+            attention.push(Span::new("  ·  You: ").fg(colors.muted));
+            attention.push(Span::new(roles.join(" + ")).fg(colors.accent));
+        }
     }
     let attention_line = if attention.is_empty() {
         blank()

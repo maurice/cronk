@@ -29,6 +29,8 @@ impl ItemKind {
 pub struct Project {
     pub id: u64,
     pub path: String,
+    /// Local display override. Empty falls back to the GitLab path.
+    /// New projects may start with GitLab's short name when the add dialog leaves this blank.
     pub alias: String,
     pub visible: bool,
 }

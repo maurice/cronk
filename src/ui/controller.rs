@@ -24,6 +24,15 @@ impl Component for Cronk {
             config.route = None;
             config.section = None;
         }
+        if config
+            .project_route
+            .is_some_and(|id| !config.projects.iter().any(|p| p.id == id))
+        {
+            config.project_route = None;
+            if config.active_tab == 1 {
+                config.section = None;
+            }
+        }
         prune_tab_routes(&mut config);
         let saved = config
             .tab_states
@@ -31,11 +40,14 @@ impl Component for Cronk {
             .cloned();
         if let Some(tab) = &saved {
             config.route = tab.route.clone();
+            config.project_route = tab.project_route;
             config.section = tab.section;
             config.field = tab.field;
         }
         let is_demo = self.api.is_none();
-        let scope = if config.route.is_some() {
+        let open_details =
+            config.route.is_some() || (config.active_tab == 1 && config.project_route.is_some());
+        let scope = if open_details {
             if config.section.is_some() {
                 Scope::Section
             } else {
@@ -71,20 +83,21 @@ impl Component for Cronk {
             .get(&config.active_tab.to_string())
             .copied()
             .unwrap_or(0);
+        let section_last = if config.active_tab == 1 && config.project_route.is_some() {
+            0
+        } else if config
+            .route
+            .as_ref()
+            .is_some_and(|k| k.kind == ItemKind::MergeRequest)
+        {
+            5
+        } else {
+            2
+        };
         let section_cursor = saved
             .as_ref()
             .map_or(config.section.unwrap_or(0), |tab| tab.section_cursor)
-            .min(
-                if config
-                    .route
-                    .as_ref()
-                    .is_some_and(|k| k.kind == ItemKind::MergeRequest)
-                {
-                    5
-                } else {
-                    2
-                },
-            );
+            .min(section_last);
         State {
             config,
             feedback: Default::default(),
@@ -461,14 +474,16 @@ impl Component for Cronk {
                         if ctx.state.config.projects.iter().any(|p| p.id == project.id) {
                             self.dialog_error(ctx, "This project is already in the workspace");
                         } else {
-                            project.alias = ctx
+                            let custom_alias = ctx
                                 .state
                                 .dialog
                                 .as_ref()
                                 .and_then(|d| d.fields.get(1))
                                 .map_or("", FormField::value)
-                                .trim()
-                                .to_owned();
+                                .trim();
+                            if !custom_alias.is_empty() {
+                                project.alias = custom_alias.to_owned();
+                            }
                             ctx.state.config.projects.push(project);
                             self.close_dialog(ctx);
                             self.persist(ctx);
@@ -546,13 +561,7 @@ impl Component for Cronk {
                                 .get(ctx.state.scroll.selected)
                                 .cloned()
                             {
-                                self.switch_tab(ctx, 2);
-                                self.reset_detail(ctx);
-                                ctx.state.config.filters.insert(
-                                    "2".into(),
-                                    format!("project:\"{}\"", project.path.replace('"', "")),
-                                );
-                                ctx.state.scroll = BoundaryScroll::default();
+                                self.open_project(ctx, project.id);
                             }
                         } else {
                             let key = ctx
@@ -572,6 +581,12 @@ impl Component for Cronk {
                         ctx.state.config.field = 0;
                     }
                     Scope::Section => match ctx.state.section_name() {
+                        "Fields" if ctx.state.project_details() => {
+                            if ctx.state.config.field == 1 {
+                                return self.action(ctx, Action::RemoveProject);
+                            }
+                            self.edit_project_alias(ctx);
+                        }
                         "Fields" => self.edit_field(ctx),
                         "Description" => {
                             if let Some(d) = &ctx.state.details {
@@ -625,6 +640,7 @@ impl Component for Cronk {
                         Scope::Details => {
                             ctx.state.scope = Scope::List;
                             ctx.state.config.route = None;
+                            ctx.state.config.project_route = None;
                             ctx.state.config.section = None;
                             ctx.state.details = None;
                             ctx.state.detail_epoch += 1;
@@ -653,7 +669,9 @@ impl Component for Cronk {
             }
             Msg::DetailSection(index) => {
                 self.close_log_mode(ctx);
-                if index < ctx.state.sections().len() && ctx.state.config.route.is_some() {
+                if index < ctx.state.sections().len()
+                    && (ctx.state.config.route.is_some() || ctx.state.project_details())
+                {
                     ctx.state.section_cursor = index;
                     ctx.state.scope = Scope::Details;
                     ctx.state.config.section = None;
@@ -685,7 +703,11 @@ impl Component for Cronk {
                 ctx.state.reveal_content = false;
                 ctx.state.config.field = index;
                 self.persist(ctx);
-                self.edit_field(ctx);
+                if ctx.state.project_details() {
+                    self.edit_project_alias(ctx);
+                } else {
+                    self.edit_field(ctx);
+                }
             }
             Msg::DetailViewport(event, target, origin, route, epoch) => {
                 // Ignore callbacks from a previous route or a superseded keyboard target.
@@ -768,22 +790,27 @@ impl Component for Cronk {
                 self.persist(ctx);
             }
             Msg::ToggleProject => {
-                if ctx.state.config.active_tab == 1
-                    && let Some(project) =
-                        ctx.state.config.projects.get_mut(ctx.state.scroll.selected)
-                {
-                    project.visible = !project.visible;
-                    ctx.state.status = format!(
-                        "{} {}",
-                        project.name(),
-                        if project.visible {
-                            "included"
-                        } else {
-                            "hidden"
-                        }
-                    );
-                    self.persist(ctx);
-                    ctx.link().send(Msg::Refresh);
+                if ctx.state.config.active_tab == 1 {
+                    let index = ctx
+                        .state
+                        .config
+                        .project_route
+                        .and_then(|id| ctx.state.config.projects.iter().position(|p| p.id == id))
+                        .unwrap_or(ctx.state.scroll.selected);
+                    if let Some(project) = ctx.state.config.projects.get_mut(index) {
+                        project.visible = !project.visible;
+                        ctx.state.status = format!(
+                            "{} {}",
+                            project.name(),
+                            if project.visible {
+                                "included"
+                            } else {
+                                "hidden"
+                            }
+                        );
+                        self.persist(ctx);
+                        ctx.link().send(Msg::Refresh);
+                    }
                 }
             }
             Msg::ToggleJob(id) => {
@@ -1406,9 +1433,12 @@ impl Cronk {
             });
         let cache = ctx.state.tab_cache.remove(&key).unwrap_or_default();
         ctx.state.config.route = tab.route;
+        ctx.state.config.project_route = tab.project_route;
         ctx.state.config.section = tab.section;
         ctx.state.config.field = tab.field;
-        ctx.state.scope = if ctx.state.config.route.is_none() {
+        let open_details = ctx.state.config.route.is_some()
+            || (ctx.state.config.active_tab == 1 && ctx.state.config.project_route.is_some());
+        ctx.state.scope = if !open_details {
             Scope::List
         } else if ctx.state.config.section.is_some() {
             Scope::Section
@@ -1450,6 +1480,28 @@ impl Cronk {
         }
     }
 
+    fn open_project(&self, ctx: &mut Context<Self>, id: u64) {
+        ctx.state.detail_viewport = None;
+        ctx.state.detail_offset_request = None;
+        ctx.state.reveal_content = true;
+        ctx.state.content_max_offset = usize::MAX;
+        ctx.state.config.project_route = Some(id);
+        ctx.state.config.route = None;
+        ctx.state.config.section = None;
+        ctx.state.scope = Scope::Details;
+        ctx.state.section_cursor = 0;
+        ctx.state.config.field = 0;
+        ctx.state.content_offset = 0;
+        ctx.state.detail_epoch += 1;
+        ctx.state.detail_pending = None;
+        ctx.state.details = None;
+        ctx.state.traces.clear();
+        ctx.state.expanded.clear();
+        ctx.state.collapsed.clear();
+        ctx.state.log_views.clear();
+        self.close_log_mode(ctx);
+    }
+
     fn close_log_mode(&self, ctx: &mut Context<Self>) {
         ctx.state.log_focus = None;
         ctx.state.log_zoom = false;
@@ -1463,6 +1515,7 @@ impl Cronk {
 
     fn reset_detail(&self, ctx: &mut Context<Self>) {
         ctx.state.config.route = None;
+        ctx.state.config.project_route = None;
         ctx.state.config.section = None;
         ctx.state.config.field = 0;
         ctx.state.scope = Scope::List;
@@ -1485,6 +1538,7 @@ impl Cronk {
         ctx.state.reveal_content = true;
         ctx.state.content_max_offset = usize::MAX;
         ctx.state.config.route = Some(key.clone());
+        ctx.state.config.project_route = None;
         ctx.state.config.section = None;
         ctx.state.scope = Scope::Details;
         ctx.state.section_cursor = 0;
@@ -1528,6 +1582,7 @@ impl Cronk {
             }
             Scope::Section => {
                 let len = match ctx.state.section_name() {
+                    "Fields" if ctx.state.project_details() => 2,
                     "Fields" => ctx.state.fields().len(),
                     "Jobs" => ctx.state.details.as_ref().map_or(0, |d| d.jobs.len()),
                     "Discussions" => ctx
@@ -1674,6 +1729,23 @@ impl Cronk {
         }
     }
 
+    fn edit_project_alias(&self, ctx: &mut Context<Self>) {
+        let Some(id) = ctx.state.config.project_route else {
+            return;
+        };
+        let Some(project) = ctx.state.project(id) else {
+            return;
+        };
+        let alias = project.alias.clone();
+        self.show_dialog(
+            ctx,
+            DialogKind::AliasProject(id),
+            "Project alias",
+            "Local display name · leave empty to show the GitLab path · Enter saves · Esc cancels",
+            vec![FormField::new("Alias", &alias, false)],
+        );
+    }
+
     fn edit_field(&self, ctx: &mut Context<Self>) {
         let Some(key) = ctx.state.config.route.clone() else {
             return;
@@ -1785,14 +1857,26 @@ impl Cronk {
                     }
                 } else { self.dialog_error(ctx, "The four built-in tabs cannot be renamed or removed"); }
             }
-            Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Search by name · Enter chooses a suggestion, then adds · Full paths and IDs also work", vec![FormField::lookup("Project", "", Completion::new(LookupKind::Projects, 0, false)), FormField::new("Short alias (optional)", "", false)]),
-            Action::AliasProject | Action::RemoveProject => {
-                if ctx.state.config.active_tab != 1 { self.dialog_error(ctx, "Select a project in the Projects tab first"); }
-                else if let Some(project) = ctx.state.config.projects.get(ctx.state.scroll.selected) {
+            Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Search by name · Enter chooses a suggestion, then adds · Full paths and IDs also work · Blank alias keeps GitLab's short name", vec![FormField::lookup("Project", "", Completion::new(LookupKind::Projects, 0, false)), FormField::new("Short alias (optional)", "", false)]),
+            Action::RemoveProject => {
+                let project = ctx.state.config.project_route.and_then(|id| ctx.state.project(id).cloned())
+                    .or_else(|| {
+                        (ctx.state.config.active_tab == 1)
+                            .then(|| ctx.state.config.projects.get(ctx.state.scroll.selected).cloned())
+                            .flatten()
+                    });
+                if let Some(project) = project {
                     let id = project.id;
                     let name = project.name().to_owned();
-                    if matches!(action, Action::AliasProject) { self.show_dialog(ctx, DialogKind::AliasProject(id), "Project alias", "Short local name; GitLab path is unchanged", vec![FormField::new("Alias", &name, false)]); }
-                    else { self.show_dialog(ctx, DialogKind::Confirm(Confirmation::RemoveProject(id)), "Remove project from workspace?", &format!("{name} · GitLab project and issues are NOT deleted"), vec![]); }
+                    self.show_dialog(
+                        ctx,
+                        DialogKind::Confirm(Confirmation::RemoveProject(id)),
+                        "Remove project from workspace?",
+                        &format!("{name} · GitLab project and issues are NOT deleted"),
+                        vec![],
+                    );
+                } else {
+                    self.dialog_error(ctx, "Open a project in the Projects tab first");
                 }
             }
             Action::NewIssue | Action::NewMergeRequest => {
@@ -1972,6 +2056,15 @@ impl Cronk {
             DialogKind::Confirm(Confirmation::RemoveProject(id)) => {
                 ctx.state.config.projects.retain(|p| p.id != id);
                 ctx.state.items.retain(|i| i.key.project != id);
+                if ctx.state.config.project_route == Some(id) {
+                    ctx.state.config.project_route = None;
+                    if ctx.state.config.active_tab == 1 {
+                        ctx.state.scope = Scope::List;
+                        ctx.state.config.section = None;
+                        ctx.state.section_cursor = 0;
+                        ctx.state.content_offset = 0;
+                    }
+                }
                 self.normalize(ctx);
                 self.close_dialog(ctx);
                 self.persist(ctx);
@@ -2080,6 +2173,7 @@ impl Cronk {
 fn navigation(state: &State) -> TabState {
     TabState {
         route: state.config.route.clone(),
+        project_route: state.config.project_route,
         section: state.config.section,
         field: state.config.field,
         section_cursor: state.section_cursor,
@@ -2106,8 +2200,23 @@ fn prune_tab_routes(config: &mut Config) {
         }) {
             *tab = TabState {
                 list_offset: tab.list_offset,
+                project_route: tab
+                    .project_route
+                    .filter(|id| config.projects.iter().any(|p| p.id == *id)),
                 ..TabState::default()
             };
+        }
+        if tab
+            .project_route
+            .is_some_and(|id| !config.projects.iter().any(|p| p.id == id))
+        {
+            tab.project_route = None;
+            if tab.route.is_none() {
+                tab.section = None;
+                tab.section_cursor = 0;
+                tab.field = 0;
+                tab.content_offset = 0;
+            }
         }
         if let Some(route) = &tab.route {
             let last = if route.kind == ItemKind::MergeRequest {
@@ -2117,6 +2226,9 @@ fn prune_tab_routes(config: &mut Config) {
             };
             tab.section = tab.section.map(|section| section.min(last));
             tab.section_cursor = tab.section_cursor.min(last);
+        } else if tab.project_route.is_some() {
+            tab.section = tab.section.map(|_| 0);
+            tab.section_cursor = 0;
         }
         true
     });

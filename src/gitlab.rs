@@ -718,12 +718,15 @@ impl GitLab {
         struct ApiProject {
             id: u64,
             path_with_namespace: String,
+            #[serde(default)]
+            name: String,
         }
         let project: ApiProject = self.get(&self.url(&["projects", path]))?;
         Ok(Project {
             id: project.id,
             path: project.path_with_namespace,
-            alias: String::new(),
+            // Prefer GitLab's short display name as the starting local alias.
+            alias: project.name,
             visible: true,
         })
     }
@@ -2278,7 +2281,11 @@ mod tests {
                 "/enterprise%20root/gitlab/api/v4/projects/demo%2Fnested%2Fproject"
             );
             assert_eq!(request.headers["private-token"], "test-private-secret");
-            Reply::json(json!({"id": 7, "path_with_namespace": "demo/nested/project"}))
+            Reply::json(json!({
+                "id": 7,
+                "name": "Nested project",
+                "path_with_namespace": "demo/nested/project"
+            }))
         });
         for suffix in [
             "/enterprise%20root/gitlab",
@@ -2286,10 +2293,9 @@ mod tests {
         ] {
             let client =
                 GitLab::new(&format!("{}{suffix}", mock.base), "test-private-secret").unwrap();
-            assert_eq!(
-                client.resolve_project("demo/nested/project").unwrap().path,
-                "demo/nested/project"
-            );
+            let project = client.resolve_project("demo/nested/project").unwrap();
+            assert_eq!(project.path, "demo/nested/project");
+            assert_eq!(project.alias, "Nested project");
         }
     }
 

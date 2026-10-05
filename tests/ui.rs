@@ -121,6 +121,7 @@ fn persisted(ui: &Ui, path: &Path) -> Config {
 fn tab_state(state: &State) -> TabState {
     TabState {
         route: state.config.route.clone(),
+        project_route: state.config.project_route,
         section: state.config.section,
         field: state.config.field,
         section_cursor: state.section_cursor,
@@ -133,7 +134,7 @@ fn tab_state(state: &State) -> TabState {
 
 /// The state a drilled-down tab collapses to when its own tab is selected again.
 fn popped_to_list(expected: &TabState) -> TabState {
-    if expected.route.is_none() {
+    if expected.route.is_none() && expected.project_route.is_none() {
         return expected.clone();
     }
     TabState {
@@ -148,6 +149,12 @@ fn assert_tab_state(ui: &Ui, expected: &TabState, selected: usize) {
         state.config.route,
         expected.route,
         "{} route",
+        state.tab_name()
+    );
+    assert_eq!(
+        state.config.project_route,
+        expected.project_route,
+        "{} project route",
         state.tab_name()
     );
     assert_eq!(
@@ -1127,7 +1134,7 @@ fn palette_arrow_navigation_keeps_query_focus_and_runs_the_filtered_selection() 
         "project",
         "j must be typed, not navigate"
     );
-    assert_eq!(ui.state().command_options().len(), 4);
+    assert_eq!(ui.state().command_options().len(), 2);
     key(&mut ui, KeyCode::Down);
     assert_eq!(
         dialog(&ui).selected,
@@ -1135,26 +1142,24 @@ fn palette_arrow_navigation_keeps_query_focus_and_runs_the_filtered_selection() 
         "Down must reach palette navigation through Input"
     );
     focused_field(&ui, 0);
-    key(&mut ui, KeyCode::Down);
-    assert_eq!(dialog(&ui).selected, 2);
     key(&mut ui, KeyCode::Up);
     assert_eq!(
         dialog(&ui).selected,
-        1,
+        0,
         "Up must move one option, not reset the query selection"
     );
-    ui.send_paste(" alias").unwrap();
-    assert_eq!(dialog(&ui).fields[0].value(), "project alias");
+    ui.send_paste(" add").unwrap();
+    assert_eq!(dialog(&ui).fields[0].value(), "project add");
     assert_eq!(
         dialog(&ui).selected,
         0,
         "editing the query resets the option cursor"
     );
+    assert_eq!(ui.state().command_options().len(), 0);
+    replace_input(&mut ui, "Add existing");
     assert_eq!(ui.state().command_options().len(), 1);
     key(&mut ui, KeyCode::Enter);
-    assert!(
-        matches!(dialog(&ui).kind, DialogKind::AliasProject(id) if id == demo::projects()[1].id)
-    );
+    assert!(matches!(dialog(&ui).kind, DialogKind::AddProject));
     focused_field(&ui, 0);
     key(&mut ui, KeyCode::Esc);
     assert_eq!(ui.state().scroll.selected, 1);
@@ -1529,20 +1534,33 @@ fn enter_submits_a_fieldless_confirmation_dialog() {
 }
 
 #[test]
-fn mouse_project_checkbox_toggles_the_clicked_project_without_activating_the_row() {
+fn mouse_project_status_dot_toggles_the_clicked_project_without_activating_the_row() {
     let mut ui = mount(config(), None);
     key(&mut ui, KeyCode::Char('P'));
-    click_text(&mut ui, "[x]", 1);
+    let rect = ui.rect_of_key(&"project-visible-9002".into()).unwrap();
+    for kind in [
+        MouseKind::Down(MouseButton::Left),
+        MouseKind::Up(MouseButton::Left),
+    ] {
+        ui.send_mouse(MouseEvent {
+            x: rect.x as u16,
+            y: rect.y as u16,
+            kind,
+            mods: KeyMods::NONE,
+        })
+        .unwrap();
+    }
     assert_eq!(
         ui.state().config.active_tab,
         1,
-        "checkbox clicks must not bubble into project activation"
+        "status-dot clicks must not bubble into project activation"
     );
     assert_eq!(ui.state().scope, Scope::List);
     assert_eq!(ui.state().scroll.selected, 1);
     assert!(ui.state().config.projects[0].visible);
     assert!(!ui.state().config.projects[1].visible);
     assert!(ui.state().config.route.is_none());
+    assert!(ui.state().config.project_route.is_none());
     let hidden = ui.state().config.projects[1].id;
     key(&mut ui, KeyCode::Char('I'));
     assert!(
@@ -1557,23 +1575,60 @@ fn mouse_project_checkbox_toggles_the_clicked_project_without_activating_the_row
 }
 
 #[test]
+fn project_details_edit_alias_and_remove_from_workspace() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('P'));
+    key(&mut ui, KeyCode::Enter);
+    let project = demo::projects()[0].id;
+    assert_eq!(ui.state().config.project_route, Some(project));
+    assert_eq!(ui.state().scope, Scope::Details);
+    let text = ui.capture_frame().plain_text();
+    assert!(text.contains("Orbit scheduler"));
+    assert!(text.contains("Remove from workspace"));
+
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().scope, Scope::Section);
+    key(&mut ui, KeyCode::Enter);
+    assert!(matches!(dialog(&ui).kind, DialogKind::AliasProject(id) if id == project));
+    replace_input(&mut ui, "Orbit");
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().project(project).unwrap().alias, "Orbit");
+    assert_eq!(ui.state().scope, Scope::Section);
+
+    key(&mut ui, KeyCode::Down);
+    key(&mut ui, KeyCode::Enter);
+    assert!(
+        matches!(dialog(&ui).kind, DialogKind::Confirm(Confirmation::RemoveProject(id)) if id == project)
+    );
+    key(&mut ui, KeyCode::Esc);
+    assert!(ui.state().project(project).is_some());
+    click_text(&mut ui, "Remove from workspace", 0);
+    assert!(
+        matches!(dialog(&ui).kind, DialogKind::Confirm(Confirmation::RemoveProject(id)) if id == project)
+    );
+    key(&mut ui, KeyCode::Enter);
+    assert!(ui.state().project(project).is_none());
+    assert!(ui.state().config.project_route.is_none());
+    assert_eq!(ui.state().scope, Scope::List);
+}
+
+#[test]
 fn mouse_project_and_work_rows_activate_the_clicked_identity() {
     let mut ui = mount(config(), None);
     key(&mut ui, KeyCode::Char('P'));
     click_text(&mut ui, "Meteor cache", 0);
-    assert_eq!(ui.state().config.active_tab, 2);
     let project = &demo::projects()[1];
-    assert_eq!(
-        ui.state().query_text(),
-        format!("project:\"{}\"", project.path)
-    );
-    assert!(!ui.state().visible_items().is_empty());
-    assert!(
-        ui.state()
-            .visible_items()
-            .iter()
-            .all(|i| i.key.project == project.id)
-    );
+    assert_eq!(ui.state().config.active_tab, 1);
+    assert_eq!(ui.state().scope, Scope::Details);
+    assert_eq!(ui.state().config.project_route, Some(project.id));
+    assert!(ui.capture_frame().plain_text().contains("Alias"));
+    assert!(ui.capture_frame().plain_text().contains(&project.path));
+    key(&mut ui, KeyCode::Esc);
+    assert_eq!(ui.state().scope, Scope::List);
+    assert_eq!(ui.state().scroll.selected, 1);
+    assert!(ui.state().config.project_route.is_none());
+
+    key(&mut ui, KeyCode::Char('I'));
     let clicked = ui.state().visible_items()[2].key.clone();
     click_text(&mut ui, &format!("#{}", clicked.iid), 0);
     assert_eq!(ui.state().scope, Scope::Details);
@@ -1620,12 +1675,18 @@ fn hiding_or_removing_a_project_invalidates_all_cached_tab_routes() {
             project
         );
         if remove {
-            palette_command(&mut ui, "Remove project from workspace");
+            key(&mut ui, KeyCode::Enter);
+            assert_eq!(ui.state().config.project_route, Some(project));
+            key(&mut ui, KeyCode::Enter);
+            key(&mut ui, KeyCode::Down);
+            key(&mut ui, KeyCode::Enter);
             assert!(
                 matches!(dialog(&ui).kind, DialogKind::Confirm(Confirmation::RemoveProject(id)) if id == project)
             );
             key(&mut ui, KeyCode::Enter);
             assert!(ui.state().project(project).is_none());
+            assert!(ui.state().config.project_route.is_none());
+            assert_eq!(ui.state().scope, Scope::List);
         } else {
             key(&mut ui, KeyCode::Char(' '));
             assert!(!ui.state().project(project).unwrap().visible);
@@ -2811,11 +2872,11 @@ fn small_project_viewport_snapshot() {
             "  Projects",
             "  5 PROJECTS   Space toggles visibility · Ent…",
             "",
-            "▕ [x] Orbit scheduler · DEMO         8 items   █",
-            "▕     demo-lab/constellation/platform/runtime… █",
+            "▕ ● Orbit scheduler · DEMO           8 items   █",
+            "▕   demo-lab/constellation/platform/runtime/o… █",
             "                                               ▀",
-            "  [x] Meteor cache · DEMO            8 items",
-            "      demo-lab/constellation/platform/storage…",
+            "  ● Meteor cache · DEMO              8 items",
+            "    demo-lab/constellation/platform/storage/m…",
             "",
             " LIST   DEMO  Demo workspace · no requests or r…",
             " D/P/I/M tabs   1–0 views   ↑ ↓ move   Enter op…",

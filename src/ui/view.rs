@@ -1,5 +1,5 @@
 use super::{
-    Completion, Cronk, Dialog, DialogKind, Msg, Scope, State,
+    Action, Completion, Cronk, Dialog, DialogKind, Msg, Scope, State,
     interaction::{self, click},
     list_height_for_tab, list_row_height,
 };
@@ -223,6 +223,8 @@ fn status_help(subject: &str, status: &str) -> String {
         "unresolved" => "Contains comments that still need resolution",
         "comment" => "Comment that does not require resolution",
         "warning" => "See the adjacent message for additional information",
+        "visible" => "Included in Dashboard, Issues, and Merge Requests",
+        "hidden" => "Excluded from work lists until shown again",
         _ => "Status reported by GitLab",
     };
     format!("{subject}: {status} — {explanation}")
@@ -386,6 +388,7 @@ pub(super) fn view(ctx: &Context<Cronk>) -> Element {
                 detail(ctx, colors)
             }
         }
+        Scope::Details | Scope::Section if state.project_details() => project_detail(ctx, colors),
         Scope::Details | Scope::Section => detail(ctx, colors),
     };
     let search_row = if let Some(input) = &state.log_search {
@@ -614,7 +617,13 @@ fn breadcrumb(ctx: &Context<Cronk>, colors: Colors) -> Element {
     }
     let mut spans = vec![Span::new(state.tab_name().to_owned()).fg(colors.muted)];
     if matches!(state.scope, Scope::Details | Scope::Section) {
-        if let Some(key) = &state.config.route {
+        if let Some(id) = state
+            .config
+            .project_route
+            .filter(|_| state.project_details())
+        {
+            spans.push(Span::new(format!("  /  {}", project_name(state, id))));
+        } else if let Some(key) = &state.config.route {
             spans.push(Span::new(format!(
                 "  /  {}  /  {}",
                 project_name(state, key.project),
@@ -652,7 +661,7 @@ fn context_line(state: &State, colors: Colors) -> Element {
             match state.scope {
                 Scope::List if state.config.active_tab == 1 => (
                     format!("{} PROJECTS", state.config.projects.len()),
-                    "Space toggles visibility · Enter opens project issues".to_owned(),
+                    "Space toggles visibility · Enter opens project details".to_owned(),
                 ),
                 Scope::List => {
                     let query = state.query_text();
@@ -943,18 +952,23 @@ fn project_row(
         colors.base()
     };
     let style = interaction::style(ctx, &format!("project-{}", project.id), style);
-    let checkbox_style = interaction::style(ctx, &format!("project-visible-{}", project.id), style);
+    let (symbol, color, status) = if project.visible {
+        ('●', colors.green, "visible")
+    } else {
+        ('○', colors.muted, "hidden")
+    };
     let link = ctx.link().clone();
-    let checkbox = click(
+    let visibility = click(
         ctx,
         format!("project-visible-{}", project.id),
-        Text::new(if project.visible { " [x] " } else { " [ ] " }).style(checkbox_style.fg(
-            if project.visible {
-                colors.green
-            } else {
-                colors.muted
-            },
-        )),
+        dot_tooltip(
+            ctx,
+            format!("project-visible-tip-{}", project.id),
+            symbol,
+            color,
+            status_help("Project", status),
+            style,
+        ),
         move || {
             link.send(Msg::Select(index));
             Msg::ToggleProject
@@ -968,7 +982,9 @@ fn project_row(
     let top = HStack::new()
         .height(Length::Px(1))
         .style(style)
-        .child(checkbox)
+        .child(Text::new(" ").width(Length::Px(1)).style(style))
+        .child(visibility)
+        .child(Text::new(" ").width(Length::Px(1)).style(style))
         .child(line(project_name(state, project.id), style.bold()))
         .child(Text::new(format!("{count} items  ")).style(Style::new().fg(colors.muted)));
     let marked = selected && state.scope == Scope::List;
@@ -982,7 +998,7 @@ fn project_row(
             .child(list_selection_line(
                 rich(
                     vec![
-                        Span::new(format!("     {}  ·  ", project.path)).fg(colors.muted),
+                        Span::new(format!("   {}  ·  ", project.path)).fg(colors.muted),
                         Span::new(if project.visible {
                             "visible"
                         } else {
@@ -1079,6 +1095,246 @@ fn detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
         );
     };
     detail_document(ctx, details, colors)
+}
+
+fn project_detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
+    let state = &ctx.state;
+    let Some(project) = state
+        .config
+        .project_route
+        .and_then(|id| state.project(id))
+        .cloned()
+    else {
+        return empty_state(
+            "Project unavailable",
+            "The project list is still available. Go back, or refresh to retry.",
+            colors,
+        );
+    };
+    let mut content = Vec::new();
+    let selected = state.section_cursor == 0;
+    // Match issue/MR details: broad section fill on Details, contract to the focused
+    // field after Enter, and expand again on Escape.
+    let broad = state.scope == Scope::Details;
+    let background = if state.config.animations {
+        ctx.transition(
+            "detail-focus-background-0",
+            if broad {
+                colors.selection
+            } else {
+                colors.background
+            },
+            TransitionConfig {
+                duration: std::time::Duration::from_millis(160),
+                ..TransitionConfig::default()
+            },
+        )
+    } else if broad {
+        colors.selection
+    } else {
+        colors.background
+    };
+    let edge = if state.config.animations {
+        ctx.transition(
+            "detail-focus-edge-0",
+            if broad {
+                colors.accent
+            } else {
+                colors.background
+            },
+            TransitionConfig {
+                duration: std::time::Duration::from_millis(160),
+                ..TransitionConfig::default()
+            },
+        )
+    } else if broad {
+        colors.accent
+    } else {
+        colors.background
+    };
+    let section_colors = Colors {
+        background: if selected {
+            background
+        } else {
+            colors.background
+        },
+        ..colors
+    };
+    let edge = if selected { edge } else { colors.background };
+    let style = interaction::style(ctx, "detail-section-0", section_colors.base());
+    content.push(click(
+        ctx,
+        "detail-section-0",
+        detail_selection_row(
+            HStack::new()
+                .height(Length::Px(1))
+                .style(style)
+                .child(Text::new("Fields ").style(style.fg(colors.accent).bold()))
+                .child(Divider::horizontal().style(style.fg(colors.muted)))
+                .into(),
+            None,
+            edge,
+            style,
+            colors,
+        ),
+        || Msg::DetailSection(0),
+    ));
+    for (row_index, child) in project_fields(ctx, &project, section_colors)
+        .into_iter()
+        .enumerate()
+    {
+        let key = child
+            .key
+            .unwrap_or_else(|| format!("detail-section-0-row-{row_index}"));
+        let row_style = if child.focused {
+            colors.selected()
+        } else {
+            section_colors.base()
+        };
+        let row_style = interaction::style(ctx, &key, row_style);
+        let status = child.status.map(|(key, subject, status)| {
+            status_dot(ctx, key, &subject, &status, row_style, colors)
+        });
+        let row = detail_selection_row(
+            child.content,
+            status,
+            if child.focused { colors.accent } else { edge },
+            row_style,
+            colors,
+        );
+        content.push(if let Some(message) = child.on_click {
+            click(ctx, key, row, message)
+        } else {
+            row.key(key)
+        });
+    }
+    content.push(blank().key("detail-section-gap-0"));
+    let target = state.reveal_content.then(|| state.detail_target_key());
+    let mut scroll = scroll_content(ctx, content, colors);
+    if let Some(target) = target {
+        scroll = scroll.reveal_key(target);
+    } else if let Some(offset) = state.detail_offset_request {
+        scroll = scroll.scroll_to_key_offset("detail-section-0", offset);
+    }
+    interaction::scrollbar(
+        ctx,
+        "detail-scrollbar",
+        Element::from(scroll).key(format!("project-detail-{}", project.id)),
+    )
+}
+
+fn project_fields(ctx: &Context<Cronk>, project: &Project, colors: Colors) -> Vec<DetailRow> {
+    let state = &ctx.state;
+    let issues = state
+        .items
+        .iter()
+        .filter(|item| item.key.project == project.id && item.key.kind == ItemKind::Issue)
+        .count();
+    let merge_requests = state
+        .items
+        .iter()
+        .filter(|item| item.key.project == project.id && item.key.kind == ItemKind::MergeRequest)
+        .count();
+    let visibility = if project.visible { "visible" } else { "hidden" };
+    let mut content = vec![
+        DetailRow::from(rich(
+            vec![
+                Span::new(if project.visible { "Visible" } else { "Hidden" }).fg(
+                    if project.visible {
+                        colors.green
+                    } else {
+                        colors.muted
+                    },
+                ),
+                Span::new(format!("   {}", project.path)).fg(colors.accent),
+            ],
+            colors.base(),
+        ))
+        .with_status("detail-project-status", "Project", visibility),
+        blank().into(),
+    ];
+    let alias_selected = state.scope == Scope::Section
+        && state.section_name() == "Fields"
+        && state.config.field == 0;
+    let alias_style = if alias_selected {
+        colors.selected()
+    } else {
+        colors.base()
+    };
+    let alias_style = interaction::style(ctx, "edit-field-0", alias_style);
+    let alias_value = if project.alias.is_empty() {
+        "—".into()
+    } else {
+        project.alias.clone()
+    };
+    let label_width = ["Alias", "Path", "Project ID", "Visibility", "Open work"]
+        .into_iter()
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    content.push(DetailRow::interactive(
+        "edit-field-0".into(),
+        field_row(
+            "Alias",
+            label_width,
+            vec![Span::new(alias_value)],
+            colors.accent,
+            alias_style,
+        ),
+        alias_selected,
+        || Msg::Field(0),
+    ));
+    for (label, value) in [
+        ("Path", project.path.clone()),
+        ("Project ID", project.id.to_string()),
+        (
+            "Visibility",
+            if project.visible {
+                "Included in work lists".into()
+            } else {
+                "Hidden from work lists".into()
+            },
+        ),
+        (
+            "Open work",
+            format!("{issues} issues · {merge_requests} merge requests"),
+        ),
+    ] {
+        content.push(
+            field_row(
+                label,
+                label_width,
+                vec![Span::new(value)],
+                colors.muted,
+                colors.base(),
+            )
+            .into(),
+        );
+    }
+    content.push(blank().into());
+    let remove_selected = state.scope == Scope::Section
+        && state.section_name() == "Fields"
+        && state.config.field == 1;
+    let remove_style = if remove_selected {
+        colors.selected().fg(colors.red).bold()
+    } else {
+        colors.base().fg(colors.red).bold()
+    };
+    let remove_style = interaction::style(ctx, "project-remove", remove_style);
+    content.push(DetailRow::interactive(
+        "project-remove".into(),
+        Element::from(Text::new(" Remove from workspace ").style(remove_style)),
+        remove_selected,
+        || Msg::Action(Action::RemoveProject),
+    ));
+    content.push(
+        line(
+            "Removes this project from Cronk only. GitLab data is unchanged.",
+            colors.base().fg(colors.muted),
+        )
+        .into(),
+    );
+    content
 }
 
 /// A `label  value` row with the label right-aligned in a `label_width` column
@@ -2674,14 +2930,16 @@ const HELP: &str = "\
 - **PageUp / PageDown** scroll the whole detail document; **Enter** focuses section actions.
 - **Esc** leaves section actions without resetting the viewport, then returns to the list.
 - **Esc** goes back one level; at a list it does nothing. Click a row to open it directly.
-- **Space** toggles visibility in Projects. Hidden projects leave the work lists.
+- **Space** toggles visibility in Projects (list or details). Hidden projects leave the work lists.
+- **Enter** opens project details. Alias is editable there; remove is a red action at the bottom.
 
 ## Workspace
 - **/** filters the current view. Save a filter as a named tab from commands.
 - **:** opens commands; type to search, then choose an action.
 - **r** refreshes. **?** opens this help. **q** quits outside forms.
-- The command palette exposes project aliases, creation, edits, comments,
-  discussion replies/resolution, job retries, and themes.
+- The command palette exposes project creation, edits, comments,
+  discussion replies/resolution, job retries, and themes. Project alias and
+  removal live on the Projects detail view.
 
 ## Forms and live data
 - **Enter** submits the whole form. **Tab / Shift+Tab** switch fields.

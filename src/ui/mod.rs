@@ -243,7 +243,6 @@ pub enum Action {
     DeleteView,
     AddProject,
     RemoveProject,
-    AliasProject,
     NewIssue,
     NewMergeRequest,
     Comment,
@@ -265,8 +264,6 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("Rename saved tab", Action::RenameView),
     ("Delete saved tab", Action::DeleteView),
     ("Add existing GitLab project", Action::AddProject),
-    ("Remove project from workspace", Action::RemoveProject),
-    ("Rename project alias", Action::AliasProject),
     ("Create issue", Action::NewIssue),
     ("Create merge request", Action::NewMergeRequest),
     ("Add comment", Action::Comment),
@@ -475,8 +472,14 @@ impl State {
         }
         items
     }
+    pub fn project_details(&self) -> bool {
+        self.config.active_tab == 1 && self.config.project_route.is_some()
+    }
+
     pub fn sections(&self) -> &'static [&'static str] {
-        if self
+        if self.project_details() {
+            &["Fields"]
+        } else if self
             .config
             .route
             .as_ref()
@@ -503,6 +506,9 @@ impl State {
     pub(super) fn detail_target_key(&self) -> String {
         if self.scope == Scope::Section {
             match self.section_name() {
+                "Fields" if self.project_details() && self.config.field == 1 => {
+                    return "project-remove".into();
+                }
                 "Fields" => return format!("edit-field-{}", self.config.field),
                 "Jobs" => {
                     if let Some(job) = self

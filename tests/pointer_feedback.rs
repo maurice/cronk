@@ -4,7 +4,7 @@ use cronk::{
     config::Config,
     demo,
     model::{ItemKey, ItemKind},
-    ui::{Action, Cronk, Msg},
+    ui::{Action, Cronk, Msg, Scope},
 };
 use tui_lipan::{
     TestBackend,
@@ -78,6 +78,7 @@ fn assert_hover(ui: &mut Ui, key: &str) {
     let (mut x, y) = point(ui, key);
     // Selectable rows reserve their first column for the background-free edge.
     if (key.starts_with("project-") && !key.starts_with("project-visible-"))
+        || key.starts_with("project-remove")
         || key.starts_with("dialog-option-")
         || key.starts_with("detail-section-")
         || key.starts_with("edit-field-")
@@ -255,6 +256,80 @@ fn work_row_hover_is_not_selection_and_preserves_every_label_cell() {
             }
             assert_eq!(ui.state().scroll.selected, selected);
             assert!(ui.state().config.route.is_none());
+        }
+    }
+}
+
+#[test]
+fn project_details_contract_section_highlight_to_focused_fields() {
+    for theme in THEMES {
+        for animations in [false, true] {
+            let mut cfg = config(theme, 1);
+            cfg.animations = animations;
+            cfg.project_route = Some(9001);
+            let mut ui = mount(cfg);
+            settle(&mut ui);
+            assert_eq!(ui.state().scope, Scope::Details);
+            let (x, start) = point(&ui, "detail-section-0");
+            let frame = ui.capture_frame();
+            let base = frame.cell(x, start + 1).bg; // gap-adjacent canvas under the edge column
+            let selection = frame.cell(x + 1, start).bg;
+            let accent = frame.cell(x, start).fg;
+            assert_ne!(selection, frame.cell(x, start).bg, "{theme}");
+            assert_eq!(frame.cell(x, start).symbol, "▕");
+            assert_eq!(frame.cell(x + 1, start).bg, selection);
+
+            ui.dispatch(Msg::Enter).unwrap();
+            settle(&mut ui);
+            assert_eq!(ui.state().scope, Scope::Section);
+            assert_eq!(ui.state().config.field, 0);
+            let focused = point(&ui, "edit-field-0");
+            if animations {
+                assert_eq!(ui.capture_frame().cell(x + 1, start).bg, selection);
+                ui.advance(Duration::from_millis(80));
+                settle(&mut ui);
+                let middle = ui.capture_frame().cell(x + 1, start).bg;
+                assert_ne!(middle, selection);
+                assert_ne!(middle, base);
+            }
+            ui.advance(Duration::from_millis(200));
+            settle(&mut ui);
+            let frame = ui.capture_frame();
+            assert_eq!(
+                frame.cell(x + 1, start).bg,
+                base,
+                "{theme}: section fill must shrink"
+            );
+            assert_eq!(
+                frame.cell(x, start).fg,
+                base,
+                "{theme}: section edge must clear"
+            );
+            assert_eq!(frame.cell(focused.0, focused.1).fg, accent);
+            assert_eq!(frame.cell(focused.0, focused.1).bg, base);
+            assert_eq!(frame.cell(focused.0 + 1, focused.1).bg, selection);
+            assert_eq!(frame.cell(ui.viewport().w - 3, focused.1).bg, selection);
+
+            ui.dispatch(Msg::Move(1)).unwrap();
+            settle(&mut ui);
+            let remove = point(&ui, "project-remove");
+            let frame = ui.capture_frame();
+            assert_eq!(frame.cell(remove.0, remove.1).fg, accent);
+            assert_eq!(frame.cell(remove.0 + 1, remove.1).bg, selection);
+            assert_eq!(frame.cell(focused.0 + 1, focused.1).bg, base);
+
+            ui.dispatch(Msg::Back).unwrap();
+            settle(&mut ui);
+            ui.advance(Duration::from_millis(200));
+            settle(&mut ui);
+            assert_eq!(ui.state().scope, Scope::Details);
+            let frame = ui.capture_frame();
+            assert_eq!(
+                frame.cell(x + 1, start).bg,
+                selection,
+                "{theme}: Esc restores broad fill"
+            );
+            assert_eq!(frame.cell(x, start).fg, accent);
         }
     }
 }

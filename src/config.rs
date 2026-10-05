@@ -37,6 +37,8 @@ pub struct Config {
     pub selections: BTreeMap<String, usize>,
     pub tab_states: BTreeMap<String, TabState>,
     pub route: Option<ItemKey>,
+    /// Open project on the Projects tab (independent of issue/MR `route`).
+    pub project_route: Option<u64>,
     pub section: Option<usize>,
     pub field: usize,
     pub filters: BTreeMap<String, String>,
@@ -46,6 +48,7 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct TabState {
     pub route: Option<ItemKey>,
+    pub project_route: Option<u64>,
     pub section: Option<usize>,
     pub field: usize,
     pub section_cursor: usize,
@@ -102,6 +105,7 @@ impl Default for Config {
             selections: BTreeMap::new(),
             tab_states: BTreeMap::new(),
             route: None,
+            project_route: None,
             section: None,
             field: 0,
             filters: BTreeMap::new(),
@@ -522,6 +526,7 @@ mod tests {
                         iid: 7,
                         kind: ItemKind::MergeRequest,
                     }),
+                    project_route: None,
                     section: Some(2),
                     section_cursor: 2,
                     field: 4,
@@ -536,6 +541,7 @@ mod tests {
                 iid: 7,
                 kind: ItemKind::MergeRequest,
             }),
+            project_route: None,
             section: Some(2),
             field: 4,
             filters: BTreeMap::from([("Reviews".into(), "label:\"typing".into())]),

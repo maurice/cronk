@@ -14,6 +14,22 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+/// Every built-in theme, in the order shown by the "Choose theme" dialog.
+/// Palettes live in `ui::view`; adding a theme means extending both places.
+pub const THEMES: [&str; 11] = [
+    "midnight",
+    "dracula",
+    "light",
+    "blade-runner",
+    "tokyo-night",
+    "gruvbox-dark",
+    "nord",
+    "solarized-dark",
+    "solarized-light",
+    "sepia-dark",
+    "sepia-light",
+];
+
 use crate::filter::Query;
 use crate::model::{ItemKey, ItemKind, LookupOption, Project, User};
 
@@ -295,8 +311,9 @@ impl Config {
             "detail_refresh_secs must be at least 2"
         );
         ensure!(
-            matches!(self.theme.as_str(), "midnight" | "dracula" | "light"),
-            "theme must be midnight, dracula, or light"
+            THEMES.contains(&self.theme.as_str()),
+            "theme must be one of: {}",
+            THEMES.join(", ")
         );
         UserFormatter::from_config(self)?;
 
@@ -615,7 +632,7 @@ mod tests {
 
     #[test]
     fn theme_names_and_all_color_overrides_are_validated() {
-        for theme in ["midnight", "dracula", "light"] {
+        for theme in THEMES {
             Config {
                 theme: theme.into(),
                 ..Config::default()

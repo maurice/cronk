@@ -33,17 +33,6 @@ pub enum Scope {
     Section,
 }
 
-pub(super) fn detail_section_offset(
-    selected: usize,
-    offset: usize,
-    metrics: ScrollMetrics,
-) -> usize {
-    let mut boundary = BoundaryScroll { selected, offset };
-    boundary.normalize(metrics.len, metrics.visible);
-    let top_preferred = selected.saturating_sub(1).min(metrics.max_offset);
-    boundary.offset.max(top_preferred)
-}
-
 pub struct State {
     pub config: Config,
     feedback: interaction::Feedback,
@@ -414,10 +403,6 @@ impl State {
             .copied()
             .unwrap_or("Fields")
     }
-    pub(super) fn detail_section_key(&self, section: usize) -> String {
-        format!("detail-section-{section}")
-    }
-
     pub(super) fn detail_target_key(&self) -> String {
         if self.scope == Scope::Section {
             match self.section_name() {
@@ -443,7 +428,7 @@ impl State {
                 _ => {}
             }
         }
-        self.detail_section_key(self.section_cursor)
+        format!("detail-section-{}", self.section_cursor)
     }
 
     pub fn fields(&self) -> Vec<(&'static str, &'static str, String)> {

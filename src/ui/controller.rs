@@ -673,17 +673,12 @@ impl Component for Cronk {
                                 .find(|child| child.key.as_ref() == Some(&key.clone().into()))
                         })
                         .map_or(event.offset, |child| {
-                            let selected = child.content_rect.y.max(0) as usize;
-                            if ctx.state.scope == Scope::Details {
-                                detail_section_offset(selected, origin, event.metrics)
-                            } else {
-                                let mut scroll = BoundaryScroll {
-                                    selected,
-                                    offset: origin,
-                                };
-                                scroll.normalize(event.metrics.len, event.metrics.visible);
-                                scroll.offset
-                            }
+                            let mut scroll = BoundaryScroll {
+                                selected: child.content_rect.y.max(0) as usize,
+                                offset: origin,
+                            };
+                            scroll.normalize(event.metrics.len, event.metrics.visible);
+                            scroll.offset
                         })
                 } else {
                     event.offset
@@ -1326,9 +1321,7 @@ impl Cronk {
                 let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
                 ctx.state.scroll.select(index, len, height);
             }
-            Scope::Details => {
-                ctx.state.section_cursor = index.min(ctx.state.sections().len() - 1);
-            }
+            Scope::Details => ctx.state.section_cursor = index.min(ctx.state.sections().len() - 1),
             Scope::Section => {
                 ctx.state.config.field = index;
                 ctx.state.reveal_content = false;

@@ -971,14 +971,6 @@ fn section_visible(ui: &Ui, area: Rect, index: usize) {
     assert!(content(ui, area).contains(ui.state().sections()[index]));
 }
 
-fn section_gap_visible(ui: &Ui, area: Rect, index: usize) {
-    let gap = rect(ui, &format!("detail-section-gap-{index}"));
-    assert!(
-        gap.y >= area.y && gap.y + gap.h as i16 <= area.y + area.h as i16,
-        "selected section end is not fully visible: {index} in {area:?}: {gap:?}"
-    );
-}
-
 fn select_detail_section(ui: &mut Ui, area: Rect, index: usize) {
     assert_eq!(ui.state().scope, Scope::Details);
     key(ui, KeyCode::Home);
@@ -1038,50 +1030,6 @@ fn assert_detail_boundary(ui: &Ui, area: Rect, target: &str, previous_offset: us
     );
 }
 
-fn assert_detail_section_revealed(ui: &Ui, area: Rect, index: usize, previous_offset: usize) {
-    let target = format!("detail-section-{index}");
-    let cursor = rect(ui, &target);
-    let document_row = i32::from(cursor.y) - i32::from(area.y) + ui.state().content_offset as i32;
-    assert!(document_row >= 0);
-    let mut expected = BoundaryScroll {
-        selected: document_row as usize,
-        offset: previous_offset,
-    };
-    expected.normalize(
-        ui.state().content_max_offset + area.h as usize,
-        area.h as usize,
-    );
-    assert!(
-        cursor.y >= area.y && cursor.y < area.y + area.h as i16,
-        "{target} cursor is offscreen: {cursor:?}"
-    );
-    if expected.offset > 0 {
-        assert!(
-            ui.state().content_offset > 0,
-            "{target} must still scroll into the document instead of top-aligning"
-        );
-    }
-}
-
-#[test]
-fn detail_selection_reveals_the_full_section_when_it_fits() {
-    for screen in [Screen::Issue, Screen::MergeRequest] {
-        let (mut ui, viewport_key) = detail_mount(screen, "midnight", 80, 17);
-        replace_details(&mut ui, |details| {
-            compact_details(details);
-            details.item.description = document("FIT_DESCRIPTION", 2);
-        });
-        let area = detail_area(&ui, &viewport_key);
-        key(&mut ui, KeyCode::Home);
-        key(&mut ui, KeyCode::Down);
-        assert_eq!(ui.state().scope, Scope::Details);
-        assert_eq!(ui.state().section_cursor, 1);
-        section_visible(&ui, area, 1);
-        section_gap_visible(&ui, area, 1);
-        assert!(content(&ui, area).contains("FIT_DESCRIPTION_001"));
-    }
-}
-
 #[test]
 fn detail_section_navigation_uses_boundary_scrolling_in_both_directions() {
     for screen in [Screen::Issue, Screen::MergeRequest] {
@@ -1096,14 +1044,19 @@ fn detail_section_navigation_uses_boundary_scrolling_in_both_directions() {
             {
                 let previous = ui.state().content_offset;
                 key(&mut ui, code);
-                assert_detail_section_revealed(&ui, area, ui.state().section_cursor, previous);
+                assert_detail_boundary(
+                    &ui,
+                    area,
+                    &format!("detail-section-{}", ui.state().section_cursor),
+                    previous,
+                );
             }
             // Manual paging does not change selection. A clamped Up must still
             // recover that same header inside the band instead of at the top.
             drag_to(&mut ui, area, true);
             let previous = ui.state().content_offset;
             key(&mut ui, KeyCode::Up);
-            assert_detail_section_revealed(&ui, area, 0, previous);
+            assert_detail_boundary(&ui, area, "detail-section-0", previous);
         }
     }
 }

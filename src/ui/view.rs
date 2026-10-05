@@ -1,5 +1,5 @@
 use super::{
-    Completion, Cronk, Dialog, DialogKind, Msg, Scope, State,
+    Completion, Cronk, Dialog, DialogKind, Msg, Scope, State, detail_section_offset,
     interaction::{self, click},
     list_height_for_tab, list_row_height,
 };
@@ -1280,12 +1280,17 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                     .map(|child| (child.content_rect.y.max(0) as usize, event.metrics))
             });
         if let Some((selected, metrics)) = measured {
-            let mut boundary = crate::scroll::BoundaryScroll {
-                selected,
-                offset: origin,
+            let offset = if state.scope == Scope::Details {
+                detail_section_offset(selected, origin, metrics)
+            } else {
+                let mut boundary = crate::scroll::BoundaryScroll {
+                    selected,
+                    offset: origin,
+                };
+                boundary.normalize(metrics.len, metrics.visible);
+                boundary.offset
             };
-            boundary.normalize(metrics.len, metrics.visible);
-            scroll = scroll.offset(boundary.offset);
+            scroll = scroll.offset(offset);
         } else {
             // Unseen targets need a layout pass. The viewport callback then applies
             // the quarter-page band using actual wrapped heights and the original offset.

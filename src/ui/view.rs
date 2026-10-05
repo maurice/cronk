@@ -282,7 +282,7 @@ fn label_style(label: &Label, colors: Colors) -> Style {
 }
 
 fn label_pill_span(label: &Label, colors: Colors) -> Span {
-    Span::new(format!(" {} ", label.name))
+    Span::new(label.name.clone())
         .style(label_style(label, colors))
         .row_style_policy(RowStylePolicy::Disabled)
 }
@@ -295,9 +295,11 @@ fn label_text_span(text: &str, label: &Label, colors: Colors) -> Span {
 
 fn label_spans(labels: &[Label], colors: Colors) -> Vec<Span> {
     let mut spans = Vec::with_capacity(labels.len() * 2);
-    for label in labels {
+    for (index, label) in labels.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::new(", "));
+        }
         spans.push(label_pill_span(label, colors));
-        spans.push(Span::new(" "));
     }
     spans
 }
@@ -2790,9 +2792,9 @@ mod tests {
                 },
             );
             let frame = backend.capture_frame();
-            assert_eq!(frame.cell(1, 0).symbol, "u");
-            assert_eq!(frame.cell(1, 0).fg, Color::hex_u24(0xabcdef));
-            assert_eq!(frame.cell(1, 0).bg, Color::hex_u24(0x123456));
+            assert_eq!(frame.cell(0, 0).symbol, "u");
+            assert_eq!(frame.cell(0, 0).fg, Color::hex_u24(0xabcdef));
+            assert_eq!(frame.cell(0, 0).bg, Color::hex_u24(0x123456));
             assert_eq!(frame.cell(20, 0).bg, colors.selection);
         }
     }

@@ -131,6 +131,17 @@ fn tab_state(state: &State) -> TabState {
     }
 }
 
+/// The state a drilled-down tab collapses to when its own tab is selected again.
+fn popped_to_list(expected: &TabState) -> TabState {
+    if expected.route.is_none() {
+        return expected.clone();
+    }
+    TabState {
+        list_offset: expected.list_offset,
+        ..TabState::default()
+    }
+}
+
 fn assert_tab_state(ui: &Ui, expected: &TabState, selected: usize) {
     let state = ui.state();
     assert_eq!(
@@ -544,15 +555,18 @@ fn keyboard_tab_switches_restore_each_tabs_list_details_and_section() {
             .enumerate()
             .rev()
         {
+            // The last visited tab is already active, so its first press pops it.
+            let already_active = ui.state().config.active_tab == index;
             key(&mut ui, KeyCode::Char(ch));
             settle_layout(&mut ui);
             assert_eq!(ui.state().config.active_tab, index);
             let (expected, selected) = &visits[index];
-            assert_tab_state(&ui, expected, *selected);
-            let before = serde_json::to_value(&ui.state().config).unwrap();
-            let epoch = ui.state().detail_epoch;
-            let details = ui.state().details.as_ref().map(|d| d.item.clone());
-            let cached_traces = traces(ui.state());
+            let popped = popped_to_list(expected);
+            assert_tab_state(
+                &ui,
+                if already_active { &popped } else { expected },
+                *selected,
+            );
             let shortcuts = if ch.is_ascii_uppercase() {
                 vec![
                     (ch, KeyMods::NONE),
@@ -565,15 +579,10 @@ fn keyboard_tab_switches_restore_each_tabs_list_details_and_section() {
             for (ch, mods) in shortcuts {
                 modified(&mut ui, KeyCode::Char(ch), mods);
                 settle_layout(&mut ui);
-                assert_tab_state(&ui, expected, *selected);
-                assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), before);
-                assert_eq!(
-                    ui.state().detail_epoch,
-                    epoch,
-                    "same-tab shortcuts are no-ops"
-                );
-                assert_eq!(ui.state().details.as_ref().map(|d| d.item.clone()), details);
-                assert_eq!(traces(ui.state()), cached_traces);
+                // The first press pops a drilled-down tab to its list; further presses are no-ops.
+                assert_tab_state(&ui, &popped, *selected);
+                assert_eq!(ui.state().scope == Scope::List, popped.route.is_none());
+                assert!(ui.state().config.route.is_none() || expected.route.is_none());
             }
         }
     }
@@ -615,20 +624,25 @@ fn mouse_tab_switches_restore_each_tabs_list_details_and_section() {
             visits.push((tab_state(ui.state()), ui.state().scroll.selected));
         }
         for (index, label) in labels.iter().enumerate().rev() {
+            let already_active = ui.state().config.active_tab == index;
             click_text(&mut ui, label, 0);
             settle_layout(&mut ui);
             assert_eq!(ui.state().config.active_tab, index);
             let (expected, selected) = &visits[index];
-            assert_tab_state(&ui, expected, *selected);
-            let before = serde_json::to_value(&ui.state().config).unwrap();
-            let epoch = ui.state().detail_epoch;
-            let cached_traces = traces(ui.state());
+            let popped = popped_to_list(expected);
+            assert_tab_state(
+                &ui,
+                if already_active { &popped } else { expected },
+                *selected,
+            );
             click_text(&mut ui, label, 0);
             settle_layout(&mut ui);
-            assert_tab_state(&ui, expected, *selected);
-            assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), before);
-            assert_eq!(ui.state().detail_epoch, epoch, "same-tab clicks are no-ops");
-            assert_eq!(traces(ui.state()), cached_traces);
+            assert_tab_state(&ui, &popped, *selected);
+            assert_eq!(ui.state().scope == Scope::List, popped.route.is_none());
+            // Clicking again from the list changes nothing.
+            click_text(&mut ui, label, 0);
+            settle_layout(&mut ui);
+            assert_tab_state(&ui, &popped, *selected);
         }
     }
 }
@@ -1975,13 +1989,13 @@ fn tab_switches_restore_independent_caches_and_reject_responses_from_previous_vi
         assert_eq!(ui.state().failures, 0);
         assert_eq!(ui.state().blocked_until, Duration::ZERO);
     }
+    // Re-selecting the current tab pops to its list and discards pending detail requests.
     key(&mut ui, KeyCode::Char('M'));
-    click_text(&mut ui, "Merge Requests", 0);
-    assert_tab_state(&ui, &builtin, builtin_selected);
-    assert_eq!(traces(ui.state()), builtin_traces);
-    assert_eq!(ui.state().detail_epoch, epoch);
-    assert_eq!(ui.state().detail_pending, Some((route, epoch)));
-    assert!(ui.state().trace_pending.contains(&(epoch, job)));
+    assert_tab_state(&ui, &popped_to_list(&builtin), builtin_selected);
+    assert!(ui.state().details.is_none());
+    assert!(ui.state().traces.is_empty());
+    assert!(ui.state().detail_pending.is_none());
+    assert!(ui.state().detail_epoch > epoch);
     key(&mut ui, KeyCode::Char('1'));
     assert_tab_state(&ui, &saved, saved_selected);
     assert_eq!(
@@ -2264,11 +2278,17 @@ fn every_tabs_navigation_persists_immediately_and_survives_restart() {
     settle_layout(&mut restarted);
     assert_tab_state(&restarted, &visits[0].0, visits[0].1);
     for (index, ch) in "DPIM123".chars().enumerate() {
+        // The restored Dashboard is already active, so selecting it pops to its list.
+        let expected = if index == 0 {
+            popped_to_list(&visits[index].0)
+        } else {
+            visits[index].0.clone()
+        };
         key(&mut restarted, KeyCode::Char(ch));
 
         settle_layout(&mut restarted);
         assert_eq!(restarted.state().config.active_tab, index);
-        assert_tab_state(&restarted, &visits[index].0, visits[index].1);
+        assert_tab_state(&restarted, &expected, visits[index].1);
         persisted_tab(&restarted, &path);
     }
 }

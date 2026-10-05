@@ -23,14 +23,15 @@
 //! older GitLab versions. Editing is restricted to the fields documented on `mutate`.
 //!
 //! Trace offsets count original bytes, including stripped controls. Reads return at most
-//! 256 KiB of source bytes; servers ignoring Range require streaming past the prefix, limited
+//! 256 KiB of source bytes. Byte query parameters are capability-probed; older servers
+//! fall back to Range. Servers ignoring Range require streaming past the prefix, limited
 //! to 8 MiB per call (an explicit error beyond that, never silent truncation). Sequential
 //! reads share UTF-8/escape state for up to 64 jobs, keyed by project AND job. Requests for
 //! a retained job are serialized without holding the global state lock during network I/O.
 //! A nonzero offset without matching parser state restarts at zero and returns reset=true,
 //! rather than exposing the tail of an OSC/DCS payload. This also applies after state eviction.
 //! A 65th concurrently active job returns an explicit capacity error; idle states are evicted.
-//! Same-length log replacement cannot be detected by the Range API.
+//! Same-length log replacement cannot reliably be detected by either trace read API.
 //! A trailing incomplete UTF-8 character (at most three bytes) is held until another poll.
 
 use crate::model::{
@@ -53,7 +54,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::Read,
     net::IpAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
     time::Duration,
 };
 
@@ -74,6 +78,8 @@ pub struct GitLab {
     token: Arc<str>,
     cache: Arc<Mutex<Cache>>,
     traces: Arc<Mutex<VecDeque<Arc<TraceState>>>>,
+    // 0 = unknown (including empty traces), 1 = supported, 2 = legacy Range fallback.
+    trace_byte_params: Arc<AtomicU8>,
 }
 
 #[derive(Debug)]
@@ -299,6 +305,7 @@ impl GitLab {
             token: Arc::from(token),
             cache: Arc::new(Mutex::new(Cache::default())),
             traces: Arc::new(Mutex::new(VecDeque::new())),
+            trace_byte_params: Arc::new(AtomicU8::new(0)),
         })
     }
 
@@ -1144,6 +1151,105 @@ impl GitLab {
     }
 
     fn trace_bytes(
+        &self,
+        url: &Url,
+        offset: u64,
+        restarting: bool,
+    ) -> Result<(Vec<u8>, u64, bool)> {
+        if self.supports_trace_byte_params(url)? {
+            let bytes = self.trace_parameter_bytes(url, offset, TRACE_BYTES)?;
+            // An empty slice can mean EOF or a shortened log. Check the preceding byte
+            // before deciding to restart, retaining the legacy truncation semantics.
+            if bytes.is_empty()
+                && offset > 0
+                && self.trace_parameter_bytes(url, offset - 1, 1)?.is_empty()
+            {
+                return self.trace_bytes(url, 0, true);
+            }
+            return Ok((bytes, offset, restarting));
+        }
+        self.trace_range_bytes(url, offset, restarting)
+    }
+
+    fn supports_trace_byte_params(&self, url: &Url) -> Result<bool> {
+        match self.trace_byte_params.load(Ordering::Relaxed) {
+            1 => return Ok(true),
+            2 => return Ok(false),
+            _ => {}
+        }
+        // Neither status 200 nor Content-Length distinguishes a slice from a full
+        // trace. Probe both parameters rather than guessing from the actual poll.
+        let first = match self.trace_parameter_bytes(url, 0, 1) {
+            Ok(bytes) => bytes,
+            Err(error) if http_status(&error) == Some(StatusCode::BAD_REQUEST) => {
+                self.trace_byte_params.store(2, Ordering::Relaxed);
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        if first.is_empty() {
+            // An empty job cannot establish support. Retry on a later poll.
+            return Ok(false);
+        }
+        // A one-byte response proves only the limit. Request beyond any realistic
+        // trace to verify the offset too (including a one-byte legacy job log).
+        let supported = if first.len() == 1 {
+            match self.trace_parameter_bytes(url, i64::MAX as u64, 1) {
+                Ok(bytes) => bytes.is_empty(),
+                Err(error) if http_status(&error) == Some(StatusCode::BAD_REQUEST) => false,
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
+        self.trace_byte_params
+            .store(if supported { 1 } else { 2 }, Ordering::Relaxed);
+        Ok(supported)
+    }
+
+    fn trace_parameter_bytes(&self, url: &Url, offset: u64, limit: usize) -> Result<Vec<u8>> {
+        let mut url = url.clone();
+        url.query_pairs_mut()
+            .append_pair("byte_offset", &offset.to_string())
+            .append_pair("byte_limit", &limit.to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+        let response = self.send(Method::GET, &url, headers, None)?;
+        if !response.status().is_success() {
+            return Err(self.status_error(&Method::GET, &url, &response));
+        }
+        if response
+            .headers()
+            .get(CONTENT_ENCODING)
+            .is_some_and(|h| h != "identity")
+        {
+            bail!(
+                "{}: compressed trace would make byte offsets ambiguous",
+                self.context(&Method::GET, &url)
+            );
+        }
+        let mut bytes = Vec::new();
+        // One extra byte makes ignored byte_limit observable without downloading
+        // the entire trace. Normal polls remain bounded to TRACE_BYTES.
+        response
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                anyhow!(
+                    "{}: could not read trace body",
+                    self.context(&Method::GET, &url)
+                )
+            })?;
+        if bytes.len() > limit && limit != 1 {
+            bail!(
+                "{}: trace body exceeds byte_limit",
+                self.context(&Method::GET, &url)
+            );
+        }
+        Ok(bytes)
+    }
+
+    fn trace_range_bytes(
         &self,
         url: &Url,
         offset: u64,
@@ -2039,6 +2145,11 @@ mod tests {
         fn client(&self) -> GitLab {
             GitLab::new(&self.base, "test-private-secret").unwrap()
         }
+        fn legacy_trace_client(&self) -> GitLab {
+            let client = self.client();
+            client.trace_byte_params.store(2, Ordering::Relaxed);
+            client
+        }
     }
 
     impl Drop for Mock {
@@ -2619,6 +2730,241 @@ mod tests {
     }
 
     #[test]
+    fn trace_query_parameters_preserve_byte_offsets_and_parser_state() {
+        for chunked in [false, true] {
+            let data = Arc::new(Mutex::new(b"a\xc3".to_vec()));
+            let server_data = data.clone();
+            let mock = Mock::new(move |request| {
+                assert_eq!(request.url().path(), "/api/v4/projects/7/jobs/42/trace");
+                assert!(!request.headers.contains_key("range"));
+                assert_eq!(request.headers["accept-encoding"], "identity");
+                let params: HashMap<_, _> = request.url().query_pairs().into_owned().collect();
+                let offset: u64 = params["byte_offset"].parse().unwrap();
+                let limit: usize = params["byte_limit"].parse().unwrap();
+                assert!(limit == 1 || limit == TRACE_BYTES);
+                let data = server_data.lock().unwrap();
+                let start = offset.min(data.len() as u64) as usize;
+                let end = start.saturating_add(limit).min(data.len());
+                let reply = Reply::bytes(200, data[start..end].to_vec());
+                if chunked { reply.chunked() } else { reply }
+            });
+            let client = mock.client();
+            let first = client.trace(7, 42, 0).unwrap();
+            assert_eq!(first.text, "a");
+            assert_eq!(first.next_offset, 2);
+            data.lock()
+                .unwrap()
+                .extend_from_slice(b"\xa9\x1b]52;c;secret");
+            let second = client.clone().trace(7, 42, first.next_offset).unwrap();
+            assert_eq!(second.text, "é");
+            data.lock()
+                .unwrap()
+                .extend_from_slice(b"\x07\x1b[31mRED\x1b[0m\r\n");
+            let third = client.trace(7, 42, second.next_offset).unwrap();
+            assert_eq!(third.text, "RED\n");
+            assert_eq!(third.next_offset, data.lock().unwrap().len() as u64);
+            assert!(!third.reset);
+            let eof = client.trace(7, 42, third.next_offset).unwrap();
+            assert!(eof.text.is_empty());
+            assert_eq!(eof.next_offset, third.next_offset);
+            assert!(!eof.reset);
+            // Two capability probes, three reads, then EOF and its preceding-byte check.
+            assert_eq!(mock.requests.lock().unwrap().len(), 7);
+            data.lock().unwrap().clear();
+            data.lock().unwrap().extend_from_slice(b"new\n");
+            let reset = client.trace(7, 42, eof.next_offset).unwrap();
+            assert!(reset.reset);
+            assert_eq!(reset.text, "new\n");
+            assert_eq!(reset.next_offset, 4);
+        }
+    }
+
+    #[test]
+    fn trace_ignored_query_parameters_fall_back_without_duplicating_output() {
+        // Cover ignoring both parameters, only offset, and only limit, as well
+        // as a one-byte full trace which alone looks like a valid limit=1 slice.
+        for mode in 0..4 {
+            let data = Arc::new(Mutex::new(if mode == 3 {
+                b"a".to_vec()
+            } else {
+                b"old".to_vec()
+            }));
+            let server_data = data.clone();
+            let mock = Mock::new(move |request| {
+                let params: HashMap<_, _> = request.url().query_pairs().into_owned().collect();
+                let data = server_data.lock().unwrap();
+                if params.contains_key("byte_limit") {
+                    assert!(!request.headers.contains_key("range"));
+                    let offset: u64 = params["byte_offset"].parse().unwrap();
+                    let limit: usize = params["byte_limit"].parse().unwrap();
+                    let start = if mode == 2 {
+                        offset.min(data.len() as u64) as usize
+                    } else {
+                        0
+                    };
+                    let end = if mode == 1 {
+                        start.saturating_add(limit).min(data.len())
+                    } else {
+                        data.len()
+                    };
+                    Reply::bytes(200, data[start..end].to_vec())
+                } else {
+                    assert!(request.headers.contains_key("range"));
+                    Reply::bytes(200, data.clone()).chunked()
+                }
+            });
+            let client = mock.client();
+            let first = client.trace(7, 42, 0).unwrap();
+            assert_eq!(first.text.as_bytes(), data.lock().unwrap().as_slice());
+            data.lock().unwrap().extend_from_slice(b"new\n");
+            let second = client.clone().trace(7, 42, first.next_offset).unwrap();
+            assert_eq!(second.text, "new\n");
+            assert!(!second.reset);
+            assert_eq!(second.next_offset, data.lock().unwrap().len() as u64);
+            let requests = mock.requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| r.target.contains("byte_limit"))
+                    .count(),
+                if mode == 1 || mode == 3 { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
+    fn trace_ignored_parameters_can_fall_back_to_partial_content() {
+        let mock = Mock::new(|request| {
+            if request.target.contains("byte_limit") {
+                return Reply::bytes(200, b"oldnew".to_vec());
+            }
+            if request.headers["range"].starts_with("bytes=0-") {
+                Reply::bytes(206, b"old".to_vec()).header("Content-Range", "bytes 0-2/6")
+            } else {
+                Reply::bytes(206, b"new".to_vec()).header("Content-Range", "bytes 3-5/6")
+            }
+        });
+        let client = mock.client();
+        let first = client.trace(7, 42, 0).unwrap();
+        assert_eq!(first.text, "old");
+        let second = client.trace(7, 42, first.next_offset).unwrap();
+        assert_eq!(second.text, "new");
+        assert_eq!(second.next_offset, 6);
+        assert!(!second.reset);
+        assert_eq!(mock.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn trace_empty_probe_does_not_cache_false_support() {
+        for supported in [false, true] {
+            let data = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let server_data = data.clone();
+            let mock = Mock::new(move |request| {
+                let params: HashMap<_, _> = request.url().query_pairs().into_owned().collect();
+                let data = server_data.lock().unwrap();
+                if supported && params.contains_key("byte_limit") {
+                    let offset: u64 = params["byte_offset"].parse().unwrap();
+                    let limit: usize = params["byte_limit"].parse().unwrap();
+                    let start = offset.min(data.len() as u64) as usize;
+                    Reply::bytes(
+                        200,
+                        data[start..start.saturating_add(limit).min(data.len())].to_vec(),
+                    )
+                } else {
+                    Reply::bytes(200, data.clone())
+                }
+            });
+            let client = mock.client();
+            assert!(client.trace(7, 42, 0).unwrap().text.is_empty());
+            assert_eq!(client.trace_byte_params.load(Ordering::Relaxed), 0);
+            data.lock().unwrap().extend_from_slice(b"hello");
+            assert_eq!(client.trace(7, 42, 0).unwrap().text, "hello");
+            assert_eq!(
+                client.trace_byte_params.load(Ordering::Relaxed),
+                if supported { 1 } else { 2 }
+            );
+        }
+    }
+
+    #[test]
+    fn trace_parameter_probe_falls_back_on_400_but_propagates_other_errors() {
+        let mock = Mock::new(|request| {
+            if request.target.contains("byte_limit") {
+                Reply::bytes(400, b"unsupported parameters".to_vec())
+            } else {
+                Reply::bytes(200, b"legacy".to_vec())
+            }
+        });
+        assert_eq!(mock.client().trace(7, 42, 0).unwrap().text, "legacy");
+        let rejects_offset = Mock::new(|request| {
+            if request
+                .target
+                .contains(&format!("byte_offset={}", i64::MAX))
+            {
+                Reply::bytes(400, Vec::new())
+            } else if request.target.contains("byte_limit") {
+                Reply::bytes(200, b"l".to_vec())
+            } else {
+                Reply::bytes(200, b"legacy".to_vec())
+            }
+        });
+        assert_eq!(
+            rejects_offset.client().trace(7, 42, 0).unwrap().text,
+            "legacy"
+        );
+        for status in [401, 403, 404, 429, 500] {
+            let mock = Mock::new(move |_| Reply::bytes(status, Vec::new()));
+            let client = mock.client();
+            let error = client.trace(7, 42, 0).unwrap_err();
+            assert_eq!(http_status(&error).unwrap().as_u16(), status);
+            assert_eq!(client.trace_byte_params.load(Ordering::Relaxed), 0);
+            assert_eq!(mock.requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn trace_parameter_reads_are_bounded_and_do_not_scan_large_prefixes() {
+        let mock = Mock::new(|request| {
+            let params: HashMap<_, _> = request.url().query_pairs().into_owned().collect();
+            assert_eq!(params["byte_offset"], (TRACE_SKIP_LIMIT + 1).to_string());
+            assert_eq!(params["byte_limit"], TRACE_BYTES.to_string());
+            Reply::bytes(200, b"tail".to_vec())
+        });
+        let client = mock.client();
+        client.trace_byte_params.store(1, Ordering::Relaxed);
+        let (bytes, start, reset) = client
+            .trace_bytes(
+                &client.url(&["projects", "7", "jobs", "42", "trace"]),
+                TRACE_SKIP_LIMIT + 1,
+                false,
+            )
+            .unwrap();
+        assert_eq!(bytes, b"tail");
+        assert_eq!(start, TRACE_SKIP_LIMIT + 1);
+        assert!(!reset);
+        let oversized = Mock::new(|_| Reply::bytes(200, vec![b'x'; TRACE_BYTES + 1]));
+        let client = oversized.client();
+        client.trace_byte_params.store(1, Ordering::Relaxed);
+        assert!(
+            client
+                .trace(7, 42, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds byte_limit")
+        );
+        let compressed =
+            Mock::new(|_| Reply::bytes(200, b"gzip".to_vec()).header("Content-Encoding", "gzip"));
+        assert!(
+            compressed
+                .client()
+                .trace(7, 42, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("compressed trace")
+        );
+    }
+
+    #[test]
     fn trace_byte_offsets_unicode_and_split_osc_sequences() {
         let chunks = [
             b"a\xc3".to_vec(),
@@ -2640,7 +2986,7 @@ mod tests {
             offset += bytes.len();
             Reply::bytes(206, bytes).header("Content-Range", &header)
         });
-        let client = mock.client();
+        let client = mock.legacy_trace_client();
         let first = client.trace(7, 42, 0).unwrap();
         assert_eq!(first.text, "a");
         assert_eq!(first.next_offset, 2);
@@ -2664,7 +3010,7 @@ mod tests {
             first = false;
             Reply::bytes(200, body)
         });
-        let client = mock.client();
+        let client = mock.legacy_trace_client();
         assert_eq!(client.trace(7, 42, 0).unwrap().text, "old");
         let chunk = client.trace(7, 42, 3).unwrap();
         assert_eq!(chunk.text, "énew\n");
@@ -2680,7 +3026,7 @@ mod tests {
             first = false;
             Reply::bytes(200, body)
         });
-        let client = short.client();
+        let client = short.legacy_trace_client();
         client.trace(7, 42, 0).unwrap();
         let chunk = client.trace(7, 42, 100).unwrap();
         assert!(chunk.reset);
@@ -2696,7 +3042,7 @@ mod tests {
             first = false;
             Reply::bytes(200, body).chunked()
         });
-        let client = chunked.client();
+        let client = chunked.legacy_trace_client();
         client.trace(7, 42, 0).unwrap();
         let chunk = client.trace(7, 42, 100).unwrap();
         assert!(chunk.reset);
@@ -2713,7 +3059,7 @@ mod tests {
                 Reply::bytes(416, Vec::new()).header("Content-Range", "bytes */3")
             }
         });
-        let client = mock.client();
+        let client = mock.legacy_trace_client();
         client.trace(7, 42, 0).unwrap();
         let eof = client.trace(7, 42, 3).unwrap();
         assert!(eof.text.is_empty());
@@ -2731,7 +3077,7 @@ mod tests {
         assert_eq!(start, 0);
         let bad = Mock::new(|_| Reply::bytes(416, Vec::new()));
         assert!(
-            bad.client()
+            bad.legacy_trace_client()
                 .trace(7, 42, 1)
                 .unwrap_err()
                 .to_string()
@@ -2742,7 +3088,7 @@ mod tests {
     #[test]
     fn trace_response_caps_and_range_validation() {
         let large = Mock::new(|_| Reply::bytes(200, vec![b'a'; TRACE_BYTES * 2]));
-        let chunk = large.client().trace(7, 42, 0).unwrap();
+        let chunk = large.legacy_trace_client().trace(7, 42, 0).unwrap();
         assert_eq!(chunk.text.len(), TRACE_BYTES);
         assert_eq!(chunk.next_offset, TRACE_BYTES as u64);
         let large_206 = Mock::new(|_| {
@@ -2752,11 +3098,16 @@ mod tests {
             )
         });
         assert_eq!(
-            large_206.client().trace(7, 42, 0).unwrap().text.len(),
+            large_206
+                .legacy_trace_client()
+                .trace(7, 42, 0)
+                .unwrap()
+                .text
+                .len(),
             TRACE_BYTES
         );
         let ignored = Mock::new(|_| Reply::bytes(200, vec![b'a'; 16]).chunked());
-        let client = ignored.client();
+        let client = ignored.legacy_trace_client();
         assert!(
             client
                 .trace_bytes(
@@ -2773,7 +3124,7 @@ mod tests {
         });
         assert!(
             invalid
-                .client()
+                .legacy_trace_client()
                 .trace(7, 42, 0)
                 .unwrap_err()
                 .to_string()
@@ -2783,7 +3134,7 @@ mod tests {
             Mock::new(|_| Reply::bytes(206, b"x".to_vec()).header("Content-Range", "bytes 0-3/4"));
         assert!(
             short
-                .client()
+                .legacy_trace_client()
                 .trace(7, 42, 0)
                 .unwrap_err()
                 .to_string()
@@ -2793,7 +3144,7 @@ mod tests {
             Mock::new(|_| Reply::bytes(200, b"gzip".to_vec()).header("Content-Encoding", "gzip"));
         assert!(
             encoded
-                .client()
+                .legacy_trace_client()
                 .trace(7, 42, 0)
                 .unwrap_err()
                 .to_string()
@@ -2988,7 +3339,7 @@ mod tests {
                 Reply::bytes(200, b"visible".to_vec())
             }
         });
-        let client = mock.client();
+        let client = mock.legacy_trace_client();
         let hidden = client.trace(7, 42, 0).unwrap();
         assert!(hidden.text.is_empty());
         assert_eq!(hidden.next_offset, 7);
@@ -3011,7 +3362,7 @@ mod tests {
             assert!(request.headers["range"].starts_with("bytes=0-"));
             Reply::bytes(200, b"\x1b]52;c;secret\x07safe".to_vec())
         });
-        let chunk = mock.client().trace(7, 42, 7).unwrap();
+        let chunk = mock.legacy_trace_client().trace(7, 42, 7).unwrap();
         assert!(chunk.reset);
         assert_eq!(chunk.text, "safe");
         assert_eq!(chunk.next_offset, 18);
@@ -3032,7 +3383,7 @@ mod tests {
                 Reply::bytes(200, b"other job".to_vec())
             }
         });
-        let client = mock.client();
+        let client = mock.legacy_trace_client();
         client.trace(7, 42, 0).unwrap();
         let state = client.traces.lock().unwrap()[0].clone();
         let guard = state.cursor.lock().unwrap();

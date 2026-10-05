@@ -652,8 +652,17 @@ impl Component for Cronk {
                 }
             }
             Msg::DialogSelect(index) => {
+                let themes = ctx
+                    .state
+                    .dialog
+                    .as_ref()
+                    .is_some_and(|dialog| matches!(dialog.kind, DialogKind::Themes));
                 if let Some(d) = &mut ctx.state.dialog {
                     d.selected = index;
+                    d.reveal_selection = true;
+                }
+                if themes {
+                    self.preview_theme(ctx);
                 }
             }
             Msg::DialogField(index) => {
@@ -1185,12 +1194,23 @@ impl Cronk {
         help: &str,
         fields: Vec<FormField>,
     ) {
+        let (selected, original_theme) = if matches!(kind, DialogKind::Themes) {
+            let original = ctx.state.config.theme.clone();
+            let selected = ["midnight", "dracula", "light"]
+                .iter()
+                .position(|theme| *theme == original)
+                .unwrap_or(0);
+            (selected, Some(original))
+        } else {
+            (0, None)
+        };
         ctx.state.dialog = Some(Dialog {
             kind,
             title: title.into(),
             help: help.into(),
             fields,
-            selected: 0,
+            original_theme,
+            selected,
             reveal_selection: true,
             error: None,
         });
@@ -1202,7 +1222,11 @@ impl Cronk {
                 "Waiting for GitLab to confirm the request; the draft is retained".into();
             return;
         }
-        ctx.state.dialog = None;
+        if let Some(dialog) = ctx.state.dialog.take()
+            && let Some(theme) = dialog.original_theme
+        {
+            ctx.state.config.theme = theme;
+        }
         ctx.blur();
     }
     fn dialog_error(&self, ctx: &mut Context<Self>, error: &str) {
@@ -1230,6 +1254,11 @@ impl Cronk {
         } else {
             ctx.state.dialog.as_ref().map_or(0, |d| d.fields.len())
         };
+        let themes = ctx
+            .state
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| matches!(dialog.kind, DialogKind::Themes));
         if let Some(d) = &mut ctx.state.dialog {
             d.reveal_selection = true;
             d.selected = d
@@ -1240,6 +1269,18 @@ impl Cronk {
                 let focus_key = format!("dialog-field-{}", d.selected);
                 ctx.request_focus(focus_key);
             }
+        }
+        if themes {
+            self.preview_theme(ctx);
+        }
+    }
+
+    fn preview_theme(&self, ctx: &mut Context<Self>) {
+        let Some(selected) = ctx.state.dialog.as_ref().map(|dialog| dialog.selected) else {
+            return;
+        };
+        if let Some(theme) = ["midnight", "dracula", "light"].get(selected) {
+            ctx.state.config.theme = (*theme).into();
         }
     }
 
@@ -1316,7 +1357,7 @@ impl Cronk {
             Action::Refresh => { self.close_dialog(ctx); return self.update(Msg::Refresh, ctx); }
             Action::Quit => { if self.persist(ctx) { ctx.quit(); } }
             Action::Help => self.show_dialog(ctx, DialogKind::Help, "Keyboard guide", "Esc returns to your workspace", vec![]),
-            Action::Themes => self.show_dialog(ctx, DialogKind::Themes, "Choose theme", "↑/↓ or Tab selects · Enter applies · config colors remain overrides", vec![]),
+            Action::Themes => self.show_dialog(ctx, DialogKind::Themes, "Choose theme", "↑/↓ or Tab previews · Enter applies · Esc reverts · config colors remain overrides", vec![]),
             Action::Filter => {
                 if ctx.state.scope != Scope::List || ctx.state.config.active_tab == 1 {
                     self.dialog_error(ctx, "Choose Dashboard, Issues, Merge Requests, or a saved list first");
@@ -1437,6 +1478,9 @@ impl Cronk {
             DialogKind::Themes => {
                 if let Some(theme) = ["midnight", "dracula", "light"].get(selected) {
                     ctx.state.config.theme = (*theme).into();
+                }
+                if let Some(dialog) = &mut ctx.state.dialog {
+                    dialog.original_theme = None;
                 }
                 self.close_dialog(ctx);
                 self.persist(ctx);

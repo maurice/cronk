@@ -1473,6 +1473,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                 label,
                 dialog.selected == index,
                 colors,
+                true,
             ));
         }
     } else if matches!(dialog.kind, DialogKind::Themes) {
@@ -1491,6 +1492,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                     &format!("{name:<10} {hint}"),
                     dialog.selected == index,
                     colors,
+                    false,
                 ))
                 .child(blank());
         }
@@ -1712,6 +1714,7 @@ fn dialog_option(
     label: &str,
     selected: bool,
     colors: Colors,
+    submit_on_click: bool,
 ) -> Element {
     let link = ctx.link().clone();
     click(
@@ -1726,8 +1729,12 @@ fn dialog_option(
             },
         ),
         move || {
-            link.send(Msg::DialogSelect(index));
-            Msg::Submit
+            if submit_on_click {
+                link.send(Msg::DialogSelect(index));
+                Msg::Submit
+            } else {
+                Msg::DialogSelect(index)
+            }
         },
     )
 }

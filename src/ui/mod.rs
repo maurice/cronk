@@ -108,6 +108,7 @@ pub struct Dialog {
     pub title: String,
     pub help: String,
     pub fields: Vec<FormField>,
+    pub original_theme: Option<String>,
     pub selected: usize,
     pub reveal_selection: bool,
     pub error: Option<String>,

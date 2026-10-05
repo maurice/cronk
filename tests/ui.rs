@@ -1010,6 +1010,46 @@ fn form_tab_cycles_real_focus_and_multiline_typing_does_not_trigger_shortcuts() 
 }
 
 #[test]
+fn theme_picker_starts_on_active_theme_previews_navigation_and_escape_reverts() {
+    let mut config = config();
+    config.theme = "dracula".into();
+    let mut ui = mount(config, None);
+
+    palette_command(&mut ui, "Choose theme");
+    assert!(matches!(dialog(&ui).kind, DialogKind::Themes));
+    assert_eq!(dialog(&ui).selected, 1);
+    assert_eq!(ui.state().config.theme, "dracula");
+
+    key(&mut ui, KeyCode::Down);
+    assert_eq!(dialog(&ui).selected, 2);
+    assert_eq!(ui.state().config.theme, "light");
+
+    key(&mut ui, KeyCode::Esc);
+    assert!(ui.state().dialog.is_none());
+    assert_eq!(ui.state().config.theme, "dracula");
+}
+
+#[test]
+fn theme_picker_enter_commits_live_preview_and_mouse_selection_does_not_submit() {
+    let mut ui = mount(config(), None);
+    palette_command(&mut ui, "Choose theme");
+
+    key(&mut ui, KeyCode::Down);
+    assert_eq!(ui.state().config.theme, "dracula");
+    key(&mut ui, KeyCode::Enter);
+    assert!(ui.state().dialog.is_none());
+    assert_eq!(ui.state().config.theme, "dracula");
+
+    palette_command(&mut ui, "Choose theme");
+    click_text(&mut ui, "Light", 0);
+    assert!(matches!(dialog(&ui).kind, DialogKind::Themes));
+    assert_eq!(dialog(&ui).selected, 2);
+    assert_eq!(ui.state().config.theme, "light");
+    key(&mut ui, KeyCode::Esc);
+    assert_eq!(ui.state().config.theme, "dracula");
+}
+
+#[test]
 fn palette_arrow_navigation_keeps_query_focus_and_runs_the_filtered_selection() {
     let mut ui = mount(config(), None);
     key(&mut ui, KeyCode::Char('P'));

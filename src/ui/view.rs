@@ -572,10 +572,7 @@ fn brand(state: &State, colors: Colors) -> Element {
         .style(Style::new().bg(colors.surface))
         .child(rich(
             vec![
-                Span::new("CRONK")
-                    .fg(colors.surface)
-                    .bg(colors.accent)
-                    .bold(),
+                Span::new("CRONK").fg(colors.accent).bold(),
                 Span::new(format!("   {mode}")).fg(colors.muted),
             ],
             Style::new(),

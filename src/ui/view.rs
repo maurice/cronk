@@ -1058,6 +1058,34 @@ fn detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
     detail_document(ctx, details, colors)
 }
 
+/// A `label  value` row with the label right-aligned in a `label_width` column
+/// and the value wrapping within its own column.
+fn field_row(
+    label: &str,
+    label_width: usize,
+    value: Vec<Span>,
+    label_color: Color,
+    style: Style,
+) -> Element {
+    HStack::new()
+        .style(style)
+        .height(Length::Auto)
+        .gap(2)
+        .child(
+            Text::new(format!("{label:>label_width$}"))
+                .width(Length::Px(label_width as u16))
+                .style(style.fg(label_color)),
+        )
+        .child(
+            Text::from_spans(value)
+                .width(Length::Flex(1))
+                .height(Length::Auto)
+                .overflow(Overflow::Wrap)
+                .style(style),
+        )
+        .into()
+}
+
 fn metadata(label: &str, value: impl Into<String>, colors: Colors) -> Element {
     let value = value.into();
     HStack::new()
@@ -1386,17 +1414,44 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
             },
             &item.state,
         ),
-        metadata(
-            "Project path",
-            ctx.state
-                .project(details.item.key.project)
-                .map_or_else(|| details.item.key.project.to_string(), |p| p.path.clone()),
-            colors,
-        )
-        .into(),
         blank().into(),
     ];
-    for (index, (label, _, value)) in ctx.state.fields().into_iter().enumerate() {
+    let editable = ctx.state.fields();
+    let mut readonly = vec![
+        ("Project path", {
+            ctx.state
+                .project(details.item.key.project)
+                .map_or_else(|| details.item.key.project.to_string(), |p| p.path.clone())
+        }),
+        ("Author", ctx.state.render_user(&item.author)),
+        ("Updated", item.updated_at.clone()),
+    ];
+    if item.key.kind == ItemKind::MergeRequest {
+        readonly.push((
+            "Branches",
+            format!("{} → {}", item.source_branch, item.target_branch),
+        ));
+        readonly.push((
+            "Review",
+            format!(
+                "{} discussions · {} unresolved · {} changed files",
+                details.discussions.len(),
+                item.unresolved
+                    .map_or_else(|| "unknown".into(), |n| n.to_string()),
+                details.diffs.len()
+            ),
+        ));
+    }
+    readonly.push(("Web URL", item.web_url.clone()));
+    // One label column shared by editable and readonly rows so values align.
+    let label_width = editable
+        .iter()
+        .map(|(label, _, _)| *label)
+        .chain(readonly.iter().map(|(label, _)| *label))
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (index, (label, _, value)) in editable.into_iter().enumerate() {
         let selected = ctx.state.scope == Scope::Section
             && ctx.state.section_name() == "Fields"
             && ctx.state.config.field == index;
@@ -1406,85 +1461,50 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
             colors.base()
         };
         let style = interaction::style(ctx, &format!("edit-field-{index}"), style);
-        let mut spans = vec![Span::new(format!("{label:<19} ")).fg(colors.accent)];
-        if label == "Labels" {
-            spans.extend(label_spans(&details.item.labels, colors));
-        } else if label == "Assignees" {
-            let users = details
-                .item
-                .assignees
-                .iter()
-                .map(|user| ctx.state.render_user(user))
-                .collect::<Vec<_>>()
-                .join(", ");
-            spans.push(Span::new(if users.is_empty() { "—" } else { &users }));
-        } else if label == "Reviewers" {
-            let users = details
-                .item
-                .reviewers
-                .iter()
-                .map(|user| ctx.state.render_user(user))
-                .collect::<Vec<_>>()
-                .join(", ");
-            spans.push(Span::new(if users.is_empty() { "—" } else { &users }));
+        let value_spans = if label == "Labels" && !details.item.labels.is_empty() {
+            label_spans(&details.item.labels, colors)
         } else {
-            spans.push(Span::new(if value.is_empty() {
-                "—".into()
-            } else {
-                value
-            }));
-        }
+            let users = |users: &[User]| {
+                users
+                    .iter()
+                    .map(|user| ctx.state.render_user(user))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let text = match label {
+                "Assignees" => users(&details.item.assignees),
+                "Reviewers" => users(&details.item.reviewers),
+                _ => value,
+            };
+            vec![Span::new(if text.is_empty() { "—".into() } else { text })]
+        };
         content.push(DetailRow::interactive(
             format!("edit-field-{index}"),
-            VStack::new()
-                .height(Length::Auto)
-                .style(style)
-                .child(
-                    Text::from_spans(spans)
-                        .width(Length::Flex(1))
-                        .height(Length::Auto)
-                        .overflow(Overflow::Wrap)
-                        .style(style),
-                )
-                .child(line(
-                    if selected {
-                        "   Enter or click to edit"
-                    } else {
-                        ""
-                    },
-                    Style::new().fg(colors.muted),
-                )),
+            field_row(label, label_width, value_spans, colors.accent, style),
             selected,
             move || Msg::Field(index),
         ));
     }
-    content.push(metadata("Author", ctx.state.render_user(&item.author), colors).into());
-    content.push(metadata("Updated", item.updated_at.clone(), colors).into());
-    if item.key.kind == ItemKind::MergeRequest {
+    if !readonly.is_empty() {
+        content.push(blank().into());
+    }
+    for (label, value) in readonly {
+        let value = if value.is_empty() {
+            "—".into()
+        } else {
+            value
+        };
         content.push(
-            metadata(
-                "Branches",
-                format!("{} → {}", item.source_branch, item.target_branch),
-                colors,
-            )
-            .into(),
-        );
-        content.push(
-            metadata(
-                "Review",
-                format!(
-                    "{} discussions · {} unresolved · {} changed files",
-                    details.discussions.len(),
-                    item.unresolved
-                        .map_or_else(|| "unknown".into(), |n| n.to_string()),
-                    details.diffs.len()
-                ),
-                colors,
+            field_row(
+                label,
+                label_width,
+                vec![Span::new(value)],
+                colors.muted,
+                colors.base(),
             )
             .into(),
         );
     }
-    content.push(metadata("Web URL", item.web_url.clone(), colors).into());
     for warning in &details.warnings {
         content.push(
             DetailRow::from(

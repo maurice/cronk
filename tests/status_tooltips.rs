@@ -186,7 +186,12 @@ fn detail_padding_and_status_slots_align_with_lists_in_every_theme() {
             assert_eq!(frame.cell(1, item_dot.y as u16).symbol, " ");
             assert_eq!(frame.cell(3, item_dot.y as u16).symbol, " ");
             let title = rect(&ui, "edit-field-0");
-            assert_eq!(frame.cell(4, title.y as u16).symbol, "T");
+            // Labels are right-aligned in a shared column, so the first glyph is "T"
+            // of "Title" somewhere after the detail padding.
+            let first = (4..40)
+                .map(|x| frame.cell(x, title.y as u16).symbol.clone())
+                .find(|symbol| symbol != " ");
+            assert_eq!(first.as_deref(), Some("T"));
             assert_tooltip(
                 &mut ui,
                 "detail-item-status",

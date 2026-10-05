@@ -311,7 +311,7 @@ fn detail_sections_have_continuous_highlights_and_contract_to_focused_fields() {
                 assert_eq!(frame.cell(focused.0, focused.1).fg, accent);
                 assert_eq!(frame.cell(focused.0, focused.1).bg, base);
                 assert_eq!(frame.cell(focused.0 + 1, focused.1).bg, selection);
-                assert_eq!(frame.cell(ui.viewport().w - 3, focused.1 + 1).bg, selection);
+                assert_eq!(frame.cell(ui.viewport().w - 3, focused.1).bg, selection);
                 for (x, pill) in pills {
                     assert_eq!(
                         frame.cell(x, label_y),

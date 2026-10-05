@@ -1101,7 +1101,7 @@ fn detail_section_navigation_uses_boundary_scrolling_in_both_directions() {
 #[test]
 fn focused_detail_items_use_the_same_boundary_band_and_preserve_it_on_reversal() {
     for screen in [Screen::Issue, Screen::MergeRequest] {
-        for (width, height) in [(120, 26), (40, 18)] {
+        for (width, height) in [(120, 18), (40, 18)] {
             let (mut ui, viewport_key) = detail_mount(screen, "midnight", width, height);
             let area = detail_area(&ui, &viewport_key);
             let sections: &[usize] = if matches!(screen, Screen::Issue) {
@@ -1159,7 +1159,7 @@ fn focused_detail_items_use_the_same_boundary_band_and_preserve_it_on_reversal()
                     );
                     assert!(
                         scrolled_at_boundary,
-                        "Fields never scrolled at the band boundary"
+                        "Fields never scrolled at the band boundary: {screen:?} {width}x{height}"
                     );
                 }
                 key(&mut ui, KeyCode::Esc);

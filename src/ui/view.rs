@@ -832,6 +832,10 @@ fn work_row(
     title.push(Span::new(item.title.clone()).bold());
     let mut labels = vec![Span::new("   ")];
     labels.extend(label_spans(&item.labels, colors));
+    if !item.labels.is_empty() {
+        // Keep the labels apart from the pipeline dot that follows them.
+        labels.push(Span::new(" "));
+    }
     let mut labels_line = HStack::new()
         .height(Length::Px(1))
         .style(style)

@@ -4,7 +4,7 @@ use cronk::{
     config::{Config, SavedView},
     demo,
     model::{Details, Diff, Discussion, ItemKind, Job, Note, Pipeline},
-    scroll::BoundaryScroll,
+    scroll::{BoundaryScroll, reveal_span},
     ui::{Cronk, DialogKind, Msg, Scope, Trace, list_height_for_tab, list_row_height},
 };
 use tui_lipan::{
@@ -1008,26 +1008,48 @@ fn detail_keyboard_selects_and_reveals_headers_on_short_and_narrow_terminals() {
 
 fn assert_detail_boundary(ui: &Ui, area: Rect, target: &str, previous_offset: usize) {
     let cursor = rect(ui, target);
-    let document_row = i32::from(cursor.y) - i32::from(area.y) + ui.state().content_offset as i32;
+    let offset = ui.state().content_offset;
+    let len = ui.state().content_max_offset + area.h as usize;
+    let document_row = i32::from(cursor.y) - i32::from(area.y) + offset as i32;
     assert!(document_row >= 0);
-    let mut expected = BoundaryScroll {
-        selected: document_row as usize,
-        offset: previous_offset,
+    let top = document_row as usize;
+    // Section spans run to the next header (which includes the gap row); items
+    // get their own height plus a one-row gap.
+    let end = match target
+        .strip_prefix("detail-section-")
+        .map(str::parse::<usize>)
+    {
+        Some(Ok(index)) => {
+            let next = format!("detail-section-{}", index + 1);
+            match ui.rect_of_key(&next.into()) {
+                Some(next) => {
+                    Some((i32::from(next.y) - i32::from(area.y) + offset as i32) as usize)
+                }
+                None if index + 1 == ui.state().sections().len() => Some(len),
+                None => None,
+            }
+        }
+        _ => Some(top + cursor.h as usize + 1),
     };
-    expected.normalize(
-        ui.state().content_max_offset + area.h as usize,
-        area.h as usize,
-    );
+    let expected = reveal_span(previous_offset, top, end, len, area.h as usize);
     assert_eq!(
-        ui.state().content_offset,
-        expected.offset,
-        "{target} must use the quarter-viewport cursor band, not top alignment: area={area:?}, cursor={cursor:?}, previous={previous_offset}, document_row={document_row}, max={}",
+        offset,
+        expected,
+        "{target} must use the quarter-viewport band plus full-item reveal: area={area:?}, cursor={cursor:?}, previous={previous_offset}, top={top}, end={end:?}, max={}",
         ui.state().content_max_offset
     );
     assert!(
         cursor.y >= area.y && cursor.y < area.y + area.h as i16,
         "{target} cursor is offscreen: {cursor:?}"
     );
+    // The item is fully visible with its gap whenever that does not hide its top.
+    if let Some(end) = end {
+        let visible_end = offset + area.h as usize;
+        assert!(
+            end <= visible_end || offset == top || visible_end >= len,
+            "{target} should be revealed as far as the viewport allows"
+        );
+    }
 }
 
 #[test]

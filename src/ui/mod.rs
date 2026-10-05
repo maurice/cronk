@@ -20,6 +20,48 @@ use std::{
 };
 use tui_lipan::prelude::*;
 
+/// Row of a section header key (`detail-section-N`), as opposed to its rows or gap.
+fn is_section_header(key: &str) -> bool {
+    key.strip_prefix("detail-section-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Measure a detail target in content rows: `(top, end)` where `end` is exclusive
+/// and includes a one-row gap. A section header spans to the next header (the
+/// section's gap row is part of it). `end` is `None` when the extent lies beyond
+/// the visible children, or when the target is not visible at all (`None` result).
+pub(super) fn detail_span(
+    event: &ScrollViewportEvent,
+    target: &str,
+) -> Option<(usize, Option<usize>)> {
+    let position = event
+        .visible
+        .iter()
+        .position(|child| child.key.as_ref().is_some_and(|key| key.as_ref() == target))?;
+    let child = &event.visible[position];
+    let top = child.content_rect.y.max(0) as usize;
+    let bottom = |child: &ScrollVisibleChild| {
+        (child.content_rect.y.max(0) as usize).saturating_add(child.content_rect.h as usize)
+    };
+    if !is_section_header(target) {
+        return Some((top, Some(bottom(child) + 1)));
+    }
+    let next_header = event.visible[position + 1..].iter().find(|child| {
+        child
+            .key
+            .as_ref()
+            .is_some_and(|key| is_section_header(key.as_ref()))
+    });
+    let end = match next_header {
+        Some(next) => Some(next.content_rect.y.max(0) as usize),
+        None if event.last_visible_index == event.children_len.checked_sub(1) => {
+            event.visible.last().map(bottom)
+        }
+        None => None,
+    };
+    Some((top, end))
+}
+
 pub struct Cronk {
     pub config: Config,
     pub path: Option<PathBuf>,

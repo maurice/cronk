@@ -73,6 +73,31 @@ impl BoundaryScroll {
     }
 }
 
+/// Offset for revealing a variable-height item whose first row is `top`.
+///
+/// The item's first row follows the quarter-viewport cursor band. The offset is
+/// then increased so that the item's last row plus `end` (an exclusive row,
+/// already including any trailing gap) is visible, but never past `top`: an
+/// item taller than the viewport shows its top. `end == None` means the extent
+/// is unknown but exceeds the viewport, so the item is top-aligned.
+pub fn reveal_span(
+    offset: usize,
+    top: usize,
+    end: Option<usize>,
+    len: usize,
+    height: usize,
+) -> usize {
+    let mut band = BoundaryScroll {
+        selected: top,
+        offset,
+    };
+    band.normalize(len, height);
+    let height = height.max(1);
+    let needed = end.map_or(top, |end| end.min(len).saturating_sub(height));
+    let max_offset = len.saturating_sub(height);
+    band.offset.max(needed).min(top).min(max_offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +514,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn reveal_span_shows_whole_items_that_fit_and_tops_of_those_that_do_not() {
+        // Cursor band for height 8 is rows 2..=5 of the viewport.
+        assert_eq!(reveal_span(0, 3, Some(6), 40, 8), 0);
+        // A 6-row item plus gap starting inside the band is pulled fully into view.
+        assert_eq!(reveal_span(0, 5, Some(12), 40, 8), 4);
+        // Taller than the viewport: top aligned, never past the item's top.
+        assert_eq!(reveal_span(0, 5, Some(40), 60, 8), 5);
+        assert_eq!(reveal_span(0, 5, None, 60, 8), 5);
+        // Moving up keeps the band and still prefers the top.
+        assert_eq!(reveal_span(20, 10, Some(30), 60, 8), 10);
+        assert_eq!(reveal_span(20, 10, Some(14), 60, 8), 8);
+        // Never beyond the scrollable range.
+        assert_eq!(reveal_span(0, 38, Some(50), 40, 8), 32);
     }
 }

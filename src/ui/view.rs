@@ -1273,19 +1273,20 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
             .as_ref()
             .filter(|(route, _)| *route == details.item.key)
             .and_then(|(_, event)| {
-                event
-                    .visible
-                    .iter()
-                    .find(|child| child.key.as_ref() == Some(&target.clone().into()))
-                    .map(|child| (child.content_rect.y.max(0) as usize, event.metrics))
+                // Without a known end the extent needs a layout pass (below).
+                let (top, end) = super::detail_span(event, &target)?;
+                end.map(|end| {
+                    crate::scroll::reveal_span(
+                        origin,
+                        top,
+                        Some(end),
+                        event.metrics.len,
+                        event.metrics.visible,
+                    )
+                })
             });
-        if let Some((selected, metrics)) = measured {
-            let mut boundary = crate::scroll::BoundaryScroll {
-                selected,
-                offset: origin,
-            };
-            boundary.normalize(metrics.len, metrics.visible);
-            scroll = scroll.offset(boundary.offset);
+        if let Some(offset) = measured {
+            scroll = scroll.offset(offset);
         } else {
             // Unseen targets need a layout pass. The viewport callback then applies
             // the quarter-page band using actual wrapped heights and the original offset.

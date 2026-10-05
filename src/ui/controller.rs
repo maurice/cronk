@@ -665,20 +665,16 @@ impl Component for Cronk {
                 let navigation = target.is_some() && ctx.state.reveal_content;
                 let offset = if navigation {
                     target
-                        .as_ref()
-                        .and_then(|key| {
-                            event
-                                .visible
-                                .iter()
-                                .find(|child| child.key.as_ref() == Some(&key.clone().into()))
-                        })
-                        .map_or(event.offset, |child| {
-                            let mut scroll = BoundaryScroll {
-                                selected: child.content_rect.y.max(0) as usize,
-                                offset: origin,
-                            };
-                            scroll.normalize(event.metrics.len, event.metrics.visible);
-                            scroll.offset
+                        .as_deref()
+                        .and_then(|key| super::detail_span(&event, key))
+                        .map_or(event.offset, |(top, end)| {
+                            crate::scroll::reveal_span(
+                                origin,
+                                top,
+                                end,
+                                event.metrics.len,
+                                event.metrics.visible,
+                            )
                         })
                 } else {
                     event.offset

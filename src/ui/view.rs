@@ -33,18 +33,21 @@ struct Colors {
 
 impl Colors {
     fn new(config: &Config) -> Self {
+        // Blue keeps the demo area-label hue (#1f78d1). Its OKLab lightness targets
+        // the midpoint of red/green, reducing chroma only to fit sRGB. The light
+        // theme is slightly darker to retain >= 4.5:1 contrast on selection fill.
         let values = match config.theme.as_str() {
             "dracula" => [
                 0x282a36, 0x21222c, 0x44475a, 0xf8f8f2, 0xa5a8c0, 0xbd93f9, 0x50fa7b, 0xf1fa8c,
-                0xff5555, 0x1f78d1, 0xff79c6,
+                0xff5555, 0x7fbaff, 0xff79c6,
             ],
             "light" => [
                 0xf7f8fc, 0xeceff6, 0xdce5fa, 0x24283b, 0x626b83, 0x5746bd, 0x187348, 0x946200,
-                0xc2354b, 0x1f78d1, 0x9146ae,
+                0xc2354b, 0x0066bc, 0x9146ae,
             ],
             _ => [
                 0x101521, 0x192131, 0x293654, 0xe5eaf5, 0x96a3bc, 0x9b9fff, 0x63dba5, 0xf0c674,
-                0xff758f, 0x1f78d1, 0xc69cf4,
+                0xff758f, 0x7bb8ff, 0xc69cf4,
             ],
         };
         let c = &config.colors;
@@ -2704,6 +2707,72 @@ const HELP: &str = "\
 mod tests {
     use super::*;
 
+    fn linear_rgb(color: Color) -> [f64; 3] {
+        let (r, g, b) = color.to_rgb().unwrap();
+        [r, g, b].map(|channel| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    }
+
+    fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+        let luminance = |color| {
+            let [r, g, b] = linear_rgb(color);
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        };
+        let fg = luminance(foreground);
+        let bg = luminance(background);
+        (fg.max(bg) + 0.05) / (fg.min(bg) + 0.05)
+    }
+
+    fn oklab(color: Color) -> [f64; 3] {
+        let [r, g, b] = linear_rgb(color);
+        let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
+        let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
+        let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
+        [
+            0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+        ]
+    }
+
+    #[test]
+    fn blue_balances_status_lightness_preserves_hue_and_has_readable_contrast() {
+        let source = oklab(Color::hex_u24(0x1f78d1));
+        let source_hue = source[2].atan2(source[1]);
+        for theme in ["midnight", "dracula", "light"] {
+            let colors = Colors::new(&Config {
+                theme: theme.into(),
+                ..Config::default()
+            });
+            let [lightness, a, b] = oklab(colors.blue);
+            let target = (oklab(colors.green)[0] + oklab(colors.red)[0]) / 2.0;
+            assert!(
+                (lightness - target).abs() < 0.015,
+                "{theme}: L={lightness}, target={target}"
+            );
+            assert!(
+                (b.atan2(a) - source_hue).abs() < 0.05,
+                "{theme}: blue hue drift"
+            );
+            for background in [colors.background, colors.surface, colors.selection] {
+                let contrast = contrast_ratio(colors.blue, background);
+                assert!(contrast >= 4.5, "{theme}: blue contrast {contrast:.2}:1");
+            }
+            if theme != "light" {
+                let blue = contrast_ratio(colors.blue, colors.background);
+                let red = contrast_ratio(colors.red, colors.background);
+                let green = contrast_ratio(colors.green, colors.background);
+                assert!(blue >= red.min(green) && blue <= red.max(green));
+            }
+        }
+    }
+
     #[test]
     fn running_and_pending_status_styles_in_every_theme() {
         for theme in ["midnight", "dracula", "light"] {
@@ -2711,17 +2780,15 @@ mod tests {
                 theme: theme.into(),
                 ..Config::default()
             });
-            let area_label_blue = Color::hex_u24(0x1f78d1);
-            assert_eq!(colors.blue, area_label_blue);
-            assert_eq!(colors.status("running"), ('◐', area_label_blue));
-            assert_eq!(
-                colors.theme().document.link.fg,
-                Some(area_label_blue.into())
-            );
-            assert_eq!(
-                colors.theme().document.code_inline.fg,
-                Some(area_label_blue.into())
-            );
+            let blue = Color::hex_u24(match theme {
+                "dracula" => 0x7fbaff,
+                "light" => 0x0066bc,
+                _ => 0x7bb8ff,
+            });
+            assert_eq!(colors.blue, blue);
+            assert_eq!(colors.status("running"), ('◐', blue));
+            assert_eq!(colors.theme().document.link.fg, Some(blue.into()));
+            assert_eq!(colors.theme().document.code_inline.fg, Some(blue.into()));
             let neutral = Color::hex_u24(if theme == "light" { 0x626262 } else { 0xc7c7c7 });
             for status in ["pending", "created", "waiting_for_resource", "preparing"] {
                 assert_eq!(colors.status(status), ('○', neutral));

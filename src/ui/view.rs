@@ -547,7 +547,7 @@ fn work_row(
         let roles = item.dashboard_roles(state.user.id);
         attention.push(Span::new("    Why: ").fg(colors.muted));
         attention
-            .push(Span::new(item.attention_reasons(state.user.id).join(" · ")).fg(colors.muted));
+            .push(Span::new(item.attention_reasons(state.user.id).join(" · ")).fg(colors.accent));
         if !roles.is_empty() {
             attention.push(Span::new("  ·  You: ").fg(colors.muted));
             attention.push(Span::new(roles.join(" + ")).fg(colors.accent));

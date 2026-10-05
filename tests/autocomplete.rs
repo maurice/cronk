@@ -98,6 +98,61 @@ fn option(id: u64, name: &str, value: &str) -> LookupOption {
 }
 
 #[test]
+fn suggestions_use_full_height_selection_edges_and_row_fill() {
+    for field in [2, 3, 4, 5] {
+        assert_suggestion_selection(field);
+    }
+}
+
+fn assert_suggestion_selection(field: usize) {
+    let mut ui = mount(ItemKind::Issue, field);
+    // Distinct overrides make the edge and row fill unambiguous in every cell.
+    ui.state_mut().config.colors.surface = Some("#111213".into());
+    ui.state_mut().config.colors.selection = Some("#212223".into());
+    ui.state_mut().config.colors.accent = Some("#515253".into());
+    replace(&mut ui, "Suggestion");
+    let epoch = completion(&ui).epoch;
+    let mut options = vec![
+        option(51, "Suggestion one", "one"),
+        option(52, "Suggestion two", "two"),
+    ];
+    if field == 2 {
+        for option in &mut options {
+            option.color = "#123456".into();
+            option.text_color = "#abcdef".into();
+        }
+    }
+    ui.dispatch(Msg::LookupLoaded(epoch, 0, Ok(options)))
+        .unwrap();
+    settle(&mut ui);
+    for selected in [0, 1] {
+        if selected == 1 {
+            key(&mut ui, KeyCode::Down);
+        }
+        let c = completion(&ui);
+        assert_eq!(c.selected, selected);
+        let rect = ui
+            .rect_of_key(&format!("lookup-0-{}", c.options[selected].id).into())
+            .unwrap();
+        let frame = ui.capture_frame();
+        let x = u16::try_from(rect.x).unwrap();
+        let top = u16::try_from(rect.y).unwrap();
+        for y in top..top + rect.h {
+            let edge = frame.cell(x, y);
+            assert_eq!(edge.symbol, "▕");
+            assert_eq!(edge.bg, Color::hex_u24(0x111213));
+            assert_eq!(edge.fg, Color::hex_u24(0x515253));
+            assert_eq!(frame.cell(x + rect.w - 2, y).bg, Color::hex_u24(0x212223));
+        }
+        if c.kind == LookupKind::Labels {
+            let option = &c.options[selected];
+            let color = u32::from_str_radix(option.color.trim_start_matches('#'), 16).unwrap();
+            assert_eq!(frame.cell(x + 3, top).bg, Color::hex_u24(color));
+        }
+    }
+}
+
+#[test]
 fn people_complete_trimmed_comma_tokens_without_submitting_or_losing_previous_values() {
     let mut ui = mount(ItemKind::Issue, 3);
     assert_eq!(value(&ui), "@demo-arin");

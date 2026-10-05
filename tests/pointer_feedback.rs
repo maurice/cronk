@@ -76,8 +76,10 @@ fn point(ui: &Ui, key: &str) -> (u16, u16) {
 fn assert_hover(ui: &mut Ui, key: &str) {
     mouse(ui, 0, 0, MouseKind::Moved);
     let (mut x, y) = point(ui, key);
-    // Detail controls reserve their first column for the background-free edge.
-    if key.starts_with("detail-section-")
+    // Selectable rows reserve their first column for the background-free edge.
+    if (key.starts_with("project-") && !key.starts_with("project-visible-"))
+        || key.starts_with("dialog-option-")
+        || key.starts_with("detail-section-")
         || key.starts_with("edit-field-")
         || key.starts_with("job-")
         || key.starts_with("discussion-")

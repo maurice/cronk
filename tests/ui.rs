@@ -1011,6 +1011,55 @@ fn form_tab_cycles_real_focus_and_multiline_typing_does_not_trigger_shortcuts() 
 }
 
 #[test]
+fn palette_theme_and_project_rows_share_selection_edges() {
+    let mut config = config();
+    config.colors.background = Some("#010203".into());
+    config.colors.surface = Some("#111213".into());
+    config.colors.selection = Some("#212223".into());
+    config.colors.accent = Some("#515253".into());
+    let mut ui = mount(config, None);
+    key(&mut ui, KeyCode::Char('P'));
+    let project = ui.state().config.projects[0].id;
+    let rect = ui
+        .rect_of_key(&format!("project-{project}").into())
+        .unwrap();
+    let frame = ui.capture_frame();
+    let x = u16::try_from(rect.x).unwrap();
+    let top = u16::try_from(rect.y).unwrap();
+    for y in top..top + 2 {
+        assert_eq!(frame.cell(x, y).symbol, "▕");
+        assert_eq!(frame.cell(x, y).bg, Color::hex_u24(0x010203));
+        assert_eq!(frame.cell(x + rect.w - 2, y).bg, Color::hex_u24(0x212223));
+    }
+    assert_eq!(frame.cell(x, top + 2).symbol, " ");
+
+    modified(&mut ui, KeyCode::Char('p'), KeyMods::CTRL);
+    ui.send_paste("theme").unwrap();
+    for themes in [false, true] {
+        if themes {
+            key(&mut ui, KeyCode::Enter);
+            assert!(matches!(dialog(&ui).kind, DialogKind::Themes));
+        }
+        for selected in 0..=usize::from(themes) {
+            if selected == 1 {
+                key(&mut ui, KeyCode::Down);
+            }
+            let rect = ui
+                .rect_of_key(&format!("dialog-option-{selected}").into())
+                .unwrap();
+            let frame = ui.capture_frame();
+            let x = u16::try_from(rect.x).unwrap();
+            let y = u16::try_from(rect.y).unwrap();
+            assert_eq!(frame.cell(x, y).symbol, "▕");
+            assert_eq!(frame.cell(x, y).fg, Color::hex_u24(0x515253));
+            assert_eq!(frame.cell(x, y).bg, Color::hex_u24(0x111213));
+            assert_eq!(frame.cell(x + rect.w - 2, y).bg, Color::hex_u24(0x212223));
+            assert!(!frame.to_lines()[rect.y as usize].contains('›'));
+        }
+    }
+}
+
+#[test]
 fn theme_picker_starts_on_active_theme_previews_navigation_and_escape_reverts() {
     let mut config = config();
     config.theme = "dracula".into();
@@ -2742,11 +2791,11 @@ fn small_project_viewport_snapshot() {
             "  Projects",
             "  5 PROJECTS   Space toggles visibility · Ent…",
             "",
-            " [x] Orbit scheduler · DEMO          8 items   █",
-            "     demo-lab/constellation/platform/runtime/… █",
+            "▕ [x] Orbit scheduler · DEMO         8 items   █",
+            "▕     demo-lab/constellation/platform/runtime… █",
             "                                               ▀",
-            " [x] Meteor cache · DEMO             8 items",
-            "     demo-lab/constellation/platform/storage/…",
+            "  [x] Meteor cache · DEMO            8 items",
+            "      demo-lab/constellation/platform/storage…",
             "",
             " LIST   DEMO  Demo workspace · no requests or r…",
             " D/P/I/M tabs   1–0 views   ↑ ↓ move   Enter op…",

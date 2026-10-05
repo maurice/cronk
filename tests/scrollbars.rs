@@ -1732,7 +1732,7 @@ fn palette_selection_visible(ui: &Ui, selected: usize) {
     dialog_target_visible(ui, &format!("dialog-option-{selected}"));
     let label = ui.state().command_options()[selected].0;
     assert!(
-        content(ui, rect(ui, "dialog-scroll")).contains(&format!("› {label}")),
+        content(ui, rect(ui, "dialog-scroll")).contains(&format!("▕  {label}")),
         "the selected command must be visibly painted, not just present in the tree: {label}"
     );
 }

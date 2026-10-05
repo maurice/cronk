@@ -786,9 +786,18 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
 
 /// Keep the selection edge on the normal canvas, outside the row's selection/hover fill.
 fn list_selection_line(content: impl Into<Element>, selected: bool, colors: Colors) -> Element {
+    selection_line(content, selected, colors, colors.base())
+}
+
+fn selection_line(
+    content: impl Into<Element>,
+    selected: bool,
+    colors: Colors,
+    style: Style,
+) -> Element {
     HStack::new()
         .height(Length::Px(1))
-        .style(colors.base())
+        .style(style)
         .child(
             Text::new(if selected { "▕" } else { " " })
                 .width(Length::Px(1))
@@ -955,28 +964,33 @@ fn project_row(
         .child(checkbox)
         .child(line(project_name(state, project.id), style.bold()))
         .child(Text::new(format!("{count} items  ")).style(Style::new().fg(colors.muted)));
+    let marked = selected && state.scope == Scope::List;
     click(
         ctx,
         format!("project-{}", project.id),
         VStack::new()
             .height(Length::Px(3))
             .style(colors.base())
-            .child(top)
-            .child(rich(
-                vec![
-                    Span::new(format!("     {}  ·  ", project.path)).fg(colors.muted),
-                    Span::new(if project.visible {
-                        "visible"
-                    } else {
-                        "hidden from work lists"
-                    })
-                    .fg(if project.visible {
-                        colors.green
-                    } else {
-                        colors.muted
-                    }),
-                ],
-                style,
+            .child(list_selection_line(top, marked, colors))
+            .child(list_selection_line(
+                rich(
+                    vec![
+                        Span::new(format!("     {}  ·  ", project.path)).fg(colors.muted),
+                        Span::new(if project.visible {
+                            "visible"
+                        } else {
+                            "hidden from work lists"
+                        })
+                        .fg(if project.visible {
+                            colors.green
+                        } else {
+                            colors.muted
+                        }),
+                    ],
+                    style,
+                ),
+                marked,
+                colors,
             ))
             .child(blank()),
         move || Msg::Activate(index),
@@ -2485,75 +2499,12 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
             }))
             .into();
     }
-    let mut rows = Vec::new();
-    for (option_index, option) in c.options.iter().enumerate() {
-        let style = if c.selected == option_index {
-            colors.selected()
-        } else {
-            Style::new().fg(colors.foreground).bg(colors.surface)
-        };
-        let style = interaction::style(ctx, &format!("lookup-{index}-{}", option.id), style);
-        let epoch = c.epoch;
-        let header: Element = if c.kind == LookupKind::Labels {
-            let label = Label {
-                name: option.label.clone(),
-                color: option.color.clone(),
-                text_color: option.text_color.clone(),
-            };
-            let mut spans = vec![
-                Span::new(format!(
-                    " {} ",
-                    if c.selected == option_index {
-                        "›"
-                    } else {
-                        " "
-                    }
-                ))
-                .style(style),
-            ];
-            if option.color.is_empty() {
-                spans.push(Span::new(option.label.clone()).style(style));
-            } else {
-                spans.push(label_pill_span(&label, colors));
-            }
-            Text::from_spans(spans)
-                .width(Length::Flex(1))
-                .height(Length::Px(1))
-                .style(style)
-                .into()
-        } else {
-            line(
-                format!(
-                    " {} {}",
-                    if c.selected == option_index {
-                        "›"
-                    } else {
-                        " "
-                    },
-                    if c.kind == LookupKind::Users {
-                        ctx.state.user_formatter.render_lookup(option)
-                    } else {
-                        option.label.clone()
-                    }
-                ),
-                style,
-            )
-            .into()
-        };
-        rows.push(click(
-            ctx,
-            format!("lookup-{index}-{}", option.id),
-            VStack::new()
-                .height(Length::Px(2))
-                .style(style)
-                .child(header)
-                .child(line(
-                    format!("   {}", option.description),
-                    style.fg(colors.muted),
-                )),
-            move || Msg::LookupAccept(index, epoch, option_index),
-        ));
-    }
+    let rows = c
+        .options
+        .iter()
+        .enumerate()
+        .map(|(option_index, _)| completion_row(ctx, index, c, option_index, colors))
+        .collect::<Vec<_>>();
     let mut choices = ScrollView::new()
         .height(Length::Px((ctx.viewport().h / 4).clamp(2, 8)))
         .scrollbar(true)
@@ -2589,6 +2540,80 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
         .into()
 }
 
+fn completion_row(
+    ctx: &Context<Cronk>,
+    index: usize,
+    c: &Completion,
+    option_index: usize,
+    colors: Colors,
+) -> Element {
+    let option = &c.options[option_index];
+    let selected = c.selected == option_index;
+    let canvas = Colors {
+        background: colors.surface,
+        ..colors
+    };
+    let key = format!("lookup-{index}-{}", option.id);
+    let style = interaction::style(
+        ctx,
+        &key,
+        if selected {
+            colors.selected()
+        } else {
+            canvas.base()
+        },
+    );
+    let mut spans = vec![Span::new("  ").style(style)];
+    if c.kind == LookupKind::Labels && !option.color.is_empty() {
+        spans.push(label_pill_span(
+            &Label {
+                name: option.label.clone(),
+                color: option.color.clone(),
+                text_color: option.text_color.clone(),
+            },
+            colors,
+        ));
+    } else {
+        spans.push(
+            Span::new(if c.kind == LookupKind::Users {
+                ctx.state.user_formatter.render_lookup(option)
+            } else {
+                option.label.clone()
+            })
+            .style(style),
+        );
+    }
+    let header = selection_line(
+        Text::from_spans(spans)
+            .width(Length::Flex(1))
+            .height(Length::Px(1))
+            .overflow(Overflow::Ellipsis)
+            .style(style),
+        selected,
+        canvas,
+        style,
+    );
+    let description = selection_line(
+        Text::new(format!("  {}", option.description))
+            .width(Length::Flex(1))
+            .height(Length::Px(1))
+            .overflow(Overflow::Ellipsis)
+            .style(style.fg(colors.muted)),
+        selected,
+        canvas,
+        style,
+    );
+    let row = VStack::new()
+        .height(Length::Px(2))
+        .style(canvas.base())
+        .child(header)
+        .child(description);
+    let epoch = c.epoch;
+    click(ctx, key, row, move || {
+        Msg::LookupAccept(index, epoch, option_index)
+    })
+}
+
 fn dialog_option(
     ctx: &Context<Cronk>,
     index: usize,
@@ -2601,17 +2626,24 @@ fn dialog_option(
     click(
         ctx,
         format!("dialog-option-{index}"),
-        line(
-            format!(" {} {label}", if selected { "›" } else { " " }),
-            interaction::style(
-                ctx,
-                &format!("dialog-option-{index}"),
-                if selected {
-                    colors.selected().fg(colors.accent).bold()
-                } else {
-                    Style::new().fg(colors.foreground).bg(colors.surface)
-                },
+        list_selection_line(
+            line(
+                format!("  {label}"),
+                interaction::style(
+                    ctx,
+                    &format!("dialog-option-{index}"),
+                    if selected {
+                        colors.selected().fg(colors.accent).bold()
+                    } else {
+                        Style::new().fg(colors.foreground).bg(colors.surface)
+                    },
+                ),
             ),
+            selected,
+            Colors {
+                background: colors.surface,
+                ..colors
+            },
         ),
         move || {
             if submit_on_click {

@@ -1,4 +1,6 @@
-use super::{Completion, Cronk, Dialog, DialogKind, Msg, Scope, State, list_height};
+use super::{
+    Completion, Cronk, Dialog, DialogKind, Msg, Scope, State, list_height_for_tab, list_row_height,
+};
 use crate::{build_info, config::Config, model::*};
 use tui_lipan::{
     prelude::*,
@@ -433,7 +435,8 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
     } else {
         items.len()
     };
-    let slots = list_height(ctx.viewport().h);
+    let row_height = list_row_height(state.config.active_tab);
+    let slots = list_height_for_tab(ctx.viewport().h, state.config.active_tab);
     let mut scroll = state.scroll.clone();
     scroll.normalize(len, slots);
     if len == 0 {
@@ -478,16 +481,18 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
     }
     let offset = scroll.offset;
     let list = ScrollView::new()
-        .height(Length::Px((slots * 3).min(u16::MAX as usize) as u16))
-        .offset(offset * 3)
+        .height(Length::Px(
+            (slots * row_height).min(u16::MAX as usize) as u16
+        ))
+        .offset(offset * row_height)
         .scroll_keys(ScrollKeymap::NONE)
         .focusable(false)
         .tab_stop(false)
         .scrollbar(true)
         .scrollbar_config(vertical_scrollbar(colors))
-        .scroll_wheel_multiplier(3)
+        .scroll_wheel_multiplier(row_height as u16)
         .smooth_wheel_scroll(false)
-        .estimated_child_height(3)
+        .estimated_child_height(row_height as u16)
         .on_scroll(
             ctx.link()
                 .callback(|event: ScrollEvent| Msg::ListScroll(event.offset)),
@@ -565,15 +570,21 @@ fn work_row(
                 .height(Length::Px(1))
                 .overflow(Overflow::Ellipsis),
         );
+    let dashboard = state.config.active_tab == 0;
+    let mut row = VStack::new()
+        .height(Length::Px(if dashboard { 4 } else { 3 }))
+        .style(colors.base())
+        .child(top)
+        .child(rich(labels, style));
+    row = if dashboard {
+        row.child(attention_line).child(blank())
+    } else {
+        row.child(blank())
+    };
     click(
         ctx,
         format!("item-{}", item_key(&item.key)),
-        VStack::new()
-            .height(Length::Px(3))
-            .style(colors.base())
-            .child(top)
-            .child(rich(labels, style))
-            .child(attention_line),
+        row,
         move || Msg::Activate(index),
     )
 }

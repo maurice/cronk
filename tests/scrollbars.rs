@@ -5,7 +5,7 @@ use cronk::{
     demo,
     model::{Details, Diff, Discussion, ItemKind, Job, Note, Pipeline},
     scroll::BoundaryScroll,
-    ui::{Cronk, DialogKind, Msg, Scope, Trace, list_height},
+    ui::{Cronk, DialogKind, Msg, Scope, Trace, list_height_for_tab, list_row_height},
 };
 use tui_lipan::{
     TestBackend,
@@ -119,7 +119,7 @@ fn content_rect(ui: &Ui) -> Rect {
 fn main_rect(ui: &Ui) -> Rect {
     let rect = rect(ui, &format!("main-list-{}", ui.state().config.active_tab));
     assert_eq!(rect.y, 6, "six header rows must remain outside the list");
-    assert_eq!(rect.h as usize, list_height(ui.viewport().h) * 3);
+    assert_eq!(rect.h as usize, visible_slots(ui) * row_height(ui));
     assert_eq!(
         right(rect),
         ui.viewport().w - 1,
@@ -290,9 +290,21 @@ fn list_height_for(tab: usize) -> u16 {
     if tab == 1 { 14 } else { 32 }
 }
 
+fn row_height(ui: &Ui) -> usize {
+    list_row_height(ui.state().config.active_tab)
+}
+
+fn visible_slots(ui: &Ui) -> usize {
+    list_height_for_tab(ui.viewport().h, ui.state().config.active_tab)
+}
+
+fn content_height(ui: &Ui, items: usize) -> usize {
+    items * row_height(ui)
+}
+
 fn assert_list_content(ui: &Ui, area: Rect) {
     let offset = ui.state().scroll.offset;
-    let slots = list_height(ui.viewport().h);
+    let slots = visible_slots(ui);
     let frame = ui.capture_frame();
     for row in 0..slots.min(list_len(ui)) {
         let row_key = if ui.state().config.active_tab == 1 {
@@ -304,7 +316,7 @@ fn assert_list_content(ui: &Ui, area: Rect) {
         };
         assert_eq!(
             rect(ui, &row_key).y,
-            area.y + (3 * row) as i16,
+            area.y + (row_height(ui) * row) as i16,
             "rendered row must agree with BoundaryScroll: {row_key}\n{}",
             frame.plain_text()
         );
@@ -323,12 +335,9 @@ fn list_visibility(tab: usize) {
         let mut ui = mount(config(tab, theme), 120, list_height_for(tab));
         let area = main_rect(&ui);
         let len = list_len(&ui);
-        assert!(
-            len > list_height(ui.viewport().h),
-            "fixture must overflow: tab {tab}"
-        );
+        assert!(len > visible_slots(&ui), "fixture must overflow: tab {tab}");
         assert_eq!(
-            proportional(&ui, area, len * 3).start,
+            proportional(&ui, area, content_height(&ui, len)).start,
             0,
             "{theme}, tab {tab}"
         );
@@ -337,7 +346,7 @@ fn list_visibility(tab: usize) {
             x: 0,
             y: 0,
             w: 120,
-            h: (len * 3 + 8) as u16,
+            h: (content_height(&ui, len) + 8) as u16,
         });
         settle(&mut ui);
         assert!(
@@ -400,7 +409,7 @@ fn list_drag_and_navigation(tab: usize) {
         let mut ui = mount(config(tab, theme), 120, list_height_for(tab));
         let area = main_rect(&ui);
         let len = list_len(&ui);
-        let slots = list_height(ui.viewport().h);
+        let slots = visible_slots(&ui);
         drag_to(&mut ui, area, true);
         assert_eq!(ui.state().scope, Scope::List);
         assert_eq!(
@@ -408,7 +417,7 @@ fn list_drag_and_navigation(tab: usize) {
             len - slots,
             "drag must reach the final complete list page"
         );
-        let bar = proportional(&ui, area, len * 3);
+        let bar = proportional(&ui, area, content_height(&ui, len));
         assert_eq!(bar.start + bar.len, 2 * area.h as usize);
         assert_list_content(&ui, area);
         retain_content(&mut ui, area);
@@ -440,7 +449,7 @@ fn list_drag_and_navigation(tab: usize) {
 
         drag_to(&mut ui, area, false);
         assert_eq!(ui.state().scroll.offset, 0);
-        assert_eq!(proportional(&ui, area, len * 3).start, 0);
+        assert_eq!(proportional(&ui, area, content_height(&ui, len)).start, 0);
         assert_list_content(&ui, area);
         retain_content(&mut ui, area);
         let before = ui.state().scroll.offset;
@@ -510,7 +519,7 @@ list_tests!(
 fn list_thumb_updates_when_content_shrinks_filter_changes_and_terminal_resizes() {
     let mut ui = mount(config(2, "midnight"), 120, 26);
     let area = main_rect(&ui);
-    let initial = proportional(&ui, area, list_len(&ui) * 3);
+    let initial = proportional(&ui, area, content_height(&ui, list_len(&ui)));
     drag_to(&mut ui, area, true);
     let keep = ui
         .state()

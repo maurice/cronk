@@ -2592,17 +2592,24 @@ fn dashboard_rows_show_user_role_separately_from_attention_reason() {
     let ui = mount(config(), None);
     let frame = ui.capture_frame();
     let text = frame.plain_text();
-    let attention_line = frame
-        .to_lines()
-        .into_iter()
-        .find(|line| line.contains("Why: Pipeline failed"))
+    let lines = frame.to_lines();
+    let attention_index = lines
+        .iter()
+        .position(|line| line.contains("Why: Pipeline failed"))
         .expect("dashboard reason should be rendered");
+    let attention_line = &lines[attention_index];
+    let spacer_line: String = lines[attention_index + 1]
+        .chars()
+        .take(frame.width as usize - 1)
+        .collect();
 
     assert!(
         attention_line.starts_with("    Why: Pipeline failed"),
         "{text}"
     );
     assert!(attention_line.contains(" ·  You: author"), "{text}");
+    assert!(spacer_line.trim().is_empty(), "{text}");
+    assert!(lines[attention_index + 2].contains("!101"), "{text}");
 }
 
 #[test]

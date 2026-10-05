@@ -400,7 +400,17 @@ impl State {
     }
 }
 
-/// Top and bottom chrome occupy eight rows; list items occupy three terminal rows.
+/// Dashboard rows have a fourth spacer row; other list rows occupy three rows.
+pub fn list_row_height(active_tab: usize) -> usize {
+    if active_tab == 0 { 4 } else { 3 }
+}
+
+/// Top and bottom chrome occupy eight rows; the remaining area determines visible items.
+pub fn list_height_for_tab(viewport_height: u16, active_tab: usize) -> usize {
+    (viewport_height.saturating_sub(8) as usize / list_row_height(active_tab)).max(1)
+}
+
+/// Visible list items for the standard three-row list layout.
 pub fn list_height(viewport_height: u16) -> usize {
-    (viewport_height.saturating_sub(8) as usize / 3).max(1)
+    list_height_for_tab(viewport_height, 1)
 }

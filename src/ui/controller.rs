@@ -595,8 +595,9 @@ impl Component for Cronk {
                     } else {
                         ctx.state.visible_items().len()
                     };
-                    let height = list_height(ctx.viewport().h);
-                    ctx.state.scroll.scroll_to(offset / 3, len, height);
+                    let row_height = list_row_height(ctx.state.config.active_tab);
+                    let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
+                    ctx.state.scroll.scroll_to(offset / row_height, len, height);
                 } else {
                     // Layout changes preserve the cursor; only mouse scrolling owns the viewport.
                     self.normalize(ctx);
@@ -809,8 +810,13 @@ impl Component for Cronk {
                         -rows
                     }))
                 }
-                KeyCode::PageDown => Some(Msg::Move(list_height(ctx.viewport().h) as isize)),
-                KeyCode::PageUp => Some(Msg::Move(-(list_height(ctx.viewport().h) as isize))),
+                KeyCode::PageDown => Some(Msg::Move(list_height_for_tab(
+                    ctx.viewport().h,
+                    ctx.state.config.active_tab,
+                ) as isize)),
+                KeyCode::PageUp => Some(Msg::Move(
+                    -(list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab) as isize),
+                )),
                 KeyCode::Home => Some(Msg::Move(isize::MIN)),
                 KeyCode::End => Some(Msg::Move(isize::MAX)),
                 KeyCode::Char(' ') => Some(Msg::ToggleProject),
@@ -878,7 +884,7 @@ impl Cronk {
         } else {
             ctx.state.visible_items().len()
         };
-        let height = list_height(ctx.viewport().h);
+        let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
         ctx.state.scroll.normalize(len, height);
     }
 
@@ -1113,7 +1119,7 @@ impl Cronk {
                 } else {
                     ctx.state.visible_items().len()
                 };
-                let height = list_height(ctx.viewport().h);
+                let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
                 ctx.state.scroll.move_by(delta, len, height);
             }
             Scope::Details => {
@@ -1160,7 +1166,7 @@ impl Cronk {
                 } else {
                     ctx.state.visible_items().len()
                 };
-                let height = list_height(ctx.viewport().h);
+                let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
                 ctx.state.scroll.select(index, len, height);
             }
             Scope::Details => ctx.state.section_cursor = index.min(ctx.state.sections().len() - 1),

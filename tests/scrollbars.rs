@@ -1029,7 +1029,22 @@ fn assert_detail_boundary(ui: &Ui, area: Rect, target: &str, previous_offset: us
                 None => None,
             }
         }
-        _ => Some(top + cursor.h as usize + 1),
+        _ => {
+            // Expanded jobs are one visual selection span: include their trace
+            // when its direct document child participates in the viewport.
+            let trace = target
+                .strip_prefix("job-")
+                .and_then(|id| ui.rect_of_key(&format!("trace-{id}").into()))
+                .filter(|trace| {
+                    trace.y < area.y + area.h as i16
+                        && i32::from(trace.y) + i32::from(trace.h) > i32::from(area.y)
+                });
+            Some(trace.map_or(top + cursor.h as usize + 1, |trace| {
+                (i32::from(trace.y) - i32::from(area.y) + offset as i32) as usize
+                    + trace.h as usize
+                    + 1
+            }))
+        }
     };
     let expected = reveal_span(previous_offset, top, end, len, area.h as usize);
     assert_eq!(
@@ -1544,10 +1559,10 @@ fn detail_job_clicks_and_keyboard_actions_expand_inline_logs() {
     key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Down);
     assert_eq!(ui.state().config.field, 2);
-    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Char(' '));
     assert!(!ui.state().expanded.contains(&30_002));
     assert!(!content(&ui, area).contains("TRACE_30002_END"));
-    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Char(' '));
     assert!(ui.state().expanded.contains(&30_002));
     wheel_to_detail_text(&mut ui, area, "TRACE_30002_END");
     drag_to(&mut ui, area, true);

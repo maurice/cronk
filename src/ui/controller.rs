@@ -112,7 +112,15 @@ impl Component for Cronk {
             detail_offset_request: None,
             tab_cache: BTreeMap::new(),
             traces: HashMap::new(),
-            expanded: saved.map_or_else(HashSet::new, |tab| tab.expanded.into_iter().collect()),
+            expanded: saved
+                .as_ref()
+                .map_or_else(HashSet::new, |tab| tab.expanded.iter().copied().collect()),
+            collapsed: saved.map_or_else(HashSet::new, |tab| tab.collapsed.into_iter().collect()),
+            log_views: HashMap::new(),
+            log_focus: None,
+            log_zoom: false,
+            log_zoom_from_focus: false,
+            log_search: None,
             dialog: None,
             current_iterations,
             status: if is_demo {
@@ -394,6 +402,14 @@ impl Component for Cronk {
                                 self.network_error(ctx, warning);
                             }
                         }
+                        if ctx.state.log_focus.is_some_and(|id| {
+                            !ctx.state
+                                .details
+                                .as_ref()
+                                .is_some_and(|d| d.jobs.iter().any(|j| j.id == id))
+                        }) {
+                            self.close_log_mode(ctx);
+                        }
                         ctx.state.status = "Detail updated".into();
                         ctx.link().send(Msg::LoadTraces);
                     }
@@ -409,20 +425,24 @@ impl Component for Cronk {
                 }
                 match result {
                     Ok(chunk) => {
+                        // If resizing/zooming enlarged the viewport near EOF, its
+                        // displayed top may have been clamped. Anchor that actual
+                        // source line before adding new output, not an old offset.
+                        let height = self.log_height(ctx, id);
+                        let total = ctx.state.traces.get(&id).map_or(0, Trace::line_count);
+                        if let Some(view) = ctx.state.log_views.get_mut(&id).filter(|v| !v.follow) {
+                            view.offset = view.position(total, height);
+                        }
                         let trace = ctx.state.traces.entry(id).or_default();
+                        trace.append(&chunk.text, chunk.reset);
+                        let view = ctx.state.log_views.entry(id).or_default();
                         if chunk.reset {
-                            trace.text.clear();
+                            view.reset();
+                            view.refresh_matches(trace);
                         }
-                        trace.text.push_str(&chunk.text);
-                        // Bounded tail storage, preserving UTF-8 boundaries.
-                        if trace.text.len() > 128 * 1024 {
-                            let mut cut = trace.text.len() - 128 * 1024;
-                            while !trace.text.is_char_boundary(cut) {
-                                cut += 1;
-                            }
-                            trace.text.drain(..cut);
-                        }
-                        let no_progress = chunk.next_offset == trace.offset;
+                        // Search is refreshed on navigation, not on every live append.
+                        // Stable source-line positions keep paused viewports anchored.
+                        let no_progress = !chunk.reset && chunk.next_offset == trace.offset;
                         trace.offset = chunk.next_offset;
                         // Read completed jobs to EOF rather than treating the first bounded chunk as complete.
                         trace.finished = finished && no_progress;
@@ -496,6 +516,9 @@ impl Component for Cronk {
                 }
             }
             Msg::Select(index) => {
+                if index != ctx.state.config.field {
+                    self.close_log_mode(ctx);
+                }
                 self.select(ctx, index);
                 self.persist(ctx);
             }
@@ -565,7 +588,7 @@ impl Component for Cronk {
                                 .as_ref()
                                 .and_then(|d| d.jobs.get(ctx.state.config.field))
                             {
-                                return self.update(Msg::ToggleJob(job.id), ctx);
+                                return self.update(Msg::FocusLog(job.id), ctx);
                             }
                         }
                         "Discussions" => return self.action(ctx, Action::Reply),
@@ -578,6 +601,15 @@ impl Component for Cronk {
             Msg::Back => {
                 if ctx.state.dialog.is_some() {
                     self.close_dialog(ctx);
+                } else if ctx.state.log_search.take().is_some() {
+                    // Escape closes search before zoom/focus or section navigation.
+                } else if ctx.state.log_zoom {
+                    ctx.state.log_zoom = false;
+                    if !ctx.state.log_zoom_from_focus {
+                        ctx.state.log_focus = None;
+                    }
+                } else if ctx.state.log_focus.take().is_some() {
+                    // Return to job navigation without changing section or viewport.
                 } else {
                     match ctx.state.scope {
                         Scope::Section => {
@@ -594,6 +626,8 @@ impl Component for Cronk {
                             ctx.state.detail_pending = None;
                             ctx.state.traces.clear();
                             ctx.state.expanded.clear();
+                            ctx.state.collapsed.clear();
+                            ctx.state.log_views.clear();
                             ctx.state.content_offset = 0;
                         }
                         Scope::List => return Update::none(),
@@ -602,6 +636,7 @@ impl Component for Cronk {
                 }
             }
             Msg::Section(index) => {
+                self.close_log_mode(ctx);
                 if index < ctx.state.sections().len() {
                     ctx.state.reveal_content = true;
                     ctx.state.section_cursor = index;
@@ -612,6 +647,7 @@ impl Component for Cronk {
                 }
             }
             Msg::DetailSection(index) => {
+                self.close_log_mode(ctx);
                 if index < ctx.state.sections().len() && ctx.state.config.route.is_some() {
                     ctx.state.section_cursor = index;
                     ctx.state.scope = Scope::Details;
@@ -637,6 +673,7 @@ impl Component for Cronk {
                 self.persist(ctx);
             }
             Msg::Field(index) => {
+                self.close_log_mode(ctx);
                 ctx.state.scope = Scope::Section;
                 ctx.state.section_cursor = 0;
                 ctx.state.config.section = Some(0);
@@ -745,11 +782,160 @@ impl Component for Cronk {
                 }
             }
             Msg::ToggleJob(id) => {
-                if !ctx.state.expanded.remove(&id) {
+                let Some(job) = ctx
+                    .state
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.jobs.iter().find(|j| j.id == id))
+                else {
+                    return Update::none();
+                };
+                if ctx.state.job_expanded(job) {
+                    ctx.state.expanded.remove(&id);
+                    ctx.state.collapsed.insert(id);
+                    if ctx.state.log_focus == Some(id) {
+                        self.close_log_mode(ctx);
+                    }
+                } else {
+                    ctx.state.collapsed.remove(&id);
                     ctx.state.expanded.insert(id);
                 }
                 self.persist(ctx);
                 ctx.link().send(Msg::LoadTraces);
+            }
+            Msg::FocusLog(id) => {
+                let Some(index) = ctx
+                    .state
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.jobs.iter().position(|j| j.id == id))
+                else {
+                    return Update::none();
+                };
+                ctx.state.config.field = index;
+                ctx.state.log_focus = Some(id);
+                ctx.state.collapsed.remove(&id);
+                ctx.state.expanded.insert(id);
+                ctx.state.log_views.entry(id).or_default();
+                ctx.state.reveal_content = true;
+                self.persist(ctx);
+                ctx.link().send(Msg::LoadTraces);
+            }
+            Msg::ZoomLog => {
+                if ctx.state.log_zoom {
+                    ctx.state.log_zoom = false;
+                    if !ctx.state.log_zoom_from_focus {
+                        ctx.state.log_focus = None;
+                    }
+                    ctx.state.log_search = None;
+                } else if let Some(id) = ctx.state.selected_job().map(|j| j.id) {
+                    ctx.state.log_zoom_from_focus = ctx.state.log_focus.is_some();
+                    ctx.state.log_zoom = true;
+                    ctx.state.log_focus = Some(id);
+                    ctx.state.collapsed.remove(&id);
+                    ctx.state.expanded.insert(id);
+                    ctx.state.log_views.entry(id).or_default();
+                    self.persist(ctx);
+                    ctx.link().send(Msg::LoadTraces);
+                }
+            }
+            Msg::ScrollLog(id, delta) => {
+                let height = self.log_height(ctx, id);
+                let total = ctx.state.traces.get(&id).map_or(0, Trace::line_count);
+                ctx.state
+                    .log_views
+                    .entry(id)
+                    .or_default()
+                    .scroll(total, height, delta);
+            }
+            Msg::LogWheel(id, origin, delta) => {
+                if !ctx.state.log_zoom || ctx.state.log_focus != Some(id) {
+                    return Update::none();
+                }
+                let height = self.log_height(ctx, id);
+                let total = ctx.state.traces.get(&id).map_or(0, Trace::line_count);
+                let view = ctx.state.log_views.entry(id).or_default();
+                if view.position(total, height) != origin || delta == 0 {
+                    return Update::none();
+                }
+                view.scroll(total, height, delta);
+                view.wheel_epoch = view.wheel_epoch.wrapping_add(1);
+            }
+            Msg::LogBar(id, row, height, start) => {
+                if !ctx.state.details.as_ref().is_some_and(|d| {
+                    d.jobs
+                        .iter()
+                        .any(|j| j.id == id && ctx.state.job_expanded(j))
+                }) {
+                    return Update::none();
+                }
+                let total = ctx.state.traces.get(&id).map_or(0, Trace::line_count);
+                let view = ctx.state.log_views.entry(id).or_default();
+                let (top, thumb) =
+                    super::logs::scrollbar(total, height, view.position(total, height));
+                if start {
+                    let on_thumb = (top..top + thumb).contains(&row);
+                    view.drag_grab = Some(if on_thumb { row - top } else { thumb / 2 });
+                    if on_thumb {
+                        // Quantizing a huge log to a short track must not move its
+                        // viewport merely because the thumb was pressed.
+                        return Update::none();
+                    }
+                }
+                let grab = view.drag_grab.unwrap_or(thumb / 2);
+                let travel = height.saturating_sub(thumb);
+                let max = total.saturating_sub(height);
+                view.offset = if travel == 0 {
+                    0
+                } else {
+                    (row.saturating_sub(grab).min(travel) as u128 * max as u128 / travel as u128)
+                        as usize
+                };
+                view.follow = view.offset == max;
+            }
+            Msg::LogBarEnd(id) => {
+                if let Some(view) = ctx.state.log_views.get_mut(&id) {
+                    view.drag_grab = None;
+                }
+                return Update::none();
+            }
+            Msg::SearchLog => {
+                if ctx.state.log_focus.is_some() {
+                    let query = ctx
+                        .state
+                        .log_focus
+                        .and_then(|id| ctx.state.log_views.get(&id))
+                        .map_or("", |v| v.query.as_str());
+                    ctx.state.log_search = Some(TextInput::new(query));
+                    ctx.request_focus("log-search");
+                }
+            }
+            Msg::LogSearchInput(event) => {
+                if let Some(input) = &mut ctx.state.log_search {
+                    event.apply_to(input);
+                }
+            }
+            Msg::SubmitLogSearch => {
+                if let Some(input) = ctx.state.log_search.take()
+                    && let Some(id) = ctx.state.log_focus
+                {
+                    let view = ctx.state.log_views.entry(id).or_default();
+                    view.query = input.text().to_owned();
+                    view.current_match = None;
+                    return self.update(Msg::LogSearchNext(false), ctx);
+                }
+            }
+            Msg::LogSearchNext(backwards) => {
+                if let Some(id) = ctx.state.log_focus {
+                    let height = self.log_height(ctx, id);
+                    if let Some(trace) = ctx.state.traces.get(&id) {
+                        ctx.state
+                            .log_views
+                            .entry(id)
+                            .or_default()
+                            .find(trace, height, backwards);
+                    }
+                }
             }
             Msg::Action(action) => return self.action(ctx, action),
             Msg::Palette => self.show_dialog(
@@ -918,6 +1104,42 @@ impl Component for Cronk {
                 Some(msg) => KeyUpdate::handled(self.update(msg, ctx)),
                 None => KeyUpdate::unhandled(Update::none()),
             };
+        }
+        if ctx.state.log_search.is_some() {
+            return match key.code {
+                KeyCode::Esc => KeyUpdate::handled(self.update(Msg::Back, ctx)),
+                KeyCode::Enter => KeyUpdate::handled(self.update(Msg::SubmitLogSearch, ctx)),
+                _ => KeyUpdate::unhandled(Update::none()),
+            };
+        }
+        if let Some(id) = ctx.state.selected_job().map(|j| j.id) {
+            let focused = ctx.state.log_focus == Some(id);
+            let ctrl_scroll = key.mods == KeyMods::CTRL;
+            let plain = !key.mods.ctrl && !key.mods.alt && !key.mods.super_key;
+            let height = self.log_height(ctx, id) as isize;
+            let log_message = match key.code {
+                KeyCode::Up if ctrl_scroll || (plain && focused) => Some(Msg::ScrollLog(id, -1)),
+                KeyCode::Down if ctrl_scroll || (plain && focused) => Some(Msg::ScrollLog(id, 1)),
+                KeyCode::PageUp if ctrl_scroll || (plain && focused) => {
+                    Some(Msg::ScrollLog(id, -height))
+                }
+                KeyCode::PageDown if ctrl_scroll || (plain && focused) => {
+                    Some(Msg::ScrollLog(id, height))
+                }
+                KeyCode::Home if plain && focused => Some(Msg::ScrollLog(id, isize::MIN)),
+                KeyCode::End if plain && focused => Some(Msg::ScrollLog(id, isize::MAX)),
+                KeyCode::Char('k') if plain && focused => Some(Msg::ScrollLog(id, -1)),
+                KeyCode::Char('j') if plain && focused => Some(Msg::ScrollLog(id, 1)),
+                KeyCode::Char(' ') if plain => Some(Msg::ToggleJob(id)),
+                KeyCode::Char('z') if plain => Some(Msg::ZoomLog),
+                KeyCode::Char('/') if plain && focused => Some(Msg::SearchLog),
+                KeyCode::Char('n') if plain && focused => Some(Msg::LogSearchNext(key.mods.shift)),
+                KeyCode::Char('N') if plain && focused => Some(Msg::LogSearchNext(true)),
+                _ => None,
+            };
+            if let Some(msg) = log_message {
+                return KeyUpdate::handled(self.update(msg, ctx));
+            }
         }
         let ctrl = key.mods.ctrl;
         let msg = if key.is_with(KeyCode::Char('p'), KeyMods::CTRL) || key.is(KeyCode::Char(':')) {
@@ -1137,7 +1359,7 @@ impl Cronk {
         } else {
             for (id, _, finished) in requests {
                 let trace = ctx.state.traces.entry(id).or_default();
-                trace.text = demo::trace(id, ctx.state.tick);
+                trace.append(&demo::trace(id, ctx.state.tick), true);
                 trace.finished = finished;
             }
             Update::full()
@@ -1159,6 +1381,7 @@ impl Cronk {
         let cache = TabCache {
             details: ctx.state.details.take(),
             traces: std::mem::take(&mut ctx.state.traces),
+            log_views: std::mem::take(&mut ctx.state.log_views),
             next_details: ctx.state.next_details,
             next_traces: ctx.state.next_traces,
         };
@@ -1193,9 +1416,12 @@ impl Cronk {
         ctx.state.trace_pending.clear();
         ctx.state.details = cache.details;
         ctx.state.traces = cache.traces;
+        ctx.state.log_views = cache.log_views;
+        self.close_log_mode(ctx);
         ctx.state.next_details = cache.next_details;
         ctx.state.next_traces = cache.next_traces;
         ctx.state.expanded = tab.expanded.into_iter().collect();
+        ctx.state.collapsed = tab.collapsed.into_iter().collect();
         ctx.state.content_offset = tab.content_offset;
         ctx.state.content_max_offset = usize::MAX;
         ctx.state.detail_viewport = None;
@@ -1219,6 +1445,17 @@ impl Cronk {
         }
     }
 
+    fn close_log_mode(&self, ctx: &mut Context<Self>) {
+        ctx.state.log_focus = None;
+        ctx.state.log_zoom = false;
+        ctx.state.log_zoom_from_focus = false;
+        ctx.state.log_search = None;
+    }
+
+    fn log_height(&self, ctx: &Context<Self>, id: u64) -> usize {
+        ctx.state.log_height(ctx.viewport().h, id)
+    }
+
     fn reset_detail(&self, ctx: &mut Context<Self>) {
         ctx.state.config.route = None;
         ctx.state.config.section = None;
@@ -1230,6 +1467,9 @@ impl Cronk {
         ctx.state.trace_pending.clear();
         ctx.state.traces.clear();
         ctx.state.expanded.clear();
+        ctx.state.collapsed.clear();
+        ctx.state.log_views.clear();
+        self.close_log_mode(ctx);
         ctx.state.section_cursor = 0;
         ctx.state.content_offset = 0;
     }
@@ -1249,6 +1489,9 @@ impl Cronk {
         ctx.state.detail_pending = None;
         ctx.state.traces.clear();
         ctx.state.expanded.clear();
+        ctx.state.collapsed.clear();
+        ctx.state.log_views.clear();
+        self.close_log_mode(ctx);
         ctx.state.details = if self.api.is_none() {
             Some(demo::details(&key))
         } else {
@@ -1258,6 +1501,7 @@ impl Cronk {
     }
 
     fn move_selection(&self, ctx: &mut Context<Self>, delta: isize) {
+        self.close_log_mode(ctx);
         ctx.state.detail_offset_request = None;
         ctx.state.reveal_content = true;
         match ctx.state.scope {
@@ -1837,6 +2081,7 @@ fn navigation(state: &State) -> TabState {
         list_offset: state.scroll.offset,
         content_offset: state.content_offset,
         expanded: state.expanded.iter().copied().collect(),
+        collapsed: state.collapsed.iter().copied().collect(),
     }
 }
 

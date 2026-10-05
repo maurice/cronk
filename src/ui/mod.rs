@@ -1,7 +1,10 @@
 mod completion;
 mod controller;
 mod interaction;
+mod logs;
 mod view;
+
+pub use logs::{LogView, TraceIndex};
 
 pub use completion::Completion;
 
@@ -44,6 +47,15 @@ pub(super) fn detail_span(
         (child.content_rect.y.max(0) as usize).saturating_add(child.content_rect.h as usize)
     };
     if !is_section_header(target) {
+        if let Some(id) = target.strip_prefix("job-")
+            && let Some(trace) = event.visible.get(position + 1).filter(|next| {
+                next.key
+                    .as_ref()
+                    .is_some_and(|key| key.as_ref() == format!("trace-{id}"))
+            })
+        {
+            return Some((top, Some(bottom(trace) + 1)));
+        }
         return Some((top, Some(bottom(child) + 1)));
     }
     let next_header = event.visible[position + 1..].iter().find(|child| {
@@ -94,6 +106,12 @@ pub struct State {
     pub(super) tab_cache: BTreeMap<String, TabCache>,
     pub traces: HashMap<u64, Trace>,
     pub expanded: HashSet<u64>,
+    pub collapsed: HashSet<u64>,
+    pub log_views: HashMap<u64, LogView>,
+    pub log_focus: Option<u64>,
+    pub log_zoom: bool,
+    pub log_zoom_from_focus: bool,
+    pub log_search: Option<TextInput>,
     pub dialog: Option<Dialog>,
     pub current_iterations: HashMap<u64, Option<CurrentIteration>>,
     pub status: String,
@@ -119,6 +137,7 @@ pub struct State {
 pub(super) struct TabCache {
     details: Option<Details>,
     traces: HashMap<u64, Trace>,
+    log_views: HashMap<u64, LogView>,
     next_details: Duration,
     next_traces: Duration,
 }
@@ -129,6 +148,7 @@ pub struct Trace {
     pub offset: u64,
     pub finished: bool,
     pub error: Option<String>,
+    pub index: std::cell::RefCell<TraceIndex>,
 }
 
 pub struct FormField {
@@ -302,6 +322,16 @@ pub enum Msg {
     ListViewportChanged,
     ToggleProject,
     ToggleJob(u64),
+    FocusLog(u64),
+    ZoomLog,
+    ScrollLog(u64, isize),
+    LogWheel(u64, usize, isize),
+    LogBar(u64, usize, usize, bool),
+    LogBarEnd(u64),
+    SearchLog,
+    LogSearchInput(InputEvent),
+    SubmitLogSearch,
+    LogSearchNext(bool),
     Action(Action),
     Palette,
     CloseDialog,
@@ -321,6 +351,31 @@ pub enum Msg {
 }
 
 impl State {
+    pub fn selected_job(&self) -> Option<&Job> {
+        (self.scope == Scope::Section && self.section_name() == "Jobs")
+            .then(|| self.details.as_ref()?.jobs.get(self.config.field))
+            .flatten()
+    }
+
+    pub fn job_expanded(&self, job: &Job) -> bool {
+        !self.collapsed.contains(&job.id) && (job.running() || self.expanded.contains(&job.id))
+    }
+
+    pub fn log_height(&self, viewport_height: u16, id: u64) -> usize {
+        if self.log_zoom && self.log_focus == Some(id) {
+            let extra = usize::from(self.traces.get(&id).is_some_and(|t| t.error.is_some()))
+                + usize::from(self.log_views.get(&id).is_some_and(|v| !v.query.is_empty()));
+            (viewport_height as usize)
+                .saturating_sub(2 + extra + usize::from(self.log_search.is_some()))
+                .max(1)
+        } else {
+            self.details
+                .as_ref()
+                .and_then(|d| d.jobs.iter().find(|j| j.id == id))
+                .map_or(8, |j| if j.running() { 8 } else { 18 })
+        }
+    }
+
     pub fn tab_name(&self) -> &str {
         match self.config.active_tab {
             0 => "Dashboard",

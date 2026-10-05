@@ -65,6 +65,12 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | Mouse click / wheel | Open rows, choose tabs/sections, select fields, scroll |
 | Scrollbar track click / thumb drag | Scroll the corresponding viewport without activating its contents |
 | `Space` in Projects | Include/hide the selected project in other lists |
+| `Space` in Jobs | Expand/collapse the selected job, including running jobs |
+| `Enter` on a job | Focus its logs (expanding if needed); arrows/page keys scroll logs |
+| `Ctrl+↑/↓`, `Ctrl+PageUp/PageDown` on a job | Scroll its logs without entering log focus |
+| `z` on a job / in its logs | Toggle zoom directly; mouse wheel and draggable scrollbar scroll zoomed logs |
+| `Home` / `End` in logs | Beginning / live tail; End resumes following new output |
+| `/`, then `n` / `N` in logs | Literal, case-insensitive search; next/previous matching line |
 | `Ctrl+P` or `:` | Searchable command palette |
 | `/` | Edit the current list's filter |
 | `s` | Save an Issues/Merge Requests filter as a new tab |
@@ -78,7 +84,7 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | `?` | Keyboard guide |
 | `q` / `Ctrl+C` | Quit outside text editors |
 
-Each tab restores its last list or drilled-down detail scope, including selection, scroll position, and expanded jobs. Navigation is saved to the workspace file for restart; loaded details and traces are cached in memory between visits and refreshed when due. A new tab's list is active immediately; there is no separate tab-navigation mode. Left/Right switch tabs without wrapping; Up/Down navigate the current scope. Modified arrows do not switch tabs. The built-in tab initials are underlined, saved tabs display their number shortcuts, and the bottom gutter repeats the hints. Tab shortcuts are inactive inside dialogs/editors. More than ten saved views remain accessible by Left/Right or mouse; the tab strip scrolls horizontally when necessary.
+Each tab restores its last list or drilled-down detail scope, including selection, scroll position, and explicit job expansion/collapse choices. Navigation is saved to the workspace file for restart; loaded details and traces are cached in memory between visits and refreshed when due. A new tab's list is active immediately; there is no separate tab-navigation mode. Left/Right switch tabs without wrapping; Up/Down navigate the current scope. Modified arrows do not switch tabs. The built-in tab initials are underlined, saved tabs display their number shortcuts, and the bottom gutter repeats the hints. Tab shortcuts are inactive inside dialogs/editors. More than ten saved views remain accessible by Left/Right or mouse; the tab strip scrolls horizontally when necessary.
 
 Lists use a quarter-viewport boundary: the cursor moves to the lower/upper quarter margin, the viewport follows further movement, then the cursor reaches the actual final/first row. No wraparound. Three terminal rows form one list item; the margin rounds down to whole items.
 
@@ -86,9 +92,21 @@ Overflowing lists, detail panes, dialogs, and multiline editors show a theme-col
 
 The Dashboard shows open work where you are the author, assignee, or (for MRs) a reviewer. Each row separates **why it is here** (your role) from its **attention signals**: failed pipeline, known unresolved threads, reviewer assignment, missing reviewers on your ready MR, passing/in-progress checks, draft state, or otherwise open work. Multiple signals can appear together. It orders actionable blockers first, then review assignments and reviewer gaps, then checks in progress, drafts, other MRs, and issues. Reviewer assignment does not prove a review is still pending, and a missing discussion count is unknown rather than zero. Passing checks are not a claim that approvals, mergeability, or company policy checks are satisfied. Enter opens the real detail while preserving the Dashboard as the return destination.
 
-Issue and MR details are **one continuous document**, with one scrollbar and no section sidebar or split panes. Issues show Fields, Description, and all Activity (newest first). MRs show Fields, Description, Pipeline, Jobs, every Discussion and its notes, and Changes. Nothing needs to be opened just to read a section; completed job logs remain collapsed until requested.
+Issue and MR details are **one continuous document**, with one main document scrollbar and no section sidebar or split panes; expanded job logs also have their own history scrollbars. Issues show Fields, Description, and all Activity (newest first). MRs show Fields, Description, Pipeline, Jobs, every Discussion and its notes, and Changes. Nothing needs to be opened just to read a section; completed job logs remain collapsed until requested.
 
-**Tab / Shift+Tab or Up / Down** select sections and bring their heading into view. The current section has a selection background; GitLab label colors stay intact. **Enter** focuses a section's actions without replacing the document: choose/edit fields, expand or retry jobs, reply to or resolve discussions, or edit the description. **Esc** returns to section navigation without resetting the viewport, then returns to the work list. **PageUp / PageDown**, the wheel, and the scrollbar always scroll the whole document. Clicking a section heading selects it; clicking a field edits it, a job toggles it, and a discussion selects its thread.
+**Tab / Shift+Tab or Up / Down** select sections and bring their heading into view. The current section has a selection background; GitLab label colors stay intact. **Enter** focuses a section's actions without replacing the document: choose/edit fields, expand or retry jobs, reply to or resolve discussions, or edit the description. **Esc** returns to section navigation without resetting the viewport, then returns to the work list. **PageUp / PageDown**, the wheel, and the scrollbar scroll the whole document except when page keys are focusing job logs or the wheel is over zoomed logs. Clicking a section heading selects it; clicking a field edits it, a job toggles it, and a discussion selects its thread.
+
+### CI job logs
+
+Running jobs expand automatically, so concurrent live logs remain visible together. **Space** or the job's **+/−** header toggles expansion; a manual collapse survives refreshes, tab switches, and restart. Selection styling runs alongside the entire expanded job, not just its header.
+
+In Jobs, **↑/↓** choose a job. **Enter** focuses its logs; **↑/↓**, **PageUp/PageDown**, and **Home/End** then navigate the output. **Ctrl+↑/↓** and **Ctrl+PageUp/PageDown** scroll the selected job's logs without focusing it (where the terminal reports those combinations). **z** toggles zoom straight from selection or log focus. Zoom reclaims the normal application chrome, keeping only a contextual shortcut header and log status, with a proportional, clickable/draggable scrollbar and mouse-wheel scrolling. First opening zoom follows the tail by default; an existing manually scrolled position is preserved.
+
+At the bottom, incoming output keeps the viewport following the live tail. Scrolling away from the bottom anchors the visible source lines while new output arrives below. Returning to the bottom, or pressing **End**, resumes following. The same rule applies to inline and zoomed logs.
+
+In focused or zoomed logs, **/** opens a literal, case-insensitive search over fetched history. **Enter** jumps to a match; **n/N** move forward/backward through matching lines with wraparound. Search does not filter or edit the log. **Esc** closes search, then zoom, then log focus, before leaving Jobs. A zoom opened directly from selection returns directly to job navigation.
+
+Complete fetched history is retained in memory for scrolling and search; only visible lines are rendered. Search covers output fetched so far, not bytes still being loaded. Log positions are retained across tab visits, but log history, searches, and log-focus/zoom state are not written to disk. Large traces consequently use more memory until their item cache is discarded.
 
 Project rows open a project-filtered Issues list; the visibility checkbox works independently.
 
@@ -174,8 +192,8 @@ No background service, telemetry, third-party data service, or agent invocation 
 - Lists currently paginate **all history** on refresh, conditionally revalidating each page. Very large projects will need incremental/keyset synchronization and periodic reconciliation before this is an efficient daily driver. There is no offline content cache. Hidden projects are not newly polled, although requests already started may finish.
 - Dashboard enrichment is bounded: at most 12 recently updated open MRs per project receive pipeline/discussion enrichment, with up to 12 additional discussion-page requests. Unknown values remain unknown. Open an MR to fetch its complete detail. A passed pipeline is not sufficient evidence that an MR is ready to merge.
 - Child/downstream pipelines are not traversed. Fork-owned head-pipeline jobs use the pipeline's own project. Older GitLab versions/permissions may omit optional data; warnings identify incomplete details. Server-truncated diffs are reported when detectable.
-- Trace reads use REST `byte_offset`/`byte_limit` parameters after a small, cached capability probe. Older servers that ignore or reject those parameters fall back to HTTP Range. If Range is also ignored, reads stream past the already-seen prefix (up to 8 MiB per request); larger prefixes produce an explicit error. Same-length log replacement cannot reliably be detected. No full-history log search/pause/archive yet.
-- Unsubmitted dialog text, expansion toggles, exact document offsets, and cached data are **not restored after process death**. List selection and the open item/section/field are restored, then content is fetched again. Failed submissions retain the draft while the process is running. Writes are never automatically retried: after an ambiguous timeout, verify GitLab before retrying a create/comment to avoid duplicates.
+- Trace reads use REST `byte_offset`/`byte_limit` parameters after a small, cached capability probe. Older servers that ignore or reject those parameters fall back to HTTP Range. If Range is also ignored, reads stream past the already-seen prefix (up to 8 MiB per request); larger prefixes produce an explicit error. Same-length log replacement cannot reliably be detected. Scrolling/search cover fetched history; no disk-backed log archive is provided.
+- Unsubmitted dialog text, log-reading positions/searches, and cached content are **not restored after process death**. List selection, document offsets, the open item/section/field, and job expansion/collapse choices are restored, then content is fetched again. Failed submissions retain the draft while the process is running. Writes are never automatically retried: after an ambiguous timeout, verify GitLab before retrying a create/comment to avoid duplicates.
 - No live enterprise validation yet. Start with a test project/read-only token. Terminal appearance and key encodings should also be checked in your actual terminal/OS.
 
 ## Development

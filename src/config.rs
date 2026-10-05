@@ -52,6 +52,7 @@ pub struct TabState {
     pub list_offset: usize,
     pub content_offset: usize,
     pub expanded: BTreeSet<u64>,
+    pub collapsed: BTreeSet<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -527,6 +528,7 @@ mod tests {
                     list_offset: 12,
                     content_offset: 8,
                     expanded: BTreeSet::from([91, 92]),
+                    collapsed: BTreeSet::from([93]),
                 },
             )]),
             route: Some(ItemKey {

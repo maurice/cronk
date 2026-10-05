@@ -374,18 +374,55 @@ pub(super) fn view(ctx: &Context<Cronk>) -> Element {
     let colors = Colors::new(&state.config);
     let content = match state.scope {
         Scope::List => main_list(ctx, colors),
+        Scope::Details | Scope::Section if state.log_zoom => {
+            if let Some(job) = state.selected_job() {
+                job_panel(ctx, job, state.log_height(ctx.viewport().h, job.id), colors)
+            } else {
+                detail(ctx, colors)
+            }
+        }
         Scope::Details | Scope::Section => detail(ctx, colors),
     };
-    // Keep six rows above and two below the list, matching list_height exactly.
-    let shell = VStack::new()
-        .style(colors.base())
-        .child(brand(state, colors))
-        .child(tab_bar(ctx, colors))
-        .child(breadcrumb(ctx, colors))
-        .child(context_line(state, colors))
-        .child(blank())
-        .child(content)
-        .child(footer(ctx, colors));
+    let search_row = if let Some(input) = &state.log_search {
+        Input::bound(input)
+            .height(Length::Px(1))
+            .border(false)
+            .padding((0, 2))
+            .style(colors.base())
+            .focus_style(colors.selected())
+            .caret_color(colors.accent)
+            .key_interceptor(ctx.link().key_handler(|key: KeyEvent| match key.code {
+                KeyCode::Enter => Some(Msg::SubmitLogSearch),
+                KeyCode::Esc => Some(Msg::Back),
+                _ => None,
+            }))
+            .on_change(ctx.link().callback(Msg::LogSearchInput))
+            .key("log-search")
+    } else {
+        blank()
+    };
+    let shell = if state.log_zoom && state.selected_job().is_some() {
+        // Fullscreen logs keep only the contextual shortcut header and log
+        // status, reclaiming the normal tabs/breadcrumb/footer chrome.
+        let mut shell = VStack::new()
+            .style(colors.base())
+            .child(context_line(state, colors));
+        if state.log_search.is_some() {
+            shell = shell.child(search_row);
+        }
+        shell.child(content)
+    } else {
+        // Keep six rows above and two below the list, matching list_height exactly.
+        VStack::new()
+            .style(colors.base())
+            .child(brand(state, colors))
+            .child(tab_bar(ctx, colors))
+            .child(breadcrumb(ctx, colors))
+            .child(context_line(state, colors))
+            .child(search_row)
+            .child(content)
+            .child(footer(ctx, colors))
+    };
     let mut layers = ZStack::new().passthrough(true).child(shell);
     {
         // Keep the shared popup anchor mounted so opening it never reparents
@@ -587,33 +624,54 @@ fn breadcrumb(ctx: &Context<Cronk>, colors: Colors) -> Element {
 }
 
 fn context_line(state: &State, colors: Colors) -> Element {
-    let (heading, hint) = match state.scope {
-        Scope::List if state.config.active_tab == 1 => (
-            format!("{} PROJECTS", state.config.projects.len()),
-            "Space toggles visibility · Enter opens project issues".to_owned(),
-        ),
-        Scope::List => {
-            let query = state.query_text();
+    let (heading, hint) =
+        if let Some(job) = state.selected_job().filter(|_| state.log_focus.is_some()) {
             (
-                format!("{} ITEMS", state.visible_items().len()),
-                if !query.is_empty() {
-                    format!("Filter: {query}")
-                } else if state.config.active_tab == 0 {
-                    "Your open work · role and reason · ordered by urgency".into()
+                format!(
+                    "{} #{}{}",
+                    job.name,
+                    job.id,
+                    if state.log_zoom {
+                        " · ZOOM"
+                    } else {
+                        " · LOGS"
+                    }
+                ),
+                if state.log_search.is_some() {
+                    "Search logs · Enter finds · Esc cancels".into()
                 } else {
-                    "Across visible projects · most recently updated first".into()
+                    "z zoom · Esc back · ↑↓ PgUp/PgDn · Home/End · / search · n/N matches".into()
                 },
             )
-        }
-        Scope::Details => (
-            state.section_name().to_uppercase(),
-            "Tab / ↑ ↓ choose section · Enter focuses · PgUp/PgDn scroll".into(),
-        ),
-        Scope::Section => (
-            state.section_name().to_uppercase(),
-            section_hint(state.section_name()).into(),
-        ),
-    };
+        } else {
+            match state.scope {
+                Scope::List if state.config.active_tab == 1 => (
+                    format!("{} PROJECTS", state.config.projects.len()),
+                    "Space toggles visibility · Enter opens project issues".to_owned(),
+                ),
+                Scope::List => {
+                    let query = state.query_text();
+                    (
+                        format!("{} ITEMS", state.visible_items().len()),
+                        if !query.is_empty() {
+                            format!("Filter: {query}")
+                        } else if state.config.active_tab == 0 {
+                            "Your open work · role and reason · ordered by urgency".into()
+                        } else {
+                            "Across visible projects · most recently updated first".into()
+                        },
+                    )
+                }
+                Scope::Details => (
+                    state.section_name().to_uppercase(),
+                    "Tab / ↑ ↓ choose section · Enter focuses · PgUp/PgDn scroll".into(),
+                ),
+                Scope::Section => (
+                    state.section_name().to_uppercase(),
+                    section_hint(state.section_name()).into(),
+                ),
+            }
+        };
     HStack::new()
         .height(Length::Px(1))
         .padding((0, 2))
@@ -630,7 +688,7 @@ fn context_line(state: &State, colors: Colors) -> Element {
 fn section_hint(section: &str) -> &'static str {
     match section {
         "Fields" => "↑ ↓ choose a field · Enter edits",
-        "Jobs" => "↑ ↓ choose a job · Enter expands · running jobs stay live",
+        "Jobs" => "↑ ↓ choose · Space toggle · Enter logs · z zoom · Ctrl+↑/↓/PgUp/PgDn logs",
         "Discussions" => "↑ ↓ choose a discussion · reply / resolve via commands",
         "Pipeline" => "All running jobs stream together · ↑ ↓ scroll",
         "Changes" => "Unified diff · ↑ ↓ scroll",
@@ -1563,6 +1621,135 @@ fn job_header(job: &Job, expanded: bool, colors: Colors) -> Vec<Span> {
     spans
 }
 
+fn log_window(ctx: &Context<Cronk>, job: &Job, height: usize, colors: Colors) -> Element {
+    let id = job.id;
+    let trace = ctx.state.traces.get(&id);
+    let total = trace.map_or(0, super::Trace::line_count);
+    let default_view = super::LogView::default();
+    let view = ctx.state.log_views.get(&id).unwrap_or(&default_view);
+    let height = if ctx.state.log_zoom {
+        height
+    } else {
+        height.min(total.max(1))
+    }
+    .max(1)
+    .min(u16::MAX as usize / 3);
+    let offset = view.position(total, height);
+    let style = colors.base().bg(colors.surface);
+    let mut visible = String::new();
+    for row in offset..offset + height {
+        if row > offset {
+            visible.push('\n');
+        }
+        if total == 0 && row == 0 {
+            visible.push_str(if trace.is_some_and(|t| t.finished) {
+                "  Trace is empty."
+            } else {
+                "  Waiting for log output…"
+            });
+        } else {
+            if view.matches.binary_search(&row).is_ok() {
+                visible.push_str("▶ ");
+            }
+            visible.push_str(trace.map_or("", |t| t.line(row)));
+        }
+    }
+    let rows = Text::from_ansi(&visible)
+        .height(Length::Px(height as u16))
+        .width(Length::Flex(1))
+        .overflow(Overflow::Clip)
+        .style(style);
+    // A viewport-sized wheel proxy, not a layout of the full trace. Logical
+    // history and the scrollbar below use usize line positions, so logs longer
+    // than terminal Rect's i16 coordinates are still navigable. Remount only the
+    // wheel proxy after a gesture to reset its local offset without moving text.
+    let focused = ctx.state.log_zoom && ctx.state.log_focus == Some(id);
+    let wheel = ScrollView::new()
+        .height(Length::Px(height as u16))
+        .width(Length::Flex(1))
+        .offset(height)
+        .virtualize(false)
+        .scroll_keys(ScrollKeymap::NONE)
+        .focusable(false)
+        .tab_stop(false)
+        .scrollbar(false)
+        .scroll_wheel(ctx.state.log_focus == Some(id))
+        .smooth_wheel_scroll(false)
+        .scroll_wheel_multiplier(3)
+        .padding(0)
+        .style(style)
+        .child(Spacer::new().height(Length::Px(height as u16)))
+        .child(rows.clone())
+        .child(Spacer::new().height(Length::Px(height as u16)))
+        .on_scroll(ctx.link().callback(move |event: ScrollEvent| {
+            Msg::LogWheel(id, offset, event.offset as isize - height as isize)
+        }))
+        .key(format!(
+            "log-wheel-{id}-{offset}-{}-{height}",
+            view.wheel_epoch
+        ));
+    let mut window = HStack::new()
+        .height(Length::Px(height as u16))
+        .style(style)
+        .child(if focused { wheel } else { Element::from(rows) });
+    if total > height {
+        let (top, thumb) = super::logs::scrollbar(total, height, offset);
+        let track_style =
+            interaction::style(ctx, &format!("log-scrollbar-{id}"), style.fg(colors.muted));
+        let thumb_style = track_style.fg(colors.accent);
+        let mut track = VStack::new()
+            .width(Length::Px(1))
+            .height(Length::Px(height as u16))
+            .style(track_style);
+        for row in 0..height {
+            track = track.child(
+                Text::new(if (top..top + thumb).contains(&row) {
+                    "█"
+                } else {
+                    "│"
+                })
+                .width(Length::Px(1))
+                .height(Length::Px(1))
+                .style(if (top..top + thumb).contains(&row) {
+                    thumb_style
+                } else {
+                    track_style
+                }),
+            );
+        }
+        let hover_key = format!("log-scrollbar-{id}");
+        window = window.child(Spacer::new().width(Length::Px(1))).child(
+            Element::from(
+                MouseRegion::new()
+                    .hover_style(Style::new())
+                    .capture_click(true)
+                    .drag_threshold(1, 1)
+                    .on_hover_change(
+                        ctx.link()
+                            .callback(move |entered| Msg::Hover(hover_key.clone(), entered)),
+                    )
+                    .on_mouse_down(ctx.link().callback(move |event: MouseRegionEvent| {
+                        Msg::LogBar(id, event.local_y as usize, event.target_h as usize, true)
+                    }))
+                    .on_drag(ctx.link().callback(move |event: MouseDragEvent| {
+                        Msg::LogBar(id, event.local_y as usize, event.target_h as usize, false)
+                    }))
+                    .on_drag_end(
+                        ctx.link()
+                            .callback(move |_: MouseDragEvent| Msg::LogBarEnd(id)),
+                    )
+                    .on_mouse_up(
+                        ctx.link()
+                            .callback(move |_: MouseRegionEvent| Msg::LogBarEnd(id)),
+                    )
+                    .child(track),
+            )
+            .key(format!("log-scrollbar-{id}")),
+        );
+    }
+    Element::from(window).key(format!("log-window-{id}"))
+}
+
 fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> Element {
     let mut panel = VStack::new()
         .height(Length::Auto)
@@ -1576,26 +1763,7 @@ fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> E
                     Style::new().fg(colors.red),
                 ));
             }
-            if trace.text.is_empty() {
-                panel = panel.child(line(
-                    if trace.finished {
-                        "  Trace is empty."
-                    } else {
-                        "  Waiting for log output…"
-                    },
-                    Style::new().fg(colors.muted),
-                ));
-            } else {
-                let tail = trace_tail(&trace.text, lines);
-                let height = tail.lines().count().max(1).min(u16::MAX as usize) as u16;
-                panel = panel.child(
-                    Text::from_ansi(&tail)
-                        .width(Length::Flex(1))
-                        .height(Length::Px(height))
-                        .overflow(Overflow::Clip)
-                        .style(Style::new().fg(colors.foreground).bg(colors.surface)),
-                );
-            }
+            panel = panel.child(log_window(ctx, job, lines, colors));
             panel = if job.running() {
                 let style = colors.base().bg(colors.surface).fg(colors.cyan);
                 panel.child(
@@ -1611,7 +1779,16 @@ fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> E
                             "Live log: Output is polled while this job is running",
                             style,
                         ))
-                        .child(Text::new(" LIVE · trailing output").style(style)),
+                        .child(
+                            Text::new(
+                                if ctx.state.log_views.get(&job.id).is_none_or(|v| v.follow) {
+                                    " LIVE · following tail"
+                                } else {
+                                    " LIVE · paused · End resumes following"
+                                },
+                            )
+                            .style(style),
+                        ),
                 )
             } else {
                 panel.child(line(
@@ -1625,17 +1802,32 @@ fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> E
             };
         }
         None => {
-            panel = panel.child(line("  Waiting for trace…", Style::new().fg(colors.muted)));
+            panel = panel
+                .child(log_window(ctx, job, lines, colors))
+                .child(line("  Waiting for trace…", colors.base().fg(colors.muted)));
         }
     }
+    if let Some(view) = ctx
+        .state
+        .log_views
+        .get(&job.id)
+        .filter(|v| !v.query.is_empty())
+    {
+        panel = panel.child(line(
+            format!(
+                "  Search {:?}: {}{} · n/N next/previous",
+                view.query,
+                view.current_match.map_or(0, |i| i + 1),
+                if view.matches.is_empty() {
+                    " · no matches".into()
+                } else {
+                    format!("/{}", view.matches.len())
+                }
+            ),
+            colors.base().fg(colors.yellow),
+        ));
+    }
     Element::from(panel).key(format!("trace-{}", job.id))
-}
-
-fn trace_tail(text: &str, count: usize) -> String {
-    // Only retain the visible tail, avoiding a copy/ANSI parse of an ever-growing entire trace.
-    let mut lines: Vec<_> = text.lines().rev().take(count).collect();
-    lines.reverse();
-    lines.join("\n")
 }
 
 fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
@@ -1653,24 +1845,23 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRo
         let selected = ctx.state.scope == Scope::Section
             && ctx.state.section_name() == "Jobs"
             && ctx.state.config.field == index;
-        let expanded = job.running() || ctx.state.expanded.contains(&job.id);
+        let expanded = ctx.state.job_expanded(job);
         let id = job.id;
         let link = ctx.link().clone();
+        let job_colors = if selected {
+            Colors {
+                background: colors.selection,
+                surface: colors.selection,
+                ..colors
+            }
+        } else {
+            colors
+        };
+        let style = interaction::style(ctx, &format!("job-{id}"), job_colors.base());
         content.push(
             DetailRow::interactive(
                 format!("job-{id}"),
-                rich(
-                    job_header(job, expanded, colors),
-                    interaction::style(
-                        ctx,
-                        &format!("job-{id}"),
-                        if selected {
-                            colors.selected()
-                        } else {
-                            colors.base()
-                        },
-                    ),
-                ),
+                rich(job_header(job, expanded, colors), style),
                 selected,
                 move || {
                     link.send(Msg::Section(3));
@@ -1689,10 +1880,12 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRo
             ),
         );
         if expanded {
-            content.push(DetailRow::keyed(
-                format!("trace-{}", job.id),
-                job_panel(ctx, job, if job.running() { 8 } else { 18 }, colors),
-            ));
+            let mut row = DetailRow::keyed(
+                format!("trace-{id}"),
+                job_panel(ctx, job, if job.running() { 8 } else { 18 }, job_colors),
+            );
+            row.focused = selected;
+            content.push(row);
         }
         content.push(blank().into());
     }
@@ -2429,8 +2622,15 @@ const HELP: &str = "\
 - **Ctrl+J** inserts a newline in multiline fields. **Esc** cancels.
 - ID-backed fields suggest names: **Up / Down** choose, **Enter** accepts, then saves.
 - Separate assignees/reviewers with commas; only the trimmed token at the caret is searched.
-- Running jobs expand automatically. All live traces appear inline in Jobs.
-- Job logs follow their trailing output; finished jobs expand on demand.
+- Running jobs expand automatically; Space or the +/− header toggles any job.
+- Manual collapse survives refresh and restart. Selection styling covers expanded logs.
+- Enter focuses a job's logs; ↑/↓ and PgUp/PgDn scroll; Home/End go to start/live tail.
+- Ctrl+↑/↓ and Ctrl+PgUp/PgDn scroll the selected job without focusing it.
+- z zooms a selected/focused job. Zoom offers a draggable scrollbar and mouse-wheel scrolling.
+- / searches loaded log history (literal, case-insensitive); n/N move between matching lines.
+- Esc closes search, then zoom, then log focus, before leaving Jobs.
+- Scrolling away from the bottom pauses following; End resumes following incoming output.
+- Fetched log history stays in memory until the item's cache is discarded; it is never saved to disk.
 - **DEMO** uses fictional offline data, never a live GitLab workspace.
 ";
 
@@ -2530,13 +2730,6 @@ mod tests {
         assert_eq!(colors.foreground, Color::hex_u24(0x313233));
         assert_eq!(colors.muted, Color::hex_u24(0x414243));
         assert_eq!(colors.accent, Color::hex_u24(0x515253));
-    }
-
-    #[test]
-    fn tails_keep_last_lines_without_splitting_unicode() {
-        assert_eq!(trace_tail("first\nsecond\nthird\n", 2), "second\nthird");
-        assert_eq!(trace_tail("α\nβ\nγ", 2), "β\nγ");
-        assert_eq!(trace_tail("", 10), "");
     }
 
     #[test]

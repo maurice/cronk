@@ -127,6 +127,7 @@ fn tab_state(state: &State) -> TabState {
         list_offset: state.scroll.offset,
         content_offset: state.content_offset,
         expanded: state.expanded.iter().copied().collect(),
+        collapsed: state.collapsed.iter().copied().collect(),
     }
 }
 
@@ -1793,7 +1794,7 @@ fn cache_finished_job(ui: &mut Ui, marker: &str) -> u64 {
     for _ in 0..index {
         key(ui, KeyCode::Down);
     }
-    key(ui, KeyCode::Enter);
+    key(ui, KeyCode::Char(' '));
     assert!(ui.state().expanded.contains(&job));
     let text = format!("{marker} λ cached trace\n").repeat(40);
     let offset = text.len() as u64;
@@ -2055,7 +2056,7 @@ fn a_finished_job_is_not_marked_drained_until_a_no_progress_eof_chunk() {
     let epoch = ui.state().detail_epoch;
     let job = ui.state().details.as_ref().unwrap().jobs[0].id;
     assert!(!ui.state().details.as_ref().unwrap().jobs[0].running());
-    // Enter expands the actual selected job; only the transport's bounded chunks are synthetic.
+    // Enter focuses and expands the selected job; only the transport's bounded chunks are synthetic.
     self::key(&mut ui, KeyCode::Enter);
     assert!(ui.state().expanded.contains(&job));
     let mut text = String::new();

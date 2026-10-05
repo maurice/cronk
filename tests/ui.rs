@@ -2340,7 +2340,10 @@ fn committed_keyboard_events_persist_immediately_and_restart_restores_the_route(
     settle_layout(&mut restarted);
     let mut navigation = tab_state(restarted.state());
     let list_selected = restarted.state().scroll.selected;
-    assert!(navigation.content_offset > 0);
+    assert_eq!(
+        navigation.content_offset, 0,
+        "early Fields stay within the boundary band without scrolling to the top"
+    );
     key(&mut restarted, KeyCode::Esc);
     settle_layout(&mut restarted);
     navigation.section = None;

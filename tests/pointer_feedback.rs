@@ -75,7 +75,15 @@ fn point(ui: &Ui, key: &str) -> (u16, u16) {
 
 fn assert_hover(ui: &mut Ui, key: &str) {
     mouse(ui, 0, 0, MouseKind::Moved);
-    let (x, y) = point(ui, key);
+    let (mut x, y) = point(ui, key);
+    // Detail controls reserve their first column for the background-free edge.
+    if key.starts_with("detail-section-")
+        || key.starts_with("edit-field-")
+        || key.starts_with("job-")
+        || key.starts_with("discussion-")
+    {
+        x += 1;
+    }
     let before = ui.capture_frame().cell(x, y).clone();
     let config = serde_json::to_value(&ui.state().config).unwrap();
     let focus = ui.focused_key().cloned();
@@ -222,6 +230,106 @@ fn work_row_hover_is_not_selection_and_preserves_every_label_cell() {
             }
             assert_eq!(ui.state().scroll.selected, selected);
             assert!(ui.state().config.route.is_none());
+        }
+    }
+}
+
+#[test]
+fn detail_sections_have_continuous_highlights_and_contract_to_focused_fields() {
+    for theme in THEMES {
+        for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
+            for animations in [false, true] {
+                let mut cfg = config(theme, if kind == ItemKind::Issue { 2 } else { 3 });
+                cfg.animations = animations;
+                cfg.route = Some(ItemKey {
+                    project: 9001,
+                    iid: if kind == ItemKind::Issue { 1 } else { 101 },
+                    kind,
+                });
+                let mut ui = mount(cfg);
+                ui.set_viewport(Rect {
+                    x: 0,
+                    y: 0,
+                    w: 110,
+                    h: 400,
+                });
+                settle(&mut ui);
+                let (x, start) = point(&ui, "detail-section-0");
+                let (_, next) = point(&ui, "detail-section-1");
+                assert_eq!(x, 0, "detail edges must align with list edges");
+                let frame = ui.capture_frame();
+                let base = frame.cell(x, next - 1).bg;
+                let selection = frame.cell(x + 1, start).bg;
+                let accent = frame.cell(x, start).fg;
+                assert_ne!(selection, base);
+                assert_eq!(frame.cell(x + 1, start).symbol, "F");
+                assert_eq!(frame.cell(ui.viewport().w - 3, start).symbol, "─");
+                for y in start..next - 1 {
+                    assert_eq!(frame.cell(x, y).symbol, "▕", "{theme} {kind:?} row {y}");
+                    assert_eq!(frame.cell(x, y).bg, base);
+                    assert_eq!(
+                        frame.cell(ui.viewport().w - 3, y).bg,
+                        selection,
+                        "Fields highlight must not split at blank rows: {theme} {kind:?} row {y}"
+                    );
+                }
+                assert_eq!(frame.cell(x, next).symbol, " ");
+                assert_eq!(frame.cell(x, next).fg, base, "unselected edge is invisible");
+                let (_, label_y) = point(&ui, "edit-field-2");
+                let pills: Vec<_> = (1..ui.viewport().w - 2)
+                    .filter_map(|x| {
+                        let cell = frame.cell(x, label_y);
+                        (cell.bg != selection && cell.bg != base).then(|| (x, cell.clone()))
+                    })
+                    .collect();
+                assert!(!pills.is_empty());
+                let original_offset = ui.state().content_offset;
+                ui.dispatch(Msg::Enter).unwrap();
+                settle(&mut ui);
+                let focused = point(&ui, "edit-field-0");
+                assert_eq!(focused.0, x);
+                let initial = ui.capture_frame().cell(x + 1, start).bg;
+                if animations {
+                    assert_eq!(
+                        initial, selection,
+                        "focus transition should start with the broad fill"
+                    );
+                    ui.advance(Duration::from_millis(80));
+                    settle(&mut ui);
+                    let middle = ui.capture_frame().cell(x + 1, start).bg;
+                    assert_ne!(middle, selection);
+                    assert_ne!(middle, base);
+                }
+                ui.advance(Duration::from_millis(200));
+                settle(&mut ui);
+                let frame = ui.capture_frame();
+                assert_eq!(frame.cell(x + 1, start).bg, base);
+                assert_eq!(frame.cell(x, start).fg, base);
+                assert_eq!(frame.cell(focused.0, focused.1).fg, accent);
+                assert_eq!(frame.cell(focused.0, focused.1).bg, base);
+                assert_eq!(frame.cell(focused.0 + 1, focused.1).bg, selection);
+                assert_eq!(frame.cell(ui.viewport().w - 3, focused.1 + 1).bg, selection);
+                for (x, pill) in pills {
+                    assert_eq!(
+                        frame.cell(x, label_y),
+                        &pill,
+                        "focus must preserve GitLab label colors"
+                    );
+                }
+                ui.dispatch(Msg::Back).unwrap();
+                settle(&mut ui);
+                ui.advance(Duration::from_millis(200));
+                settle(&mut ui);
+                let expanded = ui.capture_frame();
+                assert_eq!(expanded.cell(x, start).symbol, "▕");
+                assert_eq!(expanded.cell(x, start).fg, accent);
+                assert_eq!(expanded.cell(x + 1, start).bg, selection);
+                assert_eq!(
+                    ui.state().content_offset,
+                    original_offset,
+                    "focus animation must not change document geometry"
+                );
+            }
         }
     }
 }

@@ -47,6 +47,8 @@ pub struct State {
     pub content_offset: usize,
     pub content_max_offset: usize,
     pub reveal_content: bool,
+    pub(super) detail_viewport: Option<(ItemKey, ScrollViewportEvent)>,
+    pub(super) detail_offset_request: Option<usize>,
     pub(super) tab_cache: BTreeMap<String, TabCache>,
     pub traces: HashMap<u64, Trace>,
     pub expanded: HashSet<u64>,
@@ -246,7 +248,13 @@ pub enum Msg {
     ScrollContent(isize),
     Field(usize),
     ContentScroll(usize),
-    ContentViewport(usize, usize),
+    DetailViewport(
+        Box<ScrollViewportEvent>,
+        Option<String>,
+        usize,
+        ItemKey,
+        u64,
+    ),
     ListScroll(usize),
     ListViewportChanged,
     ToggleProject,
@@ -394,6 +402,34 @@ impl State {
             .copied()
             .unwrap_or("Fields")
     }
+    pub(super) fn detail_target_key(&self) -> String {
+        if self.scope == Scope::Section {
+            match self.section_name() {
+                "Fields" => return format!("edit-field-{}", self.config.field),
+                "Jobs" => {
+                    if let Some(job) = self
+                        .details
+                        .as_ref()
+                        .and_then(|d| d.jobs.get(self.config.field))
+                    {
+                        return format!("job-{}", job.id);
+                    }
+                }
+                "Discussions" => {
+                    if let Some(discussion) = self
+                        .details
+                        .as_ref()
+                        .and_then(|d| d.discussions.get(self.config.field))
+                    {
+                        return format!("discussion-{}", discussion.id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        format!("detail-section-{}", self.section_cursor)
+    }
+
     pub fn fields(&self) -> Vec<(&'static str, &'static str, String)> {
         let Some(d) = &self.details else {
             return vec![];

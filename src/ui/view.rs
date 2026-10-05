@@ -792,12 +792,9 @@ fn scroll_content(ctx: &Context<Cronk>, children: Vec<Element>, colors: Colors) 
         .scrollbar_config(vertical_scrollbar(ctx, "detail-scrollbar", colors))
         .scroll_wheel_multiplier(3)
         .smooth_wheel_scroll(false)
-        .padding(content_padding(2))
+        .padding(content_padding(0))
         .style(colors.base())
         .on_scroll_to(ctx.link().callback(Msg::DetailScrolled))
-        .on_viewport_change(ctx.link().callback(|event: ScrollViewportEvent| {
-            Msg::ContentViewport(event.offset, event.metrics.max_offset)
-        }))
         .children(children)
 }
 
@@ -870,19 +867,122 @@ fn metadata(label: &str, value: impl Into<String>, colors: Colors) -> Element {
         .into()
 }
 
+struct DetailRow {
+    content: Element,
+    key: Option<String>,
+    focused: bool,
+    on_click: Option<Box<dyn Fn() -> Msg>>,
+}
+
+impl<T: Into<Element>> From<T> for DetailRow {
+    fn from(content: T) -> Self {
+        Self {
+            content: content.into(),
+            key: None,
+            focused: false,
+            on_click: None,
+        }
+    }
+}
+
+impl DetailRow {
+    fn keyed(key: String, content: impl Into<Element>) -> Self {
+        Self {
+            key: Some(key),
+            ..Self::from(content)
+        }
+    }
+
+    fn interactive(
+        key: String,
+        content: impl Into<Element>,
+        focused: bool,
+        message: impl Fn() -> Msg + 'static,
+    ) -> Self {
+        Self {
+            focused,
+            on_click: Some(Box::new(message)),
+            ..Self::keyed(key, content)
+        }
+    }
+}
+
+fn detail_selection_row(content: Element, edge: Color, style: Style, colors: Colors) -> Element {
+    HStack::new()
+        .height(Length::Auto)
+        .style(colors.base())
+        .child(
+            Divider::vertical()
+                .ch(if edge == colors.background {
+                    ' '
+                } else {
+                    '▕'
+                })
+                .style(colors.base().fg(edge)),
+        )
+        .child(
+            VStack::new()
+                .height(Length::Auto)
+                .style(style)
+                .child(content),
+        )
+        .into()
+}
+
 fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Element {
     let state = &ctx.state;
     let mut content = Vec::new();
     for (index, section) in state.sections().iter().enumerate() {
         let selected = state.section_cursor == index;
+        // Fade the broad section highlight away around the focused item on Enter,
+        // and expand it again on Escape. Geometry and scroll anchors never animate.
+        let broad =
+            state.scope == Scope::Details || !matches!(*section, "Fields" | "Jobs" | "Discussions");
+        let background = if state.config.animations {
+            ctx.transition(
+                format!("detail-focus-background-{index}"),
+                if broad {
+                    colors.selection
+                } else {
+                    colors.background
+                },
+                TransitionConfig {
+                    duration: std::time::Duration::from_millis(160),
+                    ..TransitionConfig::default()
+                },
+            )
+        } else if broad {
+            colors.selection
+        } else {
+            colors.background
+        };
+        let edge = if state.config.animations {
+            ctx.transition(
+                format!("detail-focus-edge-{index}"),
+                if broad {
+                    colors.accent
+                } else {
+                    colors.background
+                },
+                TransitionConfig {
+                    duration: std::time::Duration::from_millis(160),
+                    ..TransitionConfig::default()
+                },
+            )
+        } else if broad {
+            colors.accent
+        } else {
+            colors.background
+        };
         let section_colors = Colors {
             background: if selected {
-                colors.selection
+                background
             } else {
                 colors.background
             },
             ..colors
         };
+        let edge = if selected { edge } else { colors.background };
         let style = interaction::style(
             ctx,
             &format!("detail-section-{index}"),
@@ -891,13 +991,20 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
         content.push(click(
             ctx,
             format!("detail-section-{index}"),
-            line(
-                format!(" {} {section}", if selected { "›" } else { " " }),
-                style.fg(colors.accent).bold(),
+            detail_selection_row(
+                HStack::new()
+                    .height(Length::Px(1))
+                    .style(style)
+                    .child(Text::new(format!("{section} ")).style(style.fg(colors.accent).bold()))
+                    .child(Divider::horizontal().style(style.fg(colors.muted)))
+                    .into(),
+                edge,
+                style,
+                colors,
             ),
             move || Msg::DetailSection(index),
         ));
-        let children = match *section {
+        let children: Vec<DetailRow> = match *section {
             "Fields" => fields(ctx, details, section_colors),
             "Description" => vec![
                 markdown(&details.item.description, section_colors)
@@ -926,30 +1033,74 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
         };
         // Keep stable row keys on direct children: native scroll anchoring then
         // survives newly inserted notes and collapsing job panels above the viewport.
-        content.extend(children);
+        for (row_index, child) in children.into_iter().enumerate() {
+            let key = child
+                .key
+                .unwrap_or_else(|| format!("detail-section-{index}-row-{row_index}"));
+            let row_style = if child.focused {
+                colors.selected()
+            } else {
+                section_colors.base()
+            };
+            let row = detail_selection_row(
+                child.content,
+                if child.focused { colors.accent } else { edge },
+                row_style,
+                colors,
+            );
+            content.push(if let Some(message) = child.on_click {
+                click(ctx, key, row, message)
+            } else {
+                row.key(key)
+            });
+        }
         content.push(blank().key(format!("detail-section-gap-{index}")));
     }
-    let mut scroll = scroll_content(ctx, content, colors);
-    if state.reveal_content {
-        let target = if state.scope == Scope::Section {
-            match state.section_name() {
-                "Fields" => Some(format!("edit-field-{}", state.config.field)),
-                "Jobs" => details
-                    .jobs
-                    .get(state.config.field)
-                    .map(|job| format!("job-{}", job.id)),
-                "Discussions" => details
-                    .discussions
-                    .get(state.config.field)
-                    .map(|d| format!("discussion-{}", d.id)),
-                _ => None,
-            }
+    let target = state.reveal_content.then(|| state.detail_target_key());
+    let origin = state.content_offset;
+    let route = details.item.key.clone();
+    let epoch = state.detail_epoch;
+    let callback_target = target.clone();
+    let mut scroll = scroll_content(ctx, content, colors).on_viewport_change(ctx.link().callback(
+        move |event: ScrollViewportEvent| {
+            Msg::DetailViewport(
+                Box::new(event),
+                callback_target.clone(),
+                origin,
+                route.clone(),
+                epoch,
+            )
+        },
+    ));
+    if let Some(target) = target {
+        let measured = state
+            .detail_viewport
+            .as_ref()
+            .filter(|(route, _)| *route == details.item.key)
+            .and_then(|(_, event)| {
+                event
+                    .visible
+                    .iter()
+                    .find(|child| child.key.as_ref() == Some(&target.clone().into()))
+                    .map(|child| (child.content_rect.y.max(0) as usize, event.metrics))
+            });
+        if let Some((selected, metrics)) = measured {
+            let mut boundary = crate::scroll::BoundaryScroll {
+                selected,
+                offset: origin,
+            };
+            boundary.normalize(metrics.len, metrics.visible);
+            scroll = scroll.offset(boundary.offset);
         } else {
-            None
-        };
-        scroll = scroll.scroll_to_key(
-            target.unwrap_or_else(|| format!("detail-section-{}", state.section_cursor)),
-        );
+            // Unseen targets need a layout pass. The viewport callback then applies
+            // the quarter-page band using actual wrapped heights and the original offset.
+            scroll = scroll.scroll_to_key(target);
+        }
+    } else if let Some(offset) = state.detail_offset_request {
+        // A semantic lookup can move the native widget even when the corrected
+        // numeric prop equals its previous value (notably zero). Explicitly
+        // synchronize once so remembered tab anchors also retain the correction.
+        scroll = scroll.scroll_to_key_offset("detail-section-0", offset);
     }
     interaction::scrollbar(
         ctx,
@@ -962,7 +1113,7 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
     )
 }
 
-fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element> {
+fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
     let item = &details.item;
     let mut content = vec![
         rich(
@@ -979,8 +1130,9 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
                 .project(details.item.key.project)
                 .map_or_else(|| details.item.key.project.to_string(), |p| p.path.clone()),
             colors,
-        ),
-        blank(),
+        )
+        .into(),
+        blank().into(),
     ];
     for (index, (label, _, value)) in ctx.state.fields().into_iter().enumerate() {
         let selected = ctx.state.scope == Scope::Section
@@ -992,13 +1144,7 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
             colors.base()
         };
         let style = interaction::style(ctx, &format!("edit-field-{index}"), style);
-        let mut spans = vec![
-            Span::new(format!(
-                " {} {label:<19} ",
-                if selected { "›" } else { " " }
-            ))
-            .fg(colors.accent),
-        ];
+        let mut spans = vec![Span::new(format!("{label:<19} ")).fg(colors.accent)];
         if label == "Labels" {
             spans.extend(label_spans(&details.item.labels, colors));
         } else if label == "Assignees" {
@@ -1026,8 +1172,7 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
                 value
             }));
         }
-        content.push(click(
-            ctx,
+        content.push(DetailRow::interactive(
             format!("edit-field-{index}"),
             VStack::new()
                 .height(Length::Auto)
@@ -1047,34 +1192,37 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
                     },
                     Style::new().fg(colors.muted),
                 )),
+            selected,
             move || Msg::Field(index),
         ));
     }
-    content.push(metadata(
-        "Author",
-        ctx.state.render_user(&item.author),
-        colors,
-    ));
-    content.push(metadata("Updated", item.updated_at.clone(), colors));
+    content.push(metadata("Author", ctx.state.render_user(&item.author), colors).into());
+    content.push(metadata("Updated", item.updated_at.clone(), colors).into());
     if item.key.kind == ItemKind::MergeRequest {
-        content.push(metadata(
-            "Branches",
-            format!("{} → {}", item.source_branch, item.target_branch),
-            colors,
-        ));
-        content.push(metadata(
-            "Review",
-            format!(
-                "{} discussions · {} unresolved · {} changed files",
-                details.discussions.len(),
-                item.unresolved
-                    .map_or_else(|| "unknown".into(), |n| n.to_string()),
-                details.diffs.len()
-            ),
-            colors,
-        ));
+        content.push(
+            metadata(
+                "Branches",
+                format!("{} → {}", item.source_branch, item.target_branch),
+                colors,
+            )
+            .into(),
+        );
+        content.push(
+            metadata(
+                "Review",
+                format!(
+                    "{} discussions · {} unresolved · {} changed files",
+                    details.discussions.len(),
+                    item.unresolved
+                        .map_or_else(|| "unknown".into(), |n| n.to_string()),
+                    details.diffs.len()
+                ),
+                colors,
+            )
+            .into(),
+        );
     }
-    content.push(metadata("Web URL", item.web_url.clone(), colors));
+    content.push(metadata("Web URL", item.web_url.clone(), colors).into());
     for warning in &details.warnings {
         content.push(
             Text::new(format!("○ {warning}"))
@@ -1088,7 +1236,7 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Elemen
     content
 }
 
-fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> Element {
+fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> DetailRow {
     let mut header = vec![
         Span::new(formatter.render(&note.author))
             .fg(colors.cyan)
@@ -1109,7 +1257,8 @@ fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> Element 
             colors,
         ));
     }
-    Element::from(
+    DetailRow::keyed(
+        format!("note-{}", note.id),
         VStack::new()
             .height(Length::Auto)
             .style(colors.base())
@@ -1122,10 +1271,9 @@ fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> Element 
             )
             .child(blank()),
     )
-    .key(format!("note-{}", note.id))
 }
 
-fn pipeline(details: &Details, colors: Colors) -> Vec<Element> {
+fn pipeline(details: &Details, colors: Colors) -> Vec<DetailRow> {
     let mut content = Vec::new();
     if let Some(pipeline) = &details.item.pipeline {
         content.push(
@@ -1138,7 +1286,7 @@ fn pipeline(details: &Details, colors: Colors) -> Vec<Element> {
             )
             .into(),
         );
-        content.push(metadata("Web URL", pipeline.web_url.clone(), colors));
+        content.push(metadata("Web URL", pipeline.web_url.clone(), colors).into());
     } else {
         content.push(
             line(
@@ -1169,9 +1317,8 @@ fn pipeline(details: &Details, colors: Colors) -> Vec<Element> {
     content
 }
 
-fn job_header(job: &Job, selected: bool, expanded: bool, colors: Colors) -> Vec<Span> {
+fn job_header(job: &Job, expanded: bool, colors: Colors) -> Vec<Span> {
     let mut spans = vec![
-        Span::new(if selected { "› " } else { "  " }).fg(colors.accent),
         Span::new(if expanded { "− " } else { "+ " }).fg(colors.muted),
         Span::new(job.name.clone()).bold(),
         Span::new(format!("  {}  #{}  ", job.stage, job.id)).fg(colors.muted),
@@ -1245,7 +1392,7 @@ fn trace_tail(text: &str, count: usize) -> String {
     lines.join("\n")
 }
 
-fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element> {
+fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
     if details.jobs.is_empty() {
         return vec![
             line(
@@ -1263,11 +1410,10 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element>
         let expanded = job.running() || ctx.state.expanded.contains(&job.id);
         let id = job.id;
         let link = ctx.link().clone();
-        content.push(click(
-            ctx,
+        content.push(DetailRow::interactive(
             format!("job-{id}"),
             rich(
-                job_header(job, selected, expanded, colors),
+                job_header(job, expanded, colors),
                 interaction::style(
                     ctx,
                     &format!("job-{id}"),
@@ -1278,6 +1424,7 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element>
                     },
                 ),
             ),
+            selected,
             move || {
                 link.send(Msg::Section(3));
                 link.send(Msg::Select(index));
@@ -1285,14 +1432,12 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element>
             },
         ));
         if expanded {
-            content.push(job_panel(
-                ctx,
-                job,
-                if job.running() { 8 } else { 18 },
-                colors,
+            content.push(DetailRow::keyed(
+                format!("trace-{}", job.id),
+                job_panel(ctx, job, if job.running() { 8 } else { 18 }, colors),
             ));
         }
-        content.push(blank());
+        content.push(blank().into());
     }
     content
 }
@@ -1308,7 +1453,7 @@ fn discussion_state(discussion: &Discussion) -> &'static str {
     }
 }
 
-fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Element> {
+fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
     if details.discussions.is_empty() {
         return vec![line("No discussions yet.", colors.base().fg(colors.muted)).into()];
     }
@@ -1328,22 +1473,17 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<E
             |note| ctx.state.render_user(&note.author),
         );
         let link = ctx.link().clone();
-        content.push(click(
-            ctx,
+        content.push(DetailRow::interactive(
             format!("discussion-{}", discussion.id),
             rich(
                 vec![
-                    Span::new(format!(
-                        " {} {}  ",
-                        if selected { "›" } else { " " },
-                        author
-                    ))
-                    .fg(colors.cyan),
+                    Span::new(format!("{author}  ")).fg(colors.cyan),
                     status_span(discussion_state(discussion), colors),
                     Span::new(format!("  ·  {} notes", discussion.notes.len())).fg(colors.muted),
                 ],
                 style,
             ),
+            selected,
             move || {
                 link.send(Msg::Section(4));
                 Msg::Select(index)
@@ -1355,12 +1495,12 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<E
                 .iter()
                 .map(|note| note_view(note, &ctx.state.user_formatter, colors)),
         );
-        content.push(blank());
+        content.push(blank().into());
     }
     content
 }
 
-fn changes(details: &Details, colors: Colors) -> Vec<Element> {
+fn changes(details: &Details, colors: Colors) -> Vec<DetailRow> {
     if details.diffs.is_empty() {
         return vec![line("No changes available.", colors.base().fg(colors.muted)).into()];
     }
@@ -1378,13 +1518,13 @@ fn changes(details: &Details, colors: Colors) -> Vec<Element> {
         } else {
             "modified"
         };
-        content.push(
-            Element::from(line(
+        content.push(DetailRow::keyed(
+            format!("diff-file-{index}"),
+            line(
                 format!("{path}  ·  {kind}"),
                 Style::new().fg(colors.accent).bg(colors.surface).bold(),
-            ))
-            .key(format!("diff-file-{index}")),
-        );
+            ),
+        ));
         if diff.too_large || diff.collapsed {
             content.push(line(if diff.too_large { "○ GitLab omitted this diff because it is too large." }
                 else { "○ GitLab returned a collapsed diff; open the merge request URL for the full patch." }, Style::new().fg(colors.yellow)).into());
@@ -1411,18 +1551,16 @@ fn changes(details: &Details, colors: Colors) -> Vec<Element> {
                 colors.muted
             };
             // Wrapping preserves the complete patch on narrow terminals without a second scroll axis.
-            content.push(
-                Element::from(
-                    Text::new(text.to_owned())
-                        .width(Length::Flex(1))
-                        .height(Length::Auto)
-                        .overflow(Overflow::Wrap)
-                        .style(colors.base().fg(foreground)),
-                )
-                .key(format!("diff-{index}-line-{number}")),
-            );
+            content.push(DetailRow::keyed(
+                format!("diff-{index}-line-{number}"),
+                Text::new(text.to_owned())
+                    .width(Length::Flex(1))
+                    .height(Length::Auto)
+                    .overflow(Overflow::Wrap)
+                    .style(colors.base().fg(foreground)),
+            ));
         }
-        content.push(blank());
+        content.push(blank().into());
     }
     content
 }

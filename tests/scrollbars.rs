@@ -1006,6 +1006,131 @@ fn detail_keyboard_selects_and_reveals_headers_on_short_and_narrow_terminals() {
     }
 }
 
+fn assert_detail_boundary(ui: &Ui, area: Rect, target: &str, previous_offset: usize) {
+    let cursor = rect(ui, target);
+    let document_row = i32::from(cursor.y) - i32::from(area.y) + ui.state().content_offset as i32;
+    assert!(document_row >= 0);
+    let mut expected = BoundaryScroll {
+        selected: document_row as usize,
+        offset: previous_offset,
+    };
+    expected.normalize(
+        ui.state().content_max_offset + area.h as usize,
+        area.h as usize,
+    );
+    assert_eq!(
+        ui.state().content_offset,
+        expected.offset,
+        "{target} must use the quarter-viewport cursor band, not top alignment: area={area:?}, cursor={cursor:?}, previous={previous_offset}, document_row={document_row}, max={}",
+        ui.state().content_max_offset
+    );
+    assert!(
+        cursor.y >= area.y && cursor.y < area.y + area.h as i16,
+        "{target} cursor is offscreen: {cursor:?}"
+    );
+}
+
+#[test]
+fn detail_section_navigation_uses_boundary_scrolling_in_both_directions() {
+    for screen in [Screen::Issue, Screen::MergeRequest] {
+        for (width, height) in [(120, 26), (40, 18)] {
+            let (mut ui, viewport_key) = detail_mount(screen, "midnight", width, height);
+            replace_details(&mut ui, compact_details);
+            let area = detail_area(&ui, &viewport_key);
+            let last = ui.state().sections().len() - 1;
+            for code in std::iter::repeat_n(KeyCode::Down, last)
+                .chain(std::iter::repeat_n(KeyCode::Up, last))
+                .chain([KeyCode::End, KeyCode::Home])
+            {
+                let previous = ui.state().content_offset;
+                key(&mut ui, code);
+                assert_detail_boundary(
+                    &ui,
+                    area,
+                    &format!("detail-section-{}", ui.state().section_cursor),
+                    previous,
+                );
+            }
+            // Manual paging does not change selection. A clamped Up must still
+            // recover that same header inside the band instead of at the top.
+            drag_to(&mut ui, area, true);
+            let previous = ui.state().content_offset;
+            key(&mut ui, KeyCode::Up);
+            assert_detail_boundary(&ui, area, "detail-section-0", previous);
+        }
+    }
+}
+
+#[test]
+fn focused_detail_items_use_the_same_boundary_band_and_preserve_it_on_reversal() {
+    for screen in [Screen::Issue, Screen::MergeRequest] {
+        for (width, height) in [(120, 26), (40, 18)] {
+            let (mut ui, viewport_key) = detail_mount(screen, "midnight", width, height);
+            let area = detail_area(&ui, &viewport_key);
+            let sections: &[usize] = if matches!(screen, Screen::Issue) {
+                &[0]
+            } else {
+                &[0, 3, 4]
+            };
+            for &section in sections {
+                select_detail_section(&mut ui, area, section);
+                let previous = ui.state().content_offset;
+                key(&mut ui, KeyCode::Enter);
+                let (keys, len): (Vec<String>, usize) = match section {
+                    0 => {
+                        let len = ui.state().fields().len();
+                        ((0..len).map(|i| format!("edit-field-{i}")).collect(), len)
+                    }
+                    3 => {
+                        let jobs = &ui.state().details.as_ref().unwrap().jobs;
+                        (
+                            jobs.iter().map(|j| format!("job-{}", j.id)).collect(),
+                            jobs.len(),
+                        )
+                    }
+                    4 => {
+                        let discussions = &ui.state().details.as_ref().unwrap().discussions;
+                        (
+                            discussions
+                                .iter()
+                                .map(|d| format!("discussion-{}", d.id))
+                                .collect(),
+                            discussions.len(),
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                assert_detail_boundary(&ui, area, &keys[0], previous);
+                let mut moved_without_scrolling = false;
+                let mut scrolled_at_boundary = false;
+                for code in std::iter::repeat_n(KeyCode::Down, len - 1)
+                    .chain(std::iter::repeat_n(KeyCode::Up, len - 1))
+                    .chain([KeyCode::End, KeyCode::Home])
+                {
+                    let previous = ui.state().content_offset;
+                    let field = ui.state().config.field;
+                    key(&mut ui, code);
+                    assert_detail_boundary(&ui, area, &keys[ui.state().config.field], previous);
+                    moved_without_scrolling |=
+                        field != ui.state().config.field && previous == ui.state().content_offset;
+                    scrolled_at_boundary |= previous != ui.state().content_offset;
+                }
+                if section == 0 {
+                    assert!(
+                        moved_without_scrolling,
+                        "cursor never traversed the viewport band"
+                    );
+                    assert!(
+                        scrolled_at_boundary,
+                        "Fields never scrolled at the band boundary"
+                    );
+                }
+                key(&mut ui, KeyCode::Esc);
+            }
+        }
+    }
+}
+
 #[test]
 fn selected_detail_section_has_a_distinct_background_in_every_theme() {
     for theme in THEMES {

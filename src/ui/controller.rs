@@ -108,6 +108,8 @@ impl Component for Cronk {
             content_offset: saved.as_ref().map_or(0, |tab| tab.content_offset),
             content_max_offset: usize::MAX,
             reveal_content: saved.is_none(),
+            detail_viewport: None,
+            detail_offset_request: None,
             tab_cache: BTreeMap::new(),
             traces: HashMap::new(),
             expanded: saved.map_or_else(HashSet::new, |tab| tab.expanded.into_iter().collect()),
@@ -596,11 +598,13 @@ impl Component for Cronk {
                 }
             }
             Msg::DetailScrolled(offset) => {
+                ctx.state.detail_offset_request = None;
                 ctx.state.reveal_content = false;
                 ctx.state.content_offset = offset;
                 self.persist(ctx);
             }
             Msg::ScrollContent(delta) => {
+                ctx.state.detail_offset_request = None;
                 ctx.state.reveal_content = false;
                 ctx.state.content_offset = ctx
                     .state
@@ -618,11 +622,59 @@ impl Component for Cronk {
                 self.persist(ctx);
                 self.edit_field(ctx);
             }
-            Msg::ContentViewport(offset, max_offset) => {
-                ctx.state.content_max_offset = max_offset;
-                return self.update(Msg::ContentScroll(offset), ctx);
+            Msg::DetailViewport(event, target, origin, route, epoch) => {
+                // Ignore callbacks from a previous route or a superseded keyboard target.
+                if epoch != ctx.state.detail_epoch
+                    || ctx.state.config.route.as_ref() != Some(&route)
+                {
+                    return Update::none();
+                }
+                ctx.state.content_max_offset = event.metrics.max_offset;
+                if target
+                    .as_ref()
+                    .is_some_and(|key| *key != ctx.state.detail_target_key())
+                {
+                    // The measured rows are still useful when rapid navigation
+                    // supersedes a reveal; only its offset request is stale.
+                    ctx.state.detail_viewport = Some((route, *event));
+                    return Update::none();
+                }
+                let navigation = target.is_some() && ctx.state.reveal_content;
+                let offset = if navigation {
+                    target
+                        .as_ref()
+                        .and_then(|key| {
+                            event
+                                .visible
+                                .iter()
+                                .find(|child| child.key.as_ref() == Some(&key.clone().into()))
+                        })
+                        .map_or(event.offset, |child| {
+                            let mut scroll = BoundaryScroll {
+                                selected: child.content_rect.y.max(0) as usize,
+                                offset: origin,
+                            };
+                            scroll.normalize(event.metrics.len, event.metrics.visible);
+                            scroll.offset
+                        })
+                } else {
+                    event.offset
+                };
+                ctx.state.detail_offset_request =
+                    (navigation && offset != event.offset).then_some(offset);
+                ctx.state.detail_viewport = Some((route, *event));
+                if navigation {
+                    // One-shot navigation: wheel/drag, refresh and Escape own the
+                    // viewport afterwards rather than snapping back to the target.
+                    ctx.state.reveal_content = false;
+                    ctx.state.content_offset = offset;
+                    self.persist(ctx);
+                } else {
+                    return self.update(Msg::ContentScroll(offset), ctx);
+                }
             }
             Msg::ContentScroll(offset) => {
+                ctx.state.detail_offset_request = None;
                 if ctx.state.content_offset != offset {
                     ctx.state.content_offset = offset;
                     if !self.persist(ctx) {
@@ -1127,6 +1179,8 @@ impl Cronk {
         ctx.state.expanded = tab.expanded.into_iter().collect();
         ctx.state.content_offset = tab.content_offset;
         ctx.state.content_max_offset = usize::MAX;
+        ctx.state.detail_viewport = None;
+        ctx.state.detail_offset_request = Some(tab.content_offset);
         ctx.state.section_cursor = tab.section_cursor.min(ctx.state.sections().len() - 1);
         ctx.state.reveal_content = false;
         ctx.state.scroll = BoundaryScroll {
@@ -1162,6 +1216,8 @@ impl Cronk {
     }
 
     fn open_item(&self, ctx: &mut Context<Self>, key: ItemKey) {
+        ctx.state.detail_viewport = None;
+        ctx.state.detail_offset_request = None;
         ctx.state.reveal_content = true;
         ctx.state.content_max_offset = usize::MAX;
         ctx.state.config.route = Some(key.clone());
@@ -1183,6 +1239,7 @@ impl Cronk {
     }
 
     fn move_selection(&self, ctx: &mut Context<Self>, delta: isize) {
+        ctx.state.detail_offset_request = None;
         ctx.state.reveal_content = true;
         match ctx.state.scope {
             Scope::List => {

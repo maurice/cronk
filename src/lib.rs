@@ -1,5 +1,6 @@
 mod ansi;
 pub mod build_info;
+mod cache;
 pub mod config;
 pub mod demo;
 pub mod filter;

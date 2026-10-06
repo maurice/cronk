@@ -479,7 +479,17 @@ pub struct Diff {
     pub collapsed: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DetailPart {
+    Core,
+    Activity,
+    Discussions,
+    Pipeline,
+    Changes,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Details {
     pub item: WorkItem,
     pub notes: Vec<Note>,
@@ -489,6 +499,8 @@ pub struct Details {
     pub jobs_project: Option<u64>,
     pub diffs: Vec<Diff>,
     pub warnings: Vec<String>,
+    /// Sections with usable content. Empty sections are distinct from unfetched ones.
+    pub loaded: std::collections::HashSet<DetailPart>,
 }
 
 #[derive(Clone, Debug)]

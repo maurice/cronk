@@ -256,6 +256,11 @@ impl Cronk {
             return Update::full();
         }
         self.api = validation.api;
+        self.enable_cache(ctx);
+        ctx.state.shared_details.clear();
+        ctx.state.detail_requests.clear();
+        ctx.state.tab_cache.clear();
+        ctx.state.sync_progress.clear();
         ctx.state.list_epoch += 1;
         ctx.state.list_pending.clear();
         ctx.state.user = validation.user;

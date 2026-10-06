@@ -100,7 +100,7 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | `?` | Keyboard guide |
 | `q` / `Ctrl+C` | Quit outside text editors |
 
-Each tab restores its last list or drilled-down detail scope, including selection, scroll position, and explicit job expansion/collapse choices. Navigation is saved to the workspace file for restart; loaded details and traces are cached in memory between visits and refreshed when due. A new tab's list is active immediately; there is no separate tab-navigation mode. Left/Right switch tabs without wrapping; Up/Down navigate the current scope. Modified arrows do not switch tabs. The built-in tab initials are underlined, saved tabs display their number shortcuts, and the bottom gutter repeats the hints. Tab shortcuts are inactive inside dialogs/editors. More than ten saved views remain accessible by Left/Right or mouse; the tab strip scrolls horizontally when necessary.
+Each tab restores its last list or drilled-down detail scope, including selection, scroll position, and explicit job expansion/collapse choices. Navigation is saved to the workspace file for restart; item details and in-flight detail requests are shared across tabs and refreshed when due, while log buffers and reading positions remain per-tab. A new tab's list is active immediately; there is no separate tab-navigation mode. Left/Right switch tabs without wrapping; Up/Down navigate the current scope. Modified arrows do not switch tabs. The built-in tab initials are underlined, saved tabs display their number shortcuts, and the bottom gutter repeats the hints. Tab shortcuts are inactive inside dialogs/editors. More than ten saved views remain accessible by Left/Right or mouse; the tab strip scrolls horizontally when necessary.
 
 Lists use a quarter-viewport boundary: the cursor moves to the lower/upper quarter margin, the viewport follows further movement, then the cursor reaches the actual final/first row. No wraparound. Three terminal rows form one list item; the margin rounds down to whole items.
 
@@ -189,30 +189,45 @@ kind = "issue"
 query = 'project:planning assignee:@me state:opened'
 ```
 
-Theme names are `midnight`, `dracula`, `light`, `blade-runner` (neon), `tokyo-night`, `gruvbox-dark`, `nord`, `solarized-dark`, `solarized-light`, `sepia-dark`, and `sepia-light`, also selectable in the palette (Choose theme). The newer themes are checked for high text contrast and a visible hover state. Optional `[colors]` overrides: `background`, `surface`, `selection`, `foreground`, `muted`, `accent`, each `"#RRGGBB"`. Overrides remain active after choosing another preset. Label colors always come from GitLab and remain intact over selection and hover backgrounds. Set `animations = false` to keep static hover feedback while disabling click flashes.
+Theme names are `midnight`, `dracula`, `light`, `blade-runner` (neon), `tokyo-night`, `gruvbox-dark`, `nord`, `solarized-dark`, `solarized-light`, `sepia-dark`, and `sepia-light`, also selectable in the palette (Choose theme). The newer themes are checked for high text contrast and a visible hover state. Optional `[colors]` overrides: `background`, `surface`, `selection`, `foreground`, `muted`, `accent`, each `"#RRGGBB"`. Overrides remain active after choosing another preset. Label colors always come from GitLab and remain intact over selection and hover backgrounds. Set `animations = false` to keep static hover feedback while disabling click flashes and skeleton pulsing.
 
 ### Refresh and request budget
 
-- Visible project lists: every **60 seconds**, only while at list/tab scope.
+- Visible project lists: incremental refresh every **60 seconds**, including while viewing details. Issues and MRs import independently so one long history does not block the other.
 - Active item details: every **10 seconds**, configurable down to 2 seconds (set 5 if preferred).
 - Running/expanded job traces: every **2 seconds**, only for the open item; batches of at most four concurrent trace requests.
 - Manual refresh: all visible projects and the active detail; does not bypass server backoff.
 - Conditional GET with ETag/Last-Modified, shared across client clones; bounded **128-entry / 16 MiB** HTTP cache. Successful writes invalidate cached validators/bodies.
-- Ordinary polls do not overlap for the same resource. Navigation and successful writes can supersede in-flight requests; their late completions are ignored. Failures retain the last successful rows and editor drafts, and are displayed instead of becoming empty lists.
+- Ordinary polls do not overlap for the same resource. Detail requests survive tab navigation and populate the shared item cache; successful writes invalidate caches and supersede older responses. Failures retain the last successful rows, detail sections, and editor drafts, and are displayed instead of becoming empty lists.
 - Exponential backoff up to 320 seconds, honoring both numeric and HTTP-date `Retry-After` values. Requests already in flight may still finish.
 
-No background service, telemetry, third-party data service, or agent invocation is involved. Runtime network traffic goes only to your configured GitLab instance. Lists/details/traces stay in memory; the workspace file contains configuration/navigation, not cached GitLab content or tokens.
+### Persistent cache and loading feedback
+
+Cronk stores lists and viewed detail sections in SQLite beside the workspace: `config.toml` uses a `config.cache/` directory. Databases are isolated by installation and credential fingerprint; switching tokens deliberately starts a separate cache. No token or job-log body is stored. On Unix the cache directory is private (`0700`) and databases are `0600`. Content is **not encrypted**: treat it like a local checkout containing potentially confidential project data.
+
+- Cached lists/details appear before network refresh completes. First imports retain **all history**, publishing each durable page immediately; interrupted imports resume at an inclusive timestamp boundary and deduplicate identities.
+- Successful checkpoints are separate for each project and issue/MR resource. Normal refreshes use `updated_after` with a two-minute overlap and a bounded `updated_before` window. Checkpoints advance only after a complete collection and durable commit, never after a failed page.
+- Once per **24 hours**, or via **Full resync · reconcile all history** in the command palette, a full collection reconciles disappeared items. Missing cached identities are individually checked before removal, because pagination can move items during an import. Pipeline/discussion signals have independent, bounded dashboard refreshes rather than relying on the MR timestamp.
+- The footer reports project/resource, received count, page and phase. A mini progress bar appears only when GitLab supplies a total; otherwise the loaded count is shown without an invented percentage. Backoff displays the retry countdown.
+- Details render their structure immediately. The core item arrives first, then activity, discussions, pipeline/jobs and changes load independently (up to four section workers). Missing sections have pulsing skeletons; cached sections remain readable during refresh, and incomplete sections show warnings.
+- **Clear local content cache** in the palette clears the current credential's cache after requests finish, pauses automatic polling, and returns to the list. Press `r` to import again. Other credential databases remain separate; remove the workspace's `.cache` directory while Cronk is stopped to remove all of them. This is not forensic secure deletion.
+
+![Progressive MR loading and sync progress, using fictional demo data](docs/progressive-loading.png)
+
+See [sync/cache design and the reproducible request-count comparison](docs/sync-cache.md).
+
+No background service, telemetry, third-party data service, or agent invocation is involved. Runtime network traffic goes only to your configured GitLab instance. The workspace TOML contains configuration/navigation, not cached GitLab content or tokens; job traces remain memory-only. Cache initialization errors are reported and fall back to memory-only operation.
 
 ## Current limits
 
 - **Not every GitLab field/filter is exposed.** Editors cover title, description, labels, state, assignees, milestones, issue iterations, MR target branch, and reviewers. Name completion covers labels, ID-backed fields, and projects, not branches. Iteration lookups require GitLab Premium/Ultimate; older versions may not support cadence-title search. Permission/version failures are shown rather than treated as empty results.
 - Issue activity is the reverse-chronological notes/system-notes feed, not a merged feed of every GitLab resource-event endpoint. General comments and discussion replies are supported; inline diff comments, review submission/approvals, merging, artifacts, and interactive manual jobs are not yet implemented.
-- Lists currently paginate **all history** on refresh, conditionally revalidating each page. Very large projects will need incremental/keyset synchronization and periodic reconciliation before this is an efficient daily driver. There is no offline content cache. Hidden projects are not newly polled, although requests already started may finish.
+- Initial imports and daily/manual reconciliation still paginate **all history**; routine refreshes are incremental. GitLab pagination is not an atomic snapshot, and the timestamp feed is not a deletion/permission-change feed. Inclusive replay and identity checks reduce these risks but do not replace reconciliation. Hidden projects are not newly polled, although requests already started may finish. Cached content remains readable on network errors; stale access/content is reconciled only after successful server checks.
 - Dashboard enrichment is bounded: at most 12 recently updated open MRs per project receive pipeline/discussion enrichment, with up to 12 additional discussion-page requests. Unknown values remain unknown. Open an MR to fetch its complete detail. A passed pipeline is not sufficient evidence that an MR is ready to merge.
 - Child/downstream pipelines are not traversed. Fork-owned head-pipeline jobs use the pipeline's own project. Older GitLab versions/permissions may omit optional data; warnings identify incomplete details. Server-truncated diffs are reported when detectable.
 - Trace reads use REST `byte_offset`/`byte_limit` parameters after a small, cached capability probe. Older servers that ignore or reject those parameters fall back to HTTP Range. If Range is also ignored, reads stream past the already-seen prefix (up to 8 MiB per request); larger prefixes produce an explicit error. Same-length log replacement cannot reliably be detected. Scrolling/search cover fetched history; no disk-backed log archive is provided.
-- Unsubmitted dialog text, log-reading positions/searches, and cached content are **not restored after process death**. List selection, document offsets, the open item/section/field, and job expansion/collapse choices are restored, then content is fetched again. Failed submissions retain the draft while the process is running. Writes are never automatically retried: after an ambiguous timeout, verify GitLab before retrying a create/comment to avoid duplicates.
-- No live enterprise validation yet. Start with a test project/read-only token. Terminal appearance and key encodings should also be checked in your actual terminal/OS.
+- Unsubmitted dialog text and job-log bodies/reading positions/searches are **not restored after process death**. List selection, document offsets, the open item/section/field, and job expansion/collapse choices are restored alongside cached lists and viewed details, then refreshed. Failed submissions retain the draft while the process is running. Writes are never automatically retried: after an ambiguous timeout, verify GitLab before retrying a create/comment to avoid duplicates.
+- The new sync/cache path is covered with local mock GitLab tests, not benchmarked against a live enterprise installation. Start with a test project/read-only token. Terminal appearance and key encodings should also be checked in your actual terminal/OS.
 
 ## Development
 

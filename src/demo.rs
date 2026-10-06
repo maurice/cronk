@@ -518,7 +518,8 @@ pub fn details(key: &ItemKey) -> Details {
         Vec::new()
     };
     Details { jobs: jobs(&item), jobs_project: Some(item.key.project), item, notes, discussions, diffs,
-        warnings: vec!["DEMO: all projects, people, patches, and logs are fictional. No GitLab instance is contacted.".into()] }
+        warnings: vec!["DEMO: all projects, people, patches, and logs are fictional. No GitLab instance is contacted.".into()],
+        loaded: std::collections::HashSet::from([crate::model::DetailPart::Core,crate::model::DetailPart::Activity,crate::model::DetailPart::Discussions,crate::model::DetailPart::Pipeline,crate::model::DetailPart::Changes]) }
 }
 
 /// A bounded cumulative snapshot. Two running job IDs can be polled with the same tick.

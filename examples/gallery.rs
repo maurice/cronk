@@ -30,6 +30,17 @@ fn main() -> anyhow::Result<()> {
             "light",
         ),
         (
+            "merge-request-fields",
+            3,
+            Some(ItemKey {
+                project: 9001,
+                iid: 102,
+                kind: ItemKind::MergeRequest,
+            }),
+            Some(0),
+            "light",
+        ),
+        (
             "jobs",
             3,
             Some(ItemKey {
@@ -87,6 +98,6 @@ fn main() -> anyhow::Result<()> {
         )?;
         std::fs::write(output.join(format!("{name}.md")), snapshot.to_markdown())?;
     }
-    println!("Wrote five PNG/Markdown snapshots to {}", output.display());
+    println!("Wrote six PNG/Markdown snapshots to {}", output.display());
     Ok(())
 }

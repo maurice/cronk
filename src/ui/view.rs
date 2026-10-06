@@ -1406,7 +1406,7 @@ fn project_fields(ctx: &Context<Cronk>, project: &Project, colors: Colors) -> Ve
     content.push(DetailRow::interactive(
         "edit-field-0".into(),
         field_row(
-            "Alias",
+            &format!("{:>label_width$}", "Alias"),
             label_width,
             vec![Span::new(alias_value)],
             colors.accent,
@@ -1433,7 +1433,7 @@ fn project_fields(ctx: &Context<Cronk>, project: &Project, colors: Colors) -> Ve
     ] {
         content.push(
             field_row(
-                label,
+                &format!("{label:>label_width$}"),
                 label_width,
                 vec![Span::new(value)],
                 colors.muted,
@@ -1468,7 +1468,7 @@ fn project_fields(ctx: &Context<Cronk>, project: &Project, colors: Colors) -> Ve
     content
 }
 
-/// A `label  value` row with the label right-aligned in a `label_width` column
+/// A `label  value` row with the label left-aligned in a `label_width` column
 /// and the value wrapping within its own column.
 fn field_row(
     label: &str,
@@ -1502,7 +1502,7 @@ fn field_row_element(
         .height(Length::Auto)
         .gap(2)
         .child(
-            Text::new(format!("{label:>label_width$}"))
+            Text::new(label.to_owned())
                 .width(Length::Px(label_width as u16))
                 .style(style.fg(label_color)),
         )
@@ -1854,6 +1854,18 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
     )
 }
 
+fn readonly_field_labels(kind: ItemKind) -> impl Iterator<Item = &'static str> {
+    ["Project path", "Author", "Updated"]
+        .into_iter()
+        .chain(
+            (kind == ItemKind::MergeRequest)
+                .then_some(["Branches", "Review"])
+                .into_iter()
+                .flatten(),
+        )
+        .chain(["Web URL"])
+}
+
 fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
     let state = &ctx.state;
     let item = &details.item;
@@ -1877,48 +1889,48 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
         blank().into(),
     ];
     let editable = ctx.state.fields();
-    let mut readonly = vec![
-        ("Project path", {
-            ctx.state
-                .project(details.item.key.project)
-                .map_or_else(|| details.item.key.project.to_string(), |p| p.path.clone())
-        }),
-        ("Author", ctx.state.render_user(&item.author)),
-        ("Updated", item.updated_at.clone()),
-    ];
-    if item.key.kind == ItemKind::MergeRequest {
-        readonly.push((
-            "Branches",
-            format!("{} → {}", item.source_branch, item.target_branch),
-        ));
-        readonly.push((
-            "Review",
-            format!(
-                "{} discussions · {} unresolved · {} changed files",
-                if state.detail_pending.is_some()
-                    && !details.loaded.contains(&DetailPart::Discussions)
-                {
-                    "unknown".into()
-                } else {
-                    details.discussions.len().to_string()
-                },
-                item.unresolved
-                    .map_or_else(|| "unknown".into(), |n| n.to_string()),
-                if state.detail_pending.is_some() && !details.loaded.contains(&DetailPart::Changes)
-                {
-                    "unknown".into()
-                } else {
-                    details.diffs.len().to_string()
-                }
-            ),
-        ));
-    }
-    readonly.push(("Web URL", item.web_url.clone()));
-    // One label column shared by editable and readonly rows so values align.
-    let label_width = editable
-        .iter()
-        .map(|(label, _, _)| *label)
-        .chain(readonly.iter().map(|(label, _)| *label))
+    let readonly = readonly_field_labels(item.key.kind)
+        .map(|label| {
+            let value = match label {
+                "Project path" => state
+                    .project(item.key.project)
+                    .map_or_else(|| item.key.project.to_string(), |p| p.path.clone()),
+                "Author" => state.render_user(&item.author),
+                "Updated" => item.updated_at.clone(),
+                "Branches" => format!("{} → {}", item.source_branch, item.target_branch),
+                "Review" => format!(
+                    "{} discussions · {} unresolved · {} changed files",
+                    if state.detail_pending.is_some()
+                        && !details.loaded.contains(&DetailPart::Discussions)
+                    {
+                        "unknown".into()
+                    } else {
+                        details.discussions.len().to_string()
+                    },
+                    item.unresolved
+                        .map_or_else(|| "unknown".into(), |n| n.to_string()),
+                    if state.detail_pending.is_some()
+                        && !details.loaded.contains(&DetailPart::Changes)
+                    {
+                        "unknown".into()
+                    } else {
+                        details.diffs.len().to_string()
+                    }
+                ),
+                "Web URL" => item.web_url.clone(),
+                _ => unreachable!("unknown readonly field"),
+            };
+            (label, value)
+        })
+        .collect::<Vec<_>>();
+    // Measure the full schema, not the current item or its populated values.
+    let label_width = [ItemKind::Issue, ItemKind::MergeRequest]
+        .into_iter()
+        .flat_map(|kind| {
+            super::editable_field_definitions(kind)
+                .map(|(label, _)| label)
+                .chain(readonly_field_labels(kind))
+        })
         .map(|label| label.chars().count())
         .max()
         .unwrap_or(0);

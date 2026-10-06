@@ -268,6 +268,12 @@ pub fn items() -> Vec<WorkItem> {
                 milestone_id: Some(401),
                 iteration: format!("Demo iteration {} · predictable concurrency", 12 + index),
                 iteration_id: Some(1200 + index as u64),
+                epic: if mr {
+                    String::new()
+                } else {
+                    "Demo epic · Reliable delivery".into()
+                },
+                epic_id: if mr { None } else { Some(701) },
                 source_branch: if mr {
                     format!(
                         "demo/{}/{}",

@@ -693,6 +693,94 @@ fn dialogs_and_palette_type_direct_shortcuts_without_switching_tabs() {
 }
 
 #[test]
+fn issue_and_mr_fields_share_left_aligned_labels_and_value_columns() {
+    for width in [80, 120] {
+        let mut columns = Vec::new();
+        for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
+            let mut cfg = config();
+            cfg.active_tab = if kind == ItemKind::Issue { 2 } else { 3 };
+            cfg.route = Some(ItemKey {
+                project: 9001,
+                iid: if kind == ItemKind::Issue { 1 } else { 101 },
+                kind,
+            });
+            cfg.section = Some(0);
+            let mut ui = mount_with_viewport(
+                cfg,
+                None,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: width,
+                    h: 60,
+                },
+            );
+            let item = &mut ui.state_mut().details.as_mut().unwrap().item;
+            item.title = "VALUE_TITLE".into();
+            item.state = "VALUE_STATE".into();
+            item.milestone = "VALUE_MILESTONE".into();
+            item.iteration = "VALUE_ITERATION".into();
+            item.epic = "VALUE_PARENT".into();
+            item.target_branch = "VALUE_TARGET".into();
+            item.updated_at = "VALUE_UPDATED".into();
+            item.web_url = "VALUE_URL".into();
+            ui.state_mut().scope = Scope::Section;
+            for _ in 0..3 {
+                settle_layout(&mut ui);
+            }
+            let text = ui.capture_frame().plain_text();
+            let mut fields = vec![
+                ("Title", "VALUE_TITLE"),
+                ("State", "VALUE_STATE"),
+                ("Milestone", "VALUE_MILESTONE"),
+                ("Updated", "VALUE_UPDATED"),
+                ("Web URL", "VALUE_URL"),
+            ];
+            if kind == ItemKind::Issue {
+                fields.extend([
+                    ("Iteration", "VALUE_ITERATION"),
+                    ("Parent (epic)", "VALUE_PARENT"),
+                ]);
+            } else {
+                fields.push(("Target branch", "VALUE_TARGET"));
+                assert!(
+                    !ui.state()
+                        .fields()
+                        .iter()
+                        .any(|(_, name, _)| *name == "epic_id")
+                );
+            }
+            let mut label_column = None;
+            let mut value_column = None;
+            for (label, value) in fields {
+                let row = text
+                    .lines()
+                    .find(|line| line.contains(label) && line.contains(value))
+                    .unwrap_or_else(|| panic!("missing {label}/{value}:\n{text}"));
+                let label_x = row[..row.find(label).unwrap()].chars().count();
+                let value_x = row[..row.find(value).unwrap()].chars().count();
+                assert_eq!(
+                    *label_column.get_or_insert(label_x),
+                    label_x,
+                    "{label}:\n{text}"
+                );
+                assert_eq!(
+                    *value_column.get_or_insert(value_x),
+                    value_x,
+                    "{label}:\n{text}"
+                );
+                assert_eq!(value_x - label_x, "Target branch".len() + 2);
+            }
+            columns.push(value_column.unwrap());
+        }
+        assert_eq!(
+            columns[0], columns[1],
+            "switching issue/MR at width {width}"
+        );
+    }
+}
+
+#[test]
 fn header_shows_build_revision_on_the_right() {
     let ui = mount(config(), None);
     let header = ui.capture_frame().to_lines()[0].clone();

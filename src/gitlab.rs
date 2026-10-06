@@ -381,6 +381,23 @@ impl GitLab {
             LookupKind::Users => self.url(&["projects", &project, "users"]),
             LookupKind::Milestones => self.url(&["projects", &project, "milestones"]),
             LookupKind::Iterations => self.url(&["projects", &project, "iterations"]),
+            LookupKind::Epics => {
+                // Epics belong to a project's group (and ancestor groups), not the project.
+                #[derive(Deserialize)]
+                struct Namespace {
+                    id: u64,
+                    kind: String,
+                }
+                #[derive(Deserialize)]
+                struct ProjectNamespace {
+                    namespace: Namespace,
+                }
+                let metadata: ProjectNamespace = self.get(&self.url(&["projects", &project]))?;
+                if metadata.namespace.kind != "group" {
+                    return Ok(vec![]);
+                }
+                self.url(&["groups", &metadata.namespace.id.to_string(), "epics"])
+            }
             LookupKind::Projects => self.url(&["projects"]),
             LookupKind::Labels => self.url(&["projects", &project, "labels"]),
         };
@@ -444,6 +461,36 @@ impl GitLab {
                     .into_iter()
                     .take(20)
                     .map(|entry| entry.lookup_option())
+                    .collect())
+            }
+            LookupKind::Epics => {
+                url.query_pairs_mut()
+                    .append_pair("include_ancestor_groups", "true")
+                    .append_pair("include_descendant_groups", "false");
+                #[derive(Deserialize)]
+                struct EpicMatch {
+                    id: u64,
+                    iid: u64,
+                    title: String,
+                    group_id: u64,
+                }
+                let epics: Vec<EpicMatch> = self.get(&url)?;
+                Ok(epics
+                    .into_iter()
+                    .take(20)
+                    .map(|epic| LookupOption {
+                        id: epic.id,
+                        label: epic.title.clone(),
+                        // Qualify identities so equal titles never resolve to the wrong epic.
+                        value: format!("{} · group {} &{}", epic.title, epic.group_id, epic.iid),
+                        api_value: epic.id.to_string(),
+                        description: format!(
+                            "group {} · &{} · ID {}",
+                            epic.group_id, epic.iid, epic.id
+                        ),
+                        color: String::new(),
+                        text_color: String::new(),
+                    })
                     .collect())
             }
             LookupKind::Labels => {
@@ -1397,7 +1444,7 @@ impl GitLab {
 
     /// Supported edits: title, description, labels/add_labels/remove_labels, state_event
     /// (close/reopen), assignee_id/assignee_ids, milestone_id, discussion_locked; plus
-    /// reviewer_ids/target_branch/draft for MRs and iteration_id/due_date/confidential
+    /// reviewer_ids/target_branch/draft for MRs and iteration_id/epic_id/due_date/confidential
     /// for issues. Values are text except comma-separated assignee/reviewer IDs, numeric
     /// single IDs (empty clears), and true/false booleans. Unknown fields are rejected.
     pub fn mutate(&self, mutation: Mutation) -> Result<()> {
@@ -1793,7 +1840,9 @@ fn edit_value(key: &ItemKey, field: &str, value: &str) -> Result<Value> {
                 .collect();
             Ok(json!(ids?))
         }
-        "milestone_id" | "assignee_id" | "iteration_id" if field != "iteration_id" || !mr => {
+        "milestone_id" | "assignee_id" | "iteration_id" | "epic_id"
+            if !matches!(field, "iteration_id" | "epic_id") || !mr =>
+        {
             let id = if value.trim().is_empty() {
                 0
             } else {
@@ -1869,6 +1918,8 @@ struct ApiItem {
     #[serde(default)]
     iteration: Option<Title>,
     #[serde(default)]
+    epic: Option<Title>,
+    #[serde(default)]
     source_branch: Option<String>,
     #[serde(default)]
     target_branch: Option<String>,
@@ -1923,6 +1974,18 @@ impl ApiItem {
             reviewers: self.reviewers,
             milestone_id: self.milestone.as_ref().and_then(|m| m.id),
             iteration_id: self.iteration.as_ref().and_then(|i| i.id),
+            epic_id: self.epic.as_ref().and_then(|e| e.id),
+            epic: self
+                .epic
+                .map(|e| {
+                    e.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+                        e.iid
+                            .or(e.id)
+                            .map(|id| format!("Epic &{id}"))
+                            .unwrap_or_default()
+                    })
+                })
+                .unwrap_or_default(),
             milestone: self
                 .milestone
                 .map(|m| {
@@ -2267,6 +2330,104 @@ mod tests {
     }
 
     #[test]
+    fn epic_lookup_searches_project_group_and_ancestors_with_distinct_identities() {
+        let mock = Mock::new(|request| {
+            let url = request.url();
+            match url.path() {
+                "/api/v4/projects/7" => Reply::json(json!({"namespace":{"id":60,"kind":"group"}})),
+                "/api/v4/groups/60/epics" => {
+                    let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                    assert_eq!(params["include_ancestor_groups"], "true");
+                    assert_eq!(params["include_descendant_groups"], "false");
+                    assert_eq!(params["search"], "Équipe & next");
+                    assert_eq!(params["per_page"], "20");
+                    assert_eq!(params["page"], "1");
+                    Reply::json(json!([
+                        {"id":900,"iid":1,"group_id":60,"title":"Same title"},
+                        {"id":901,"iid":1,"group_id":6,"title":"Same title"}
+                    ]))
+                }
+                _ => panic!("unexpected request: {}", request.target),
+            }
+        });
+        let options = mock
+            .client()
+            .lookup(7, LookupKind::Epics, "Équipe & next")
+            .unwrap();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].api_value, "900");
+        assert_eq!(options[1].api_value, "901");
+        assert_ne!(options[0].value, options[1].value);
+        assert!(options[1].description.contains("group 6"));
+    }
+
+    #[test]
+    fn epic_lookup_handles_personal_namespaces_and_reports_unavailable_features() {
+        let personal = Mock::new(|request| {
+            assert_eq!(request.url().path(), "/api/v4/projects/7");
+            Reply::json(json!({"namespace":{"id":60,"kind":"user"}}))
+        });
+        assert!(
+            personal
+                .client()
+                .lookup(7, LookupKind::Epics, "")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(personal.requests.lock().unwrap().len(), 1);
+        for status in [403, 404] {
+            let mock = Mock::new(move |request| {
+                if request.url().path() == "/api/v4/projects/7" {
+                    Reply::json(json!({"namespace":{"id":60,"kind":"group"}}))
+                } else {
+                    Reply::bytes(status, b"unavailable".to_vec())
+                }
+            });
+            let error = mock
+                .client()
+                .lookup(7, LookupKind::Epics, "")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+        }
+    }
+
+    #[test]
+    fn epic_edits_use_global_ids_and_zero_to_clear_and_reject_mr_edits() {
+        let mock = Mock::new(|_| Reply::bytes(204, Vec::new()));
+        let client = mock.client();
+        for value in ["900", ""] {
+            client
+                .mutate(Mutation::Edit {
+                    key: key(ItemKind::Issue),
+                    field: "epic_id".into(),
+                    value: value.into(),
+                })
+                .unwrap();
+        }
+        for (kind, value) in [
+            (ItemKind::MergeRequest, "900"),
+            (ItemKind::Issue, "not-an-id"),
+        ] {
+            assert!(
+                client
+                    .mutate(Mutation::Edit {
+                        key: key(kind),
+                        field: "epic_id".into(),
+                        value: value.into(),
+                    })
+                    .is_err()
+            );
+        }
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "PUT");
+        assert_eq!(requests[0].url().path(), "/api/v4/projects/7/issues/1");
+        assert_eq!(requests[0].json(), json!({"epic_id":900}));
+        assert_eq!(requests[1].json(), json!({"epic_id":0}));
+    }
+
+    #[test]
     fn current_iteration_uses_symbolic_current_state() {
         let mock = Mock::new(|request| {
             let params: HashMap<_, _> = request.url().query_pairs().into_owned().collect();
@@ -2438,6 +2599,7 @@ mod tests {
         let mut value = raw_item(1, "opened");
         value["milestone"] = json!({"id":123,"iid":3,"title":"Release"});
         value["iteration"] = json!({"id":456,"iid":6,"title":"Sprint"});
+        value["epic"] = json!({"id":789,"iid":9,"title":"Roadmap","group_id":60});
         let item = serde_json::from_value::<ApiItem>(value)
             .unwrap()
             .into_item(7, ItemKind::Issue);
@@ -2445,6 +2607,33 @@ mod tests {
         assert_eq!(item.iteration_id, Some(456));
         assert_eq!(item.milestone, "Release");
         assert_eq!(item.iteration, "Sprint");
+        assert_eq!(item.epic_id, Some(789));
+        assert_eq!(item.epic, "Roadmap");
+        // Cache round trips retain the assignment; old caches and Free responses remain valid.
+        let cached: WorkItem =
+            serde_json::from_value(serde_json::to_value(&item).unwrap()).unwrap();
+        assert_eq!(cached, item);
+        for epic in [
+            None,
+            Some(Value::Null),
+            Some(json!({"id":789,"iid":9,"title":null})),
+        ] {
+            let mut value = raw_item(1, "opened");
+            if let Some(epic) = epic {
+                value["epic"] = epic;
+            }
+            let item = serde_json::from_value::<ApiItem>(value)
+                .unwrap()
+                .into_item(7, ItemKind::Issue);
+            if item.epic_id.is_some() {
+                assert_eq!(item.epic, "Epic &9");
+            } else {
+                assert!(item.epic.is_empty());
+            }
+        }
+        let old: WorkItem = serde_json::from_value(json!({"title":"cached before epics"})).unwrap();
+        assert_eq!(old.epic_id, None);
+        assert!(old.epic.is_empty());
     }
 
     #[derive(Debug)]

@@ -387,11 +387,12 @@ fn local_options(state: &State, c: &Completion) -> Vec<LookupOption> {
                 .chain(std::iter::once(&item.author))
                 .map(LookupOption::user)
                 .collect(),
-            LookupKind::Milestones | LookupKind::Iterations => {
-                let (id, label) = if c.kind == LookupKind::Milestones {
-                    (item.milestone_id, &item.milestone)
-                } else {
-                    (item.iteration_id, &item.iteration)
+            LookupKind::Milestones | LookupKind::Iterations | LookupKind::Epics => {
+                let (id, label) = match c.kind {
+                    LookupKind::Milestones => (item.milestone_id, &item.milestone),
+                    LookupKind::Iterations => (item.iteration_id, &item.iteration),
+                    LookupKind::Epics => (item.epic_id, &item.epic),
+                    _ => unreachable!(),
                 };
                 id.map(|id| LookupOption {
                     id,

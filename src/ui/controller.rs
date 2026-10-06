@@ -2156,7 +2156,7 @@ impl Cronk {
         };
         let help = match *name {
             "state_event" => "Enter close or reopen. Enter commits · Esc cancels",
-            "milestone_id" | "iteration_id" => {
+            "milestone_id" | "iteration_id" | "epic_id" => {
                 "Type a name · ↑/↓ suggestions · Enter chooses, then saves · Empty clears · Esc cancels"
             }
             "assignee_ids" | "reviewer_ids" => {
@@ -2178,6 +2178,7 @@ impl Cronk {
             "assignee_ids" | "reviewer_ids" => Some(LookupKind::Users),
             "milestone_id" => Some(LookupKind::Milestones),
             "iteration_id" => Some(LookupKind::Iterations),
+            "epic_id" => Some(LookupKind::Epics),
             _ => None,
         };
         if let Some(kind) = lookup_kind {
@@ -2199,11 +2200,12 @@ impl Cronk {
                             .chain(&item.reviewers)
                             .map(LookupOption::user),
                     ),
-                    LookupKind::Milestones | LookupKind::Iterations => {
-                        let id = if kind == LookupKind::Milestones {
-                            item.milestone_id
-                        } else {
-                            item.iteration_id
+                    LookupKind::Milestones | LookupKind::Iterations | LookupKind::Epics => {
+                        let id = match kind {
+                            LookupKind::Milestones => item.milestone_id,
+                            LookupKind::Iterations => item.iteration_id,
+                            LookupKind::Epics => item.epic_id,
+                            _ => unreachable!(),
                         };
                         if let Some(id) = id {
                             c.resolved.insert(initial.trim().to_owned(), id.to_string());

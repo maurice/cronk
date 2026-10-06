@@ -66,6 +66,9 @@ pub struct User {
     pub id: u64,
     pub username: String,
     pub name: String,
+    /// GitLab exposes this only when the user has chosen to make it public.
+    pub public_email: Option<String>,
+    pub bot: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -332,6 +335,28 @@ mod dashboard_tests {
     use super::*;
 
     const ME: u64 = 1;
+
+    #[test]
+    fn user_profiles_deserialize_optional_public_email_and_bot_flag() {
+        let profile: User = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "username": "opaque-bot-123",
+            "name": "Deploy token",
+            "public_email": "deploy@example.org",
+            "bot": true
+        }))
+        .unwrap();
+        assert_eq!(profile.public_email.as_deref(), Some("deploy@example.org"));
+        assert!(profile.bot);
+
+        let sparse: User = serde_json::from_value(serde_json::json!({
+            "id": 8,
+            "username": "human"
+        }))
+        .unwrap();
+        assert_eq!(sparse.public_email, None);
+        assert!(!sparse.bot);
+    }
 
     fn mr() -> WorkItem {
         WorkItem {

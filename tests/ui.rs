@@ -2999,6 +2999,7 @@ fn configured_user_name_pattern_is_used_in_the_interface() {
         id: 9876,
         username: "jdoe".into(),
         name: "Doe John 12345678".into(),
+        ..User::default()
     };
     ui.state_mut().user = user.clone();
     ui.state_mut().items[0].author = user;

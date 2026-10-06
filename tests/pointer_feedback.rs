@@ -133,6 +133,38 @@ fn running_status_uses_balanced_blue_in_every_theme() {
 }
 
 #[test]
+fn user_labels_show_available_profile_details_on_hover() {
+    let mut ui = mount(config("midnight", 2));
+    let key = ui.state().visible_items()[0].key.clone();
+    let label_key = format!(
+        "item-{}-{}-{}-author",
+        key.project,
+        key.kind.segment(),
+        key.iid
+    );
+    let author = &mut ui
+        .state_mut()
+        .items
+        .iter_mut()
+        .find(|item| item.key == key)
+        .unwrap()
+        .author;
+    author.username = "opaque-bot-a83f".into();
+    author.name = "Deploy automation".into();
+    author.public_email = Some("deploy@example.org".into());
+    author.bot = true;
+    settle(&mut ui);
+
+    let (x, y) = point(&ui, &label_key);
+    mouse(&mut ui, x, y, MouseKind::Moved);
+    let text = ui.capture_frame().plain_text();
+    assert!(text.contains("Name: Deploy automation"), "{text}");
+    assert!(text.contains("Username: @opaque-bot-a83f"), "{text}");
+    assert!(text.contains("Public email: deploy@example.org"), "{text}");
+    assert!(text.contains("Bot account"), "{text}");
+}
+
+#[test]
 fn tabs_lists_checkboxes_and_dialog_controls_have_hover_in_every_theme() {
     for theme in THEMES {
         let mut ui = mount(config(theme, 1));

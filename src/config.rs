@@ -180,6 +180,7 @@ impl UserFormatter {
             id: option.id,
             username: option.value.trim_start_matches('@').into(),
             name: option.label.clone(),
+            ..User::default()
         })
     }
 
@@ -431,6 +432,7 @@ mod tests {
             id: 42,
             username: "jdoe".into(),
             name: "Doe John 12345678".into(),
+            ..User::default()
         };
         assert_eq!(formatter.render(&user), "John");
         let option = LookupOption {

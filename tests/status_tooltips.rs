@@ -267,6 +267,58 @@ fn detail_padding_and_status_slots_align_with_lists_in_every_theme() {
 }
 
 #[test]
+fn syncing_dot_changes_color_without_blinking_or_changing_text() {
+    for theme in cronk::config::THEMES {
+        let mut ui = mount(theme, 0, None);
+        ui.state_mut().mutation_pending = true;
+        ui.render();
+        let dot = rect(&ui, "sync-status");
+        let (x, y) = (dot.x as u16, dot.y as u16);
+        let frame = ui.capture_frame();
+        let start = frame.cell(x, y).fg;
+        let background = frame.cell(x, y).bg;
+        let text_color = frame.cell(x + 2, y).fg;
+        assert_eq!(frame.cell(x, y).symbol, "●");
+        let mut changed = false;
+        let tick = ui.state().tick;
+        for _ in 0..10 {
+            ui.advance_frame(std::time::Duration::from_millis(50));
+            let frame = ui.capture_frame();
+            assert_eq!(frame.cell(x, y).symbol, "●");
+            assert_eq!(frame.cell(x, y).bg, background);
+            assert_eq!(frame.cell(x + 2, y).fg, text_color);
+            changed |= frame.cell(x, y).fg != start;
+        }
+        assert!(
+            changed,
+            "{theme}: dot should animate between application ticks"
+        );
+        assert_eq!(ui.state().tick, tick, "animation must not drive polling");
+        assert_tooltip(&mut ui, "sync-status", "Syncing: Requests to GitLab");
+        ui.state_mut().mutation_pending = false;
+        ui.render();
+        assert!(ui.rect_of_key(&"sync-status".into()).is_none());
+    }
+}
+
+#[test]
+fn syncing_dot_is_static_when_animations_are_disabled() {
+    let mut ui = mount("light", 0, None);
+    ui.state_mut().config.animations = false;
+    ui.state_mut().mutation_pending = true;
+    ui.render();
+    let dot = rect(&ui, "sync-status");
+    let (x, y) = (dot.x as u16, dot.y as u16);
+    let start = ui.capture_frame().cell(x, y).fg;
+    for _ in 0..10 {
+        ui.advance_frame(std::time::Duration::from_millis(50));
+        let frame = ui.capture_frame();
+        assert_eq!(frame.cell(x, y).symbol, "●");
+        assert_eq!(frame.cell(x, y).fg, start);
+    }
+}
+
+#[test]
 fn tooltips_explain_live_logs_sync_and_diff_warnings_and_do_not_block_job_clicks() {
     let route = ItemKey {
         project: 9001,

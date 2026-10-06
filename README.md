@@ -191,7 +191,7 @@ kind = "issue"
 query = 'project:planning assignee:@me state:opened'
 ```
 
-Theme names are `midnight`, `dracula`, `light`, `blade-runner` (neon), `tokyo-night`, `gruvbox-dark`, `nord`, `solarized-dark`, `solarized-light`, `sepia-dark`, and `sepia-light`, also selectable in the palette (Choose theme). The newer themes are checked for high text contrast and a visible hover state. Optional `[colors]` overrides: `background`, `surface`, `selection`, `foreground`, `muted`, `accent`, each `"#RRGGBB"`. Overrides remain active after choosing another preset. Label colors always come from GitLab and remain intact over selection and hover backgrounds. Set `animations = false` to keep static hover feedback while disabling click flashes and skeleton pulsing.
+Theme names are `midnight`, `dracula`, `light`, `blade-runner` (neon), `tokyo-night`, `gruvbox-dark`, `nord`, `solarized-dark`, `solarized-light`, `sepia-dark`, and `sepia-light`, also selectable in the palette (Choose theme). The newer themes are checked for high text contrast and a visible hover state. Optional `[colors]` overrides: `background`, `surface`, `selection`, `foreground`, `muted`, `accent`, each `"#RRGGBB"`. Overrides remain active after choosing another preset. Label colors always come from GitLab and remain intact over selection and hover backgrounds. Set `animations = false` to keep static hover feedback while disabling click flashes, skeleton pulsing, and the syncing dot's color cycle.
 
 ### Refresh and request budget
 
@@ -215,6 +215,12 @@ Cronk stores lists and viewed detail sections in SQLite beside the workspace: `c
 - **Clear local content cache** in the palette clears the current credential's cache after requests finish, pauses automatic polling, and returns to the list. Press `r` to import again. Other credential databases remain separate; remove the workspace's `.cache` directory while Cronk is stopped to remove all of them. This is not forensic secure deletion.
 
 ![Progressive MR loading and sync progress, using fictional demo data](docs/progressive-loading.png)
+
+While requests are in progress, the solid dot beside **Syncing** gently cycles through theme colors every five seconds. Intermediate colors maintain at least 4.5:1 contrast against the footer, including custom surfaces. With `animations = false`, the dot stays solid blue.
+
+![Five-second syncing color cycle in midnight and light themes, using fictional demo data](docs/syncing-status.gif)
+
+[Reproduce and verify the animated preview](docs/syncing-preview.md).
 
 See [sync/cache design and the reproducible request-count comparison](docs/sync-cache.md).
 

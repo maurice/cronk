@@ -8,11 +8,11 @@ use crate::{
     config::{Config, UserFormatter},
     model::*,
 };
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, time::Duration};
 use tui_lipan::{
     TextAreaColorInput, TextAreaColorLines, TextAreaColorStrategy,
     prelude::*,
-    style::{RowStylePolicy, ThemePalette},
+    style::{CellEffect, EffectCell, EffectContext, RowStylePolicy, ThemePalette},
 };
 
 #[derive(Clone, Copy)]
@@ -2427,6 +2427,100 @@ fn changes(details: &Details, colors: Colors) -> Vec<DetailRow> {
     content
 }
 
+/// A paint-only animation: network polling and the rest of the UI keep their own cadence.
+#[derive(Debug)]
+struct SyncColorCycle {
+    palette: [Color; 5],
+    background_luminance: f64,
+}
+
+impl SyncColorCycle {
+    fn new(colors: Colors) -> Self {
+        Self {
+            // Adjacent hues around the wheel, beginning at the existing sync blue.
+            palette: [
+                colors.blue,
+                colors.green,
+                colors.yellow,
+                colors.red,
+                colors.purple,
+            ],
+            background_luminance: Self::luminance(colors.surface),
+        }
+    }
+
+    fn luminance(color: Color) -> f64 {
+        let (r, g, b) = color.to_rgb().expect("sync colors are RGB");
+        let [r, g, b] = [r, g, b].map(|channel| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    fn contrast(&self, color: Color) -> f64 {
+        let fg = Self::luminance(color);
+        let bg = self.background_luminance;
+        (fg.max(bg) + 0.05) / (fg.min(bg) + 0.05)
+    }
+
+    fn color(&self, elapsed: Duration) -> Color {
+        let phase = elapsed.as_secs_f64().rem_euclid(5.0);
+        let index = phase.floor() as usize;
+        // One second per hue, with zero velocity at both ends (including the loop seam).
+        let fraction = (phase - index as f64) as f32;
+        let eased = Easing::EaseInOutSine.apply(fraction);
+        let color =
+            self.palette[index].blend_toward(self.palette[(index + 1) % self.palette.len()], eased);
+        self.readable(color)
+    }
+
+    fn readable(&self, color: Color) -> Color {
+        // Interpolated colors can have worse contrast than either endpoint. Check every
+        // frame, including custom surfaces; retain hue by blending only toward a neutral.
+        // A little headroom above 4.5:1 absorbs 8-bit channel rounding.
+        const MINIMUM: f64 = 4.52;
+        if self.contrast(color) >= MINIMUM {
+            return color;
+        }
+        let black = Color::Rgb(0, 0, 0);
+        let white = Color::Rgb(255, 255, 255);
+        let target = if self.contrast(black) > self.contrast(white) {
+            black
+        } else {
+            white
+        };
+        let (mut low, mut high) = (0.0, 1.0);
+        for _ in 0..12 {
+            let mid = (low + high) / 2.0;
+            if self.contrast(color.blend_toward(target, mid)) >= MINIMUM {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        color.blend_toward(target, high)
+    }
+}
+
+impl CellEffect for SyncColorCycle {
+    fn apply(&self, cell: &mut EffectCell, ctx: &EffectContext) {
+        cell.fg = self.color(ctx.elapsed).to_rgb().unwrap().into();
+    }
+
+    fn is_animated(&self) -> bool {
+        true
+    }
+
+    fn animation_interval(&self) -> Duration {
+        Duration::from_millis(33)
+    }
+}
+
 fn footer(ctx: &Context<Cronk>, colors: Colors) -> Element {
     let state = &ctx.state;
     let busy = state.mutation_pending
@@ -2451,24 +2545,25 @@ fn footer(ctx: &Context<Cronk>, colors: Colors) -> Element {
         .style(style)
         .child(Text::from_spans(status).height(Length::Px(1)).style(style));
     if busy {
-        status_line = status_line
-            .child(dot_tooltip(
-                ctx,
-                "sync-status",
-                if state.tick.is_multiple_of(2) {
-                    '●'
-                } else {
-                    '○'
-                },
-                colors.blue,
-                "Syncing: Requests to GitLab are in progress",
-                style,
-            ))
-            .child(
-                Text::new(" Syncing  ")
-                    .height(Length::Px(1))
-                    .style(style.fg(colors.blue)),
-            );
+        let cycle = SyncColorCycle::new(colors);
+        let dot = dot_tooltip(
+            ctx,
+            "sync-status",
+            '●',
+            cycle.readable(colors.blue),
+            "Syncing: Requests to GitLab are in progress",
+            style,
+        );
+        let dot = if state.config.animations {
+            EffectScope::new().custom_effect(cycle).child(dot).into()
+        } else {
+            dot
+        };
+        status_line = status_line.child(dot).child(
+            Text::new(" Syncing  ")
+                .height(Length::Px(1))
+                .style(style.fg(colors.blue)),
+        );
     }
     status_line = status_line.child(
         Text::new(if let Some(error) = &state.error {
@@ -3143,6 +3238,54 @@ mod tests {
             1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
             0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
         ]
+    }
+
+    #[test]
+    fn sync_cycle_is_smooth_periodic_and_readable_in_every_theme() {
+        for theme in crate::config::THEMES {
+            let colors = themed(theme);
+            let cycle = SyncColorCycle::new(colors);
+            let start = cycle.color(Duration::ZERO);
+            assert_eq!(start, cycle.color(Duration::from_secs(5)), "{theme}");
+            assert_eq!(start, cycle.color(Duration::from_secs(500)), "{theme}");
+            let mut previous = cycle.color(Duration::from_millis(4990));
+            let mut unique = std::collections::HashSet::new();
+            for millis in (0..5000).step_by(10) {
+                let color = cycle.color(Duration::from_millis(millis));
+                assert!(
+                    contrast_ratio(color, colors.surface) >= 4.5,
+                    "{theme}: {millis}ms"
+                );
+                let rgb = color.to_rgb().unwrap();
+                unique.insert(rgb);
+                let before = previous.to_rgb().unwrap();
+                for (a, b) in [(rgb.0, before.0), (rgb.1, before.1), (rgb.2, before.2)] {
+                    assert!(a.abs_diff(b) <= 5, "{theme}: abrupt change at {millis}ms");
+                }
+                previous = color;
+            }
+            assert!(unique.len() > 200, "{theme}: too few intermediate colors");
+        }
+    }
+
+    #[test]
+    fn sync_cycle_preserves_contrast_on_custom_surfaces() {
+        // Include mid-grey (the hardest background), plus colored custom surfaces.
+        for surface in [0x000000, 0xffffff, 0x757575, 0x808080, 0x236981, 0x985a76] {
+            let colors = Colors {
+                surface: Color::hex_u24(surface),
+                ..themed("midnight")
+            };
+            let cycle = SyncColorCycle::new(colors);
+            assert!(contrast_ratio(cycle.readable(colors.blue), colors.surface) >= 4.5);
+            for millis in (0..5000).step_by(10) {
+                let color = cycle.color(Duration::from_millis(millis));
+                assert!(
+                    contrast_ratio(color, colors.surface) >= 4.5,
+                    "{surface:06x}: {millis}ms"
+                );
+            }
+        }
     }
 
     #[test]

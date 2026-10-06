@@ -373,6 +373,27 @@ pub enum Msg {
     LookupEnter(usize),
 }
 
+/// The same definitions drive editing and the shared issue/MR label column.
+fn editable_field_definitions(
+    kind: ItemKind,
+) -> impl Iterator<Item = (&'static str, &'static str)> {
+    let common = [
+        ("Title", "title"),
+        ("State", "state_event"),
+        ("Labels", "labels"),
+        ("Assignees", "assignee_ids"),
+        ("Milestone", "milestone_id"),
+    ];
+    let specific = match kind {
+        ItemKind::Issue => [("Iteration", "iteration_id"), ("Parent (epic)", "epic_id")],
+        ItemKind::MergeRequest => [
+            ("Target branch", "target_branch"),
+            ("Reviewers", "reviewer_ids"),
+        ],
+    };
+    common.into_iter().chain(specific)
+}
+
 impl State {
     pub fn selected_job(&self) -> Option<&Job> {
         (self.scope == Scope::Section && self.section_name() == "Jobs")
@@ -569,44 +590,38 @@ impl State {
             return vec![];
         };
         let i = &d.item;
-        let mut fields = vec![
-            ("Title", "title", i.title.clone()),
-            ("State", "state_event", i.state.clone()),
-            (
-                "Labels",
-                "labels",
-                i.labels
-                    .iter()
-                    .map(|l| l.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-            (
-                "Assignees",
-                "assignee_ids",
-                i.assignees
-                    .iter()
-                    .map(|u| format!("@{}", u.username))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-            ("Milestone", "milestone_id", i.milestone.clone()),
-        ];
-        if i.key.kind == ItemKind::MergeRequest {
-            fields.push(("Target branch", "target_branch", i.target_branch.clone()));
-            fields.push((
-                "Reviewers",
-                "reviewer_ids",
-                i.reviewers
-                    .iter()
-                    .map(|u| format!("@{}", u.username))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ));
-        } else {
-            fields.push(("Iteration", "iteration_id", i.iteration.clone()));
-        }
-        fields
+        editable_field_definitions(i.key.kind)
+            .map(|(label, name)| {
+                let value = match name {
+                    "title" => i.title.clone(),
+                    "state_event" => i.state.clone(),
+                    "labels" => i
+                        .labels
+                        .iter()
+                        .map(|l| l.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    "assignee_ids" | "reviewer_ids" => {
+                        let users = if name == "assignee_ids" {
+                            &i.assignees
+                        } else {
+                            &i.reviewers
+                        };
+                        users
+                            .iter()
+                            .map(|u| format!("@{}", u.username))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                    "milestone_id" => i.milestone.clone(),
+                    "iteration_id" => i.iteration.clone(),
+                    "epic_id" => i.epic.clone(),
+                    "target_branch" => i.target_branch.clone(),
+                    _ => unreachable!("unknown editable field"),
+                };
+                (label, name, value)
+            })
+            .collect()
     }
     pub fn command_options(&self) -> Vec<(&'static str, Action)> {
         let q = self

@@ -101,7 +101,7 @@ fn option(id: u64, name: &str, value: &str) -> LookupOption {
 
 #[test]
 fn suggestions_use_full_height_selection_edges_and_row_fill() {
-    for field in [2, 3, 4, 5] {
+    for field in [2, 3, 4, 5, 6] {
         assert_suggestion_selection(field);
     }
 }
@@ -221,10 +221,11 @@ fn labels_require_known_choices_and_accept_colored_suggestions() {
 }
 
 #[test]
-fn milestone_iteration_and_reviewers_keep_readable_current_values_and_ids() {
+fn milestone_iteration_epic_and_reviewers_keep_readable_current_values_and_ids() {
     for (kind, field, lookup, expected) in [
         (ItemKind::Issue, 4, LookupKind::Milestones, "401"),
         (ItemKind::Issue, 5, LookupKind::Iterations, "1200"),
+        (ItemKind::Issue, 6, LookupKind::Epics, "701"),
         (ItemKind::MergeRequest, 6, LookupKind::Users, "102,103"),
     ] {
         let mut ui = mount(kind, field);
@@ -254,6 +255,50 @@ fn milestone_iteration_and_reviewers_keep_readable_current_values_and_ids() {
         key(&mut ui, KeyCode::Esc);
         assert!(ui.state().dialog.is_none());
     }
+}
+
+#[test]
+fn epic_editor_resolves_same_title_choices_and_retains_draft_on_unavailable_lookup() {
+    let mut ui = mount(ItemKind::Issue, 6);
+    assert_eq!(
+        ui.state().dialog.as_ref().unwrap().title,
+        "Edit Parent (epic)"
+    );
+    replace(&mut ui, "Same title");
+    let epoch = completion(&ui).epoch;
+    ui.dispatch(Msg::LookupLoaded(
+        epoch,
+        0,
+        Ok(vec![
+            option(900, "Same title", "Same title · group 60 &1"),
+            option(901, "Same title", "Same title · group 6 &1"),
+        ]),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    key(&mut ui, KeyCode::Down);
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(value(&ui), "Same title · group 6 &1");
+    assert_eq!(ids(&ui), "901");
+    assert!(!ui.state().mutation_pending);
+    replace(&mut ui, "Unfinished parent");
+    let epoch = completion(&ui).epoch;
+    ui.dispatch(Msg::LookupLoaded(
+        epoch,
+        0,
+        Err("HTTP 403: epics unavailable".into()),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    assert_eq!(value(&ui), "Unfinished parent");
+    assert!(completion(&ui).error.as_ref().unwrap().contains("403"));
+    assert!(
+        ui.state().dialog.as_ref().unwrap().fields[0]
+            .api_value()
+            .is_err()
+    );
+    replace(&mut ui, "  ");
+    assert_eq!(ids(&ui), "");
 }
 
 #[test]

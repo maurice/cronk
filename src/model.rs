@@ -76,6 +76,7 @@ pub enum LookupKind {
     Users,
     Milestones,
     Iterations,
+    Epics,
     Projects,
     Labels,
 }
@@ -181,6 +182,9 @@ pub struct WorkItem {
     pub milestone_id: Option<u64>,
     pub iteration: String,
     pub iteration_id: Option<u64>,
+    /// GitLab REST issue parent (epic); absent on installations without epics.
+    pub epic: String,
+    pub epic_id: Option<u64>,
     pub source_branch: String,
     pub target_branch: String,
     pub updated_at: String,

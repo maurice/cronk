@@ -47,6 +47,7 @@ pub fn user() -> User {
         id: 101,
         username: "demo-arin".into(),
         name: "Arin Example (demo)".into(),
+        ..User::default()
     }
 }
 
@@ -55,6 +56,7 @@ fn reviewer() -> User {
         id: 102,
         username: "demo-mila".into(),
         name: "Mila Sample (demo)".into(),
+        ..User::default()
     }
 }
 
@@ -63,6 +65,7 @@ fn teammate() -> User {
         id: 103,
         username: "demo-sam".into(),
         name: "Sam Fiction (demo)".into(),
+        ..User::default()
     }
 }
 
@@ -71,6 +74,8 @@ fn bot() -> User {
         id: 104,
         username: "demo-ci-bot".into(),
         name: "Constellation CI (demo)".into(),
+        bot: true,
+        ..User::default()
     }
 }
 

@@ -3,11 +3,7 @@ use super::{
     interaction::{self, click},
     list_height_for_tab, list_row_height,
 };
-use crate::{
-    build_info,
-    config::{Config, UserFormatter},
-    model::*,
-};
+use crate::{build_info, config::Config, model::*};
 use std::{any::Any, collections::HashMap, time::Duration};
 use tui_lipan::{
     TextAreaColorInput, TextAreaColorLines, TextAreaColorStrategy,
@@ -265,6 +261,62 @@ fn status_help(subject: &str, status: &str) -> String {
 
 /// Only the single glyph is the trigger: adjacent padding/text never opens the tip.
 /// A passive mouse region observes hover without intercepting the surrounding row click.
+fn user_help(user: &User) -> String {
+    let mut details = Vec::new();
+    if !user.name.trim().is_empty() {
+        details.push(format!("Name: {}", user.name));
+    }
+    if !user.username.trim().is_empty() {
+        details.push(format!("Username: @{}", user.username));
+    }
+    if user.id > 0 {
+        details.push(format!("GitLab user ID: {}", user.id));
+    }
+    if let Some(email) = user
+        .public_email
+        .as_deref()
+        .filter(|email| !email.trim().is_empty())
+    {
+        details.push(format!("Public email: {email}"));
+    }
+    if user.bot {
+        details.push("Bot account".to_owned());
+    }
+    if details.is_empty() {
+        "GitLab user details are unavailable".to_owned()
+    } else {
+        details.join("\n")
+    }
+}
+
+/// A passive hover region around a user label; it leaves containing row clicks intact.
+fn user_tooltip(
+    ctx: &Context<Cronk>,
+    key: impl Into<String>,
+    user: &User,
+    child: impl Into<Element>,
+) -> Element {
+    let key = key.into();
+    let move_key = key.clone();
+    let leave_key = key.clone();
+    let help = user_help(user);
+    let link = ctx.link().clone();
+    Element::from(
+        MouseRegion::new()
+            .hover_style(Style::new())
+            .on_mouse_move(ctx.link().callback(move |event: MouseMoveEvent| {
+                Msg::StatusHover(move_key.clone(), help.clone(), Some((event.x, event.y)))
+            }))
+            .on_hover_change(Callback::new(move |entered: bool| {
+                if !entered {
+                    link.send(Msg::StatusHover(leave_key.clone(), String::new(), None));
+                }
+            }))
+            .child(child),
+    )
+    .key(key)
+}
+
 fn dot_tooltip(
     ctx: &Context<Cronk>,
     key: impl Into<String>,
@@ -916,13 +968,16 @@ fn work_row(
                     .style(style.fg(colors.status(&pipeline.status).1)),
             );
     }
-    labels_line = labels_line.child(
+    labels_line = labels_line.child(user_tooltip(
+        ctx,
+        format!("item-{}-author", item_key(&item.key)),
+        &item.author,
         Text::new(state.render_user(&item.author))
             .width(Length::Flex(1))
             .height(Length::Px(1))
             .overflow(Overflow::Ellipsis)
             .style(style.fg(colors.muted)),
-    );
+    ));
     let mut attention = Vec::new();
     if state.config.active_tab == 0 {
         let roles = item.dashboard_roles(state.user.id);
@@ -1397,6 +1452,26 @@ fn field_row(
     label_color: Color,
     style: Style,
 ) -> Element {
+    field_row_element(
+        label,
+        label_width,
+        Text::from_spans(value)
+            .width(Length::Flex(1))
+            .height(Length::Auto)
+            .overflow(Overflow::Wrap)
+            .style(style),
+        label_color,
+        style,
+    )
+}
+
+fn field_row_element(
+    label: &str,
+    label_width: usize,
+    value: impl Into<Element>,
+    label_color: Color,
+    style: Style,
+) -> Element {
     HStack::new()
         .style(style)
         .height(Length::Auto)
@@ -1406,13 +1481,7 @@ fn field_row(
                 .width(Length::Px(label_width as u16))
                 .style(style.fg(label_color)),
         )
-        .child(
-            Text::from_spans(value)
-                .width(Length::Flex(1))
-                .height(Length::Auto)
-                .overflow(Overflow::Wrap)
-                .style(style),
-        )
+        .child(value)
         .into()
 }
 
@@ -1647,7 +1716,7 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                     } else {
                         notes
                             .into_iter()
-                            .map(|note| note_view(note, &ctx.state.user_formatter, section_colors))
+                            .map(|note| note_view(ctx, note, section_colors))
                             .collect()
                     }
                 }
@@ -1838,26 +1907,51 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
             colors.base()
         };
         let style = interaction::style(ctx, &format!("edit-field-{index}"), style);
-        let value_spans = if label == "Labels" && !details.item.labels.is_empty() {
-            label_spans(&details.item.labels, colors)
+        let value_element: Element = if label == "Labels" && !details.item.labels.is_empty() {
+            Text::from_spans(label_spans(&details.item.labels, colors))
+                .width(Length::Flex(1))
+                .height(Length::Auto)
+                .overflow(Overflow::Wrap)
+                .style(style)
+                .into()
+        } else if matches!(label, "Assignees" | "Reviewers") {
+            let users = if label == "Assignees" {
+                &details.item.assignees
+            } else {
+                &details.item.reviewers
+            };
+            if users.is_empty() {
+                Text::new("—").style(style).into()
+            } else {
+                let mut list = HStack::new().height(Length::Auto).style(style);
+                for (user_index, user) in users.iter().enumerate() {
+                    if user_index > 0 {
+                        list = list.child(Text::new(", ").style(style));
+                    }
+                    list = list.child(user_tooltip(
+                        ctx,
+                        format!("item-{}-{label}-{user_index}", item_key(&item.key)),
+                        user,
+                        Text::new(ctx.state.render_user(user)).style(style),
+                    ));
+                }
+                list.into()
+            }
         } else {
-            let users = |users: &[User]| {
-                users
-                    .iter()
-                    .map(|user| ctx.state.render_user(user))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let text = match label {
-                "Assignees" => users(&details.item.assignees),
-                "Reviewers" => users(&details.item.reviewers),
-                _ => value,
-            };
-            vec![Span::new(if text.is_empty() { "—".into() } else { text })]
+            Text::new(if value.is_empty() {
+                "—".into()
+            } else {
+                value
+            })
+            .width(Length::Flex(1))
+            .height(Length::Auto)
+            .overflow(Overflow::Wrap)
+            .style(style)
+            .into()
         };
         content.push(DetailRow::interactive(
             format!("edit-field-{index}"),
-            field_row(label, label_width, value_spans, colors.accent, style),
+            field_row_element(label, label_width, value_element, colors.accent, style),
             selected,
             move || Msg::Field(index),
         ));
@@ -1866,21 +1960,43 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
         content.push(blank().into());
     }
     for (label, value) in readonly {
-        let value = if value.is_empty() {
-            "—".into()
+        if label == "Author" {
+            content.push(
+                field_row_element(
+                    label,
+                    label_width,
+                    user_tooltip(
+                        ctx,
+                        format!("detail-author-{}", item_key(&item.key)),
+                        &item.author,
+                        Text::new(state.render_user(&item.author))
+                            .width(Length::Flex(1))
+                            .height(Length::Auto)
+                            .overflow(Overflow::Wrap)
+                            .style(colors.base()),
+                    ),
+                    colors.muted,
+                    colors.base(),
+                )
+                .into(),
+            );
         } else {
-            value
-        };
-        content.push(
-            field_row(
-                label,
-                label_width,
-                vec![Span::new(value)],
-                colors.muted,
-                colors.base(),
-            )
-            .into(),
-        );
+            let value = if value.is_empty() {
+                "—".into()
+            } else {
+                value
+            };
+            content.push(
+                field_row(
+                    label,
+                    label_width,
+                    vec![Span::new(value)],
+                    colors.muted,
+                    colors.base(),
+                )
+                .into(),
+            );
+        }
     }
     for warning in &details.warnings {
         content.push(
@@ -1901,15 +2017,20 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
     content
 }
 
-fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> DetailRow {
-    let mut header = vec![
-        Span::new(formatter.render(&note.author))
-            .fg(colors.blue)
-            .bold(),
-        Span::new(format!("   {}", note.created_at)).fg(colors.muted),
-    ];
+fn note_view(ctx: &Context<Cronk>, note: &Note, colors: Colors) -> DetailRow {
+    let mut header = HStack::new()
+        .height(Length::Px(1))
+        .style(colors.base())
+        .child(user_tooltip(
+            ctx,
+            format!("note-{}-author", note.id),
+            &note.author,
+            Text::new(ctx.state.render_user(&note.author))
+                .style(colors.base().fg(colors.blue).bold()),
+        ))
+        .child(Text::new(format!("   {}", note.created_at)).style(colors.base().fg(colors.muted)));
     if note.system {
-        header.push(Span::new("  ·  system").fg(colors.muted));
+        header = header.child(Text::new("  ·  system").style(colors.base().fg(colors.muted)));
     }
     let status = if !note.resolvable {
         "comment"
@@ -1919,15 +2040,16 @@ fn note_view(note: &Note, formatter: &UserFormatter, colors: Colors) -> DetailRo
         "unresolved"
     };
     if note.resolvable {
-        header.push(Span::new("  ·  "));
-        header.push(Span::new(status).fg(colors.status(status).1));
+        header = header
+            .child(Text::new("  ·  "))
+            .child(Text::new(status).style(colors.base().fg(colors.status(status).1)));
     }
     DetailRow::keyed(
         format!("note-{}", note.id),
         VStack::new()
             .height(Length::Auto)
             .style(colors.base())
-            .child(rich(header, colors.base()))
+            .child(header)
             .child(
                 markdown(&note.body, colors)
                     .height(Length::Auto)
@@ -2320,24 +2442,33 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<D
             colors.base()
         };
         let style = interaction::style(ctx, &format!("discussion-{}", discussion.id), style);
-        let author = discussion.notes.first().map_or_else(
-            || "unknown".into(),
-            |note| ctx.state.render_user(&note.author),
-        );
+        let author = discussion.notes.first().map(|note| &note.author);
         let link = ctx.link().clone();
         content.push(
             DetailRow::interactive(
                 format!("discussion-{}", discussion.id),
-                rich(
-                    vec![
-                        Span::new(format!("{author}  ")).fg(colors.blue),
-                        Span::new(discussion_state(discussion))
-                            .fg(colors.status(discussion_state(discussion)).1),
-                        Span::new(format!("  ·  {} notes", discussion.notes.len()))
-                            .fg(colors.muted),
-                    ],
-                    style,
-                ),
+                HStack::new()
+                    .height(Length::Px(1))
+                    .style(style)
+                    .child(if let Some(author) = author {
+                        user_tooltip(
+                            ctx,
+                            format!("discussion-{}-author", discussion.id),
+                            author,
+                            Text::new(ctx.state.render_user(author)).style(style.fg(colors.blue)),
+                        )
+                    } else {
+                        Text::new("unknown").style(style.fg(colors.blue)).into()
+                    })
+                    .child(Text::new("  ").style(style))
+                    .child(
+                        Text::new(discussion_state(discussion))
+                            .style(style.fg(colors.status(discussion_state(discussion)).1)),
+                    )
+                    .child(
+                        Text::new(format!("  ·  {} notes", discussion.notes.len()))
+                            .style(style.fg(colors.muted)),
+                    ),
                 selected,
                 move || {
                     link.send(Msg::Section(4));
@@ -2354,7 +2485,7 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<D
             discussion
                 .notes
                 .iter()
-                .map(|note| note_view(note, &ctx.state.user_formatter, colors)),
+                .map(|note| note_view(ctx, note, colors)),
         );
         content.push(blank().into());
     }
@@ -3286,6 +3417,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn user_tooltip_includes_available_profile_details_without_private_email_assumptions() {
+        let user = User {
+            id: 42,
+            username: "opaque-9f3c".into(),
+            name: "Alex Example".into(),
+            public_email: Some("alex@example.org".into()),
+            bot: true,
+        };
+        let help = user_help(&user);
+        assert!(help.contains("Name: Alex Example"));
+        assert!(help.contains("Username: @opaque-9f3c"));
+        assert!(help.contains("GitLab user ID: 42"));
+        assert!(help.contains("Public email: alex@example.org"));
+        assert!(help.contains("Bot account"));
+
+        let minimal = user_help(&User {
+            username: "service-token-abc".into(),
+            ..User::default()
+        });
+        assert!(minimal.contains("Username: @service-token-abc"));
+        assert!(!minimal.contains("Public email"));
+        assert!(!minimal.contains("Bot account"));
     }
 
     #[test]

@@ -2337,6 +2337,7 @@ mod tests {
             id: 1,
             username: "example".into(),
             name: "Example".into(),
+            ..User::default()
         });
         ui.state_mut().config.projects = vec![project()];
         ui.state_mut().config.route = Some(item.key.clone());

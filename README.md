@@ -265,6 +265,8 @@ Unit/integration tests require nextest: there is no `cargo test` fallback. Nexte
 
 For a focused iteration, use `just test-lib -E 'test(filter)'` or `just test-integration ui -E 'test(tab_switches)'`. `just test-affected [base-ref]` includes committed branch changes and local edits: integration-test-only changes select those binaries; shared source/dependency/build changes conservatively run all targets. Documentation-only changes skip Rust tests (run `just doc` for doctests). This is not a semantic dependency analysis. Avoid `--no-capture`: nextest runs tests serially in that mode. See [development feedback](docs/development.md) for task details, the resource budget and further optimization options, and [the historical runner comparison](docs/test-performance.md) for measured timings.
 
+The [large-list performance investigation](docs/large-list-performance.md) documents list windowing, SQLite access, a reproducible 3,000-MR workload, and follow-up profiling priorities.
+
 The pre-commit hook runs `just fmt` and `just lint` with warnings denied. Run `just setup` to use the checked-in hook directly; this also picks up hook updates without rebuilding `cargo-husky`. It refuses to overwrite a custom hooks path. The hooks path setting is shared by linked worktrees, which each use their own checked-in hook version.
 
 `gallery` writes five deterministic PNG/Markdown captures to `.snapshots/` without touching your workspace or opening a terminal. Small-viewport and keyboard/mouse integration tests run through tui-lipan's actual headless runtime.

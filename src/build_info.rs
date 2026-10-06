@@ -1,14 +1,8 @@
-pub const RELEASE_TAG: Option<&str> = option_env!("CRONK_RELEASE_TAG");
+pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_SHA: Option<&str> = option_env!("CRONK_GIT_SHA");
 
 pub fn display_version() -> String {
-    format!("{}@{}", normalize_tag(RELEASE_TAG), normalize_sha(GIT_SHA))
-}
-
-fn normalize_tag(tag: Option<&str>) -> &str {
-    tag.map(str::trim)
-        .filter(|tag| !tag.is_empty())
-        .unwrap_or("0.0.0")
+    format!("v{}@{}", PACKAGE_VERSION, normalize_sha(GIT_SHA))
 }
 
 fn normalize_sha(sha: Option<&str>) -> &str {
@@ -19,18 +13,11 @@ fn normalize_sha(sha: Option<&str>) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_sha, normalize_tag};
+    use super::normalize_sha;
 
     #[test]
-    fn empty_or_missing_tag_uses_development_version() {
-        assert_eq!(normalize_tag(None), "0.0.0");
-        assert_eq!(normalize_tag(Some("")), "0.0.0");
-        assert_eq!(normalize_tag(Some("  ")), "0.0.0");
-    }
-
-    #[test]
-    fn explicit_release_tag_is_preserved() {
-        assert_eq!(normalize_tag(Some("v0.1.0")), "v0.1.0");
+    fn display_version_uses_cargo_package_version() {
+        assert!(super::display_version().starts_with(&format!("v{}@", super::PACKAGE_VERSION)));
     }
 
     #[test]

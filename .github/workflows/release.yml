@@ -35,8 +35,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -z "$TAG" ]]; then
-            echo "tag input must not be empty" >&2
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag must be a semantic version with a v prefix (for example: v0.1.0)" >&2
             exit 1
           fi
 
@@ -74,24 +74,43 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Set Cargo package version from release tag
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          version="${TAG#v}"
+          python3 - "$version" <<'PY'
+          from pathlib import Path
+          import sys
+
+          manifest = Path("Cargo.toml")
+          text = manifest.read_text()
+          placeholder = 'version = "0.0.0"'
+          if text.count(placeholder) != 1:
+              raise SystemExit("Cargo.toml package version placeholder is missing or ambiguous")
+          manifest.write_text(text.replace(placeholder, f'version = "{sys.argv[1]}"', 1))
+          PY
+          cargo update --workspace --offline
+
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
 
       - name: Build release binary
         env:
-          CRONK_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           GITHUB_SHA: ${{ github.sha }}
         run: cross build --locked --release --target ${{ matrix.target }} --bin $BINARY_NAME
 
       - name: Verify embedded release version
         env:
-          CRONK_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
           GITHUB_SHA: ${{ github.sha }}
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
 
-          expected="${BINARY_NAME} ${CRONK_RELEASE_TAG}@${GITHUB_SHA:0:12}"
+          expected="${BINARY_NAME} ${TAG}@${GITHUB_SHA:0:12}"
           actual="$(cross run --locked --release --target "$TARGET" --bin "$BINARY_NAME" -- --version)"
           if [[ "$actual" != "$expected" ]]; then
             echo "Release version mismatch: expected '$expected', got '$actual'" >&2

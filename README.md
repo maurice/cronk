@@ -35,7 +35,7 @@ cargo build --release --locked
 ./target/release/cronk --demo
 ```
 
-`cronk --version` (or `cronk -V`) reports the same `release-tag@commit-sha` identifier as the TUI header, for example `cronk v0.0.3@0123456789ab`. Untagged development builds use `0.0.0` as the version; builds without commit metadata use `unknown` as the SHA. Version flags exit without loading a workspace or connecting to GitLab.
+`cronk --version` (or `cronk -V`) reports the same Cargo package version and commit SHA as the TUI header, for example `cronk v0.0.3@0123456789ab`. The package version in `Cargo.toml` stays at `0.0.0` on the development branch; the release workflow sets it from the requested `v`-prefixed release tag before compiling. Builds without commit metadata use `unknown` as the SHA. Version flags exit without loading a workspace or connecting to GitLab.
 
 ### Connect to enterprise GitLab
 
@@ -250,7 +250,7 @@ cargo run --locked -- --demo --snapshot dashboard.png
 cargo run --locked --example gallery
 ```
 
-Release builds use `Cross.toml` to forward `CRONK_RELEASE_TAG` and `GITHUB_SHA` into the build container. The release workflow executes each target binary's `--version` (using cross's runner/emulation where needed) and checks it against the requested tag and source commit before packaging, so missing metadata cannot silently produce a release labeled `0.0.0@unknown`.
+Release builds use `Cross.toml` to forward `GITHUB_SHA` into the build container. Before compiling, the release workflow sets the Cargo package version from the requested `v`-prefixed tag and updates the lockfile, making Cargo's package version the source of truth for both the TUI header and CLI output. It executes each target binary's `--version` (using cross's runner/emulation where needed) and checks it against the requested tag and source commit before packaging.
 
 Nextest runs the existing unit/integration tests without changes, scheduling tests across binaries with one process per test. `.config/nextest.toml` uses the available logical CPUs and disables retries; CI uses `--profile ci` to collect all failures. Nextest does not run doctests, so keep the separate `cargo test --locked --doc` command. The original `cargo test --locked --all-targets` remains a supported fallback if nextest is unavailable.
 

@@ -2,7 +2,6 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=CRONK_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
 
     if let Some(head) = git_output(&["rev-parse", "--git-path", "HEAD"]) {
@@ -12,15 +11,6 @@ fn main() {
         && let Some(path) = git_output(&["rev-parse", "--git-path", &reference])
     {
         println!("cargo:rerun-if-changed={path}");
-    }
-
-    if let Some(tag) = std::env::var("CRONK_RELEASE_TAG")
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .or_else(|| git_output(&["describe", "--tags", "--exact-match", "HEAD"]))
-    {
-        println!("cargo:rustc-env=CRONK_RELEASE_TAG={tag}");
     }
 
     if let Some(sha) = std::env::var("GITHUB_SHA")

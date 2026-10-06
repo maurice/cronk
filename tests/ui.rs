@@ -41,6 +41,10 @@ fn mount(config: Config, path: Option<&Path>) -> Ui {
 }
 
 fn mount_with_viewport(config: Config, path: Option<&Path>, viewport: Rect) -> Ui {
+    // Test workspace setup is a deliberate config save, not a navigation event.
+    if let Some(path) = path.filter(|path| !path.exists()) {
+        config.save(path).unwrap();
+    }
     let app = App::new().focus_policy(FocusPolicy::Manual);
     let mut ui = TestBackend::new_with_app_and_viewport(
         app,
@@ -109,14 +113,118 @@ fn selected_key(state: &State) -> ItemKey {
     state.visible_items()[state.scroll.selected].key.clone()
 }
 
+fn local_tab_identity(config: &Config, index: usize) -> String {
+    use sha2::{Digest, Sha256};
+    if index < 4 {
+        return format!("builtin:{index}");
+    }
+    let view = &config.views[index - 4];
+    let body = serde_json::to_vec(&(view.name.as_str(), view.kind, view.query.as_str())).unwrap();
+    format!("view:{:x}", Sha256::digest(body))
+}
+
+fn local_database(path: &Path, config: &Config, demo: bool) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let namespace = Sha256::digest(format!(
+        "{}\0{demo}",
+        config.gitlab_url.trim_end_matches('/')
+    ));
+    path.with_extension("state")
+        .join(format!("{namespace:x}.sqlite3"))
+}
+
 fn persisted(ui: &Ui, path: &Path) -> Config {
-    assert!(path.is_file(), "the event must save before shutdown");
-    let saved = Config::load(path).unwrap();
+    // Navigation is deliberately asynchronous. An explicit flush is a durability
+    // boundary, not a claim that each UI event commits to disk immediately.
+    ui.state().flush_navigation().unwrap();
+    let mut saved = Config::load(path).unwrap();
+    let portable = |config: &Config| {
+        let mut value = serde_json::to_value(config).unwrap();
+        for key in [
+            "active_tab",
+            "selections",
+            "tab_states",
+            "route",
+            "project_route",
+            "section",
+            "field",
+        ] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        value
+    };
     assert_eq!(
-        serde_json::to_value(&saved).unwrap(),
-        serde_json::to_value(&ui.state().config).unwrap(),
-        "disk must reflect the complete committed workspace"
+        portable(&saved),
+        portable(&ui.state().config),
+        "deliberate config commits remain immediate"
     );
+    assert!(
+        saved.tab_states.is_empty(),
+        "navigation must not leak into portable TOML"
+    );
+    let db = rusqlite::Connection::open(local_database(path, &saved, true)).unwrap();
+    let body: String = db
+        .query_row("SELECT body FROM snapshot WHERE id=1", [], |r| r.get(0))
+        .unwrap();
+    let snapshot: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        snapshot["active"],
+        local_tab_identity(&saved, ui.state().config.active_tab)
+    );
+    let tabs = snapshot["tabs"].as_object().unwrap();
+    assert_eq!(
+        tabs.len(),
+        ui.state().config.tab_states.len(),
+        "deleted tabs must not remain in the local snapshot"
+    );
+    // Resolve persisted identities against the current test fixture, including
+    // refresh-induced reordering, instead of expecting disk to contain indices.
+    let mut resolver = Cronk {
+        config: saved.clone(),
+        path: None,
+        api: None,
+        demo: true,
+    }
+    .create_state(&());
+    resolver.items = ui.state().items.clone();
+    resolver.user = ui.state().user.clone();
+    for (key, expected) in &ui.state().config.tab_states {
+        let index: usize = key.parse().unwrap();
+        let tab = &tabs[&local_tab_identity(&saved, index)];
+        let state: TabState = serde_json::from_value(tab["state"].clone()).unwrap();
+        assert_eq!(&state, expected);
+        resolver.config.active_tab = index;
+        let selection = &tab["selection"];
+        let selected = if let Some(item) = selection.get("Item") {
+            let item: ItemKey = serde_json::from_value(item.clone()).unwrap();
+            resolver
+                .visible_items()
+                .iter()
+                .position(|i| i.key == item)
+                .unwrap_or(0)
+        } else if let Some(project) = selection.get("Project") {
+            saved
+                .projects
+                .iter()
+                .position(|p| p.id == project.as_u64().unwrap())
+                .unwrap()
+        } else if let Some(legacy) = selection.get("Legacy") {
+            legacy.as_u64().unwrap() as usize
+        } else {
+            0
+        };
+        if index == ui.state().config.active_tab {
+            assert_eq!(selected, ui.state().scroll.selected);
+        }
+        saved.selections.insert(key.clone(), selected);
+        saved.tab_states.insert(key.clone(), state);
+    }
+    saved.active_tab = ui.state().config.active_tab;
+    let active = &saved.tab_states[&saved.active_tab.to_string()];
+    saved.route = active.route.clone();
+    saved.project_route = active.project_route;
+    saved.section = active.section;
+    saved.field = active.field;
     saved
 }
 
@@ -224,7 +332,7 @@ fn persisted_tab(ui: &Ui, path: &Path) -> Config {
     assert_eq!(
         serde_json::to_value(&saved.tab_states[&tab]).unwrap(),
         serde_json::to_value(tab_state(ui.state())).unwrap(),
-        "the active tab's complete navigation must be saved on each committed event"
+        "the active tab's complete navigation must be durable after explicit flush"
     );
     saved
 }
@@ -1880,7 +1988,8 @@ fn restart_clears_active_and_inactive_routes_for_hidden_or_removed_projects() {
         } else {
             config.projects[0].visible = false;
         }
-        config.save(&path).unwrap();
+        // Seed a real pre-migration TOML workspace.
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
         let mut ui = mount(Config::load(&path).unwrap(), Some(&path));
         assert_eq!(ui.state().config.active_tab, 3);
         active_list_responds(&mut ui);
@@ -2514,7 +2623,7 @@ fn a_finished_job_is_not_marked_drained_until_a_no_progress_eof_chunk() {
 }
 
 #[test]
-fn every_tabs_navigation_persists_immediately_and_survives_restart() {
+fn every_tabs_navigation_flushes_and_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.toml");
     let mut config = numbered_views_config(3);
@@ -2637,15 +2746,21 @@ fn every_tabs_navigation_persists_immediately_and_survives_restart() {
 }
 
 #[test]
-fn restored_tab_uses_selections_for_its_list_cursor_not_the_detail_route() {
+fn migrated_open_detail_prefers_its_route_identity_over_a_legacy_list_index() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.toml");
     let mut config = config();
-    let route = demo::items()
-        .into_iter()
-        .find(|i| i.key.kind == ItemKind::Issue)
-        .unwrap()
-        .key;
+    config.active_tab = 2;
+    let route = Cronk {
+        config: config.clone(),
+        path: None,
+        api: None,
+        demo: true,
+    }
+    .create_state(&())
+    .visible_items()[0]
+        .key
+        .clone();
     let expected = TabState {
         route: Some(route.clone()),
         section_cursor: 2,
@@ -2655,14 +2770,21 @@ fn restored_tab_uses_selections_for_its_list_cursor_not_the_detail_route() {
     config.route = Some(route.clone());
     config.selections.insert("2".into(), 1);
     config.tab_states.insert("2".into(), expected.clone());
-    config.save(&path).unwrap();
+    // The open route supplies an exact identity even if the old index conflicts.
+    std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
     let mut ui = mount(Config::load(&path).unwrap(), Some(&path));
-    assert_tab_state(&ui, &expected, 1);
-    assert_ne!(selected_key(ui.state()), route);
+    let selected = ui
+        .state()
+        .visible_items()
+        .iter()
+        .position(|i| i.key == route)
+        .unwrap();
+    assert_tab_state(&ui, &expected, selected);
+    assert_eq!(selected_key(ui.state()), route);
     key(&mut ui, KeyCode::Char('D'));
     key(&mut ui, KeyCode::Char('I'));
-    assert_tab_state(&ui, &expected, 1);
-    assert_eq!(persisted_tab(&ui, &path).selections["2"], 1);
+    assert_tab_state(&ui, &expected, selected);
+    assert_eq!(persisted_tab(&ui, &path).selections["2"], selected);
 }
 
 #[test]
@@ -2693,12 +2815,17 @@ fn list_scroll_callbacks_persist_offsets_for_builtin_and_saved_tabs() {
 }
 
 #[test]
-fn committed_keyboard_events_persist_immediately_and_restart_restores_the_route() {
+fn config_commits_immediately_navigation_flushes_and_restart_restores_the_route() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.toml");
     let mut ui = mount(config(), Some(&path));
-    assert!(!path.exists(), "mounting is not a committed workspace edit");
+    let initial_toml = std::fs::read(&path).unwrap();
     key(&mut ui, KeyCode::Tab);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        initial_toml,
+        "selection must not rewrite TOML"
+    );
     assert_eq!(persisted(&ui, &path).selections["0"], 1);
     key(&mut ui, KeyCode::Char('P'));
     persisted(&ui, &path);
@@ -2782,7 +2909,7 @@ fn clicking_a_field_persists_the_cursor_even_when_the_edit_is_cancelled() {
     key(&mut ui, KeyCode::Esc);
     assert!(ui.state().dialog.is_none());
     assert_eq!(
-        Config::load(&path).unwrap().field,
+        persisted(&ui, &path).field,
         2,
         "mouse selection must persist just like keyboard selection, independently of saving the draft"
     );
@@ -2819,7 +2946,7 @@ fn list_refresh_reordering_persists_the_new_index_of_the_selected_item() {
     assert_eq!(selected_key(ui.state()), selected);
     assert_eq!(ui.state().scroll.selected, 0);
     assert_eq!(
-        Config::load(&path).unwrap().selections["2"],
+        persisted(&ui, &path).selections["2"],
         0,
         "a refresh-induced cursor move must reach disk without another key event"
     );

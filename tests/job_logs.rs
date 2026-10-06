@@ -445,13 +445,29 @@ fn collapsed_choices_round_trip_and_tab_visits_restore_log_positions() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("workspace.toml");
     ui.state().config.save(&path).unwrap();
+    let persisted_ui = TestBackend::new_with_app_and_viewport(
+        App::new().focus_policy(FocusPolicy::Manual),
+        Cronk {
+            config: ui.state().config.clone(),
+            path: Some(path.clone()),
+            api: None,
+            demo: true,
+        },
+        (),
+        ui.viewport(),
+    );
+    persisted_ui.state().flush_navigation().unwrap();
+    drop(persisted_ui);
     let config = Config::load(&path).unwrap();
-    assert!(config.tab_states["3"].collapsed.contains(&JOB));
+    assert!(
+        config.tab_states.is_empty(),
+        "job choices belong in local SQLite, not TOML"
+    );
     let mut restarted = TestBackend::new_with_app_and_viewport(
         App::new().focus_policy(FocusPolicy::Manual),
         Cronk {
             config,
-            path: None,
+            path: Some(path.clone()),
             api: None,
             demo: true,
         },

@@ -1610,33 +1610,68 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
             ),
             move || Msg::DetailSection(index),
         ));
-        let children: Vec<DetailRow> = match *section {
-            "Fields" => fields(ctx, details, section_colors),
-            "Description" => vec![
-                markdown(&details.item.description, section_colors)
-                    .height(Length::Auto)
-                    .scrollbar(false)
-                    .scroll_wheel(false)
-                    .into(),
-            ],
-            "Activity" => {
-                let mut notes: Vec<_> = details.notes.iter().collect();
-                notes.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-                if notes.is_empty() {
-                    vec![line("No activity yet.", style.fg(colors.muted)).into()]
-                } else {
-                    notes
-                        .into_iter()
-                        .map(|note| note_view(note, &ctx.state.user_formatter, section_colors))
-                        .collect()
-                }
-            }
-            "Pipeline" => pipeline(ctx, details, section_colors),
-            "Jobs" => jobs(ctx, details, section_colors),
-            "Discussions" => discussions(ctx, details, section_colors),
-            "Changes" => changes(details, section_colors),
-            _ => Vec::new(),
+        let part = match *section {
+            "Fields" | "Description" => DetailPart::Core,
+            "Activity" => DetailPart::Activity,
+            "Discussions" => DetailPart::Discussions,
+            "Pipeline" | "Jobs" => DetailPart::Pipeline,
+            _ => DetailPart::Changes,
         };
+        let missing = state.detail_pending.is_some() && !details.loaded.contains(&part);
+        let mut children: Vec<DetailRow> = if missing {
+            let shade = if state.config.animations && state.tick.is_multiple_of(2) {
+                colors.blue
+            } else {
+                colors.muted
+            };
+            vec![
+                line(format!("Loading {section}…"), style.fg(colors.muted)).into(),
+                line(" ▰▰▰▰▰▰▰▰  ▰▰▰▰", style.fg(shade)).into(),
+                line(" ▰▰▰▰▰▰  ▰▰▰▰▰▰▰▰", style.fg(shade)).into(),
+            ]
+        } else {
+            match *section {
+                "Fields" => fields(ctx, details, section_colors),
+                "Description" => vec![
+                    markdown(&details.item.description, section_colors)
+                        .height(Length::Auto)
+                        .scrollbar(false)
+                        .scroll_wheel(false)
+                        .into(),
+                ],
+                "Activity" => {
+                    let mut notes: Vec<_> = details.notes.iter().collect();
+                    notes.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+                    if notes.is_empty() {
+                        vec![line("No activity yet.", style.fg(colors.muted)).into()]
+                    } else {
+                        notes
+                            .into_iter()
+                            .map(|note| note_view(note, &ctx.state.user_formatter, section_colors))
+                            .collect()
+                    }
+                }
+                "Pipeline" => pipeline(ctx, details, section_colors),
+                "Jobs" => jobs(ctx, details, section_colors),
+                "Discussions" => discussions(ctx, details, section_colors),
+                "Changes" => changes(details, section_colors),
+                _ => Vec::new(),
+            }
+        };
+        let warning_label = match part {
+            DetailPart::Core => "Label colors",
+            DetailPart::Activity => "Notes",
+            DetailPart::Discussions => "Discussions",
+            DetailPart::Pipeline => "Pipeline",
+            DetailPart::Changes => "diff",
+        };
+        for warning in details
+            .warnings
+            .iter()
+            .filter(|w| w.to_lowercase().contains(&warning_label.to_lowercase()))
+        {
+            children.push(line(format!("⚠ {warning}"), style.fg(colors.yellow)).into());
+        }
         // Keep stable row keys on direct children: native scroll anchoring then
         // survives newly inserted notes and collapsing job panels above the viewport.
         for (row_index, child) in children.into_iter().enumerate() {
@@ -1726,6 +1761,7 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
 }
 
 fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
+    let state = &ctx.state;
     let item = &details.item;
     let mut content = vec![
         DetailRow::from(rich(
@@ -1765,10 +1801,21 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
             "Review",
             format!(
                 "{} discussions · {} unresolved · {} changed files",
-                details.discussions.len(),
+                if state.detail_pending.is_some()
+                    && !details.loaded.contains(&DetailPart::Discussions)
+                {
+                    "unknown".into()
+                } else {
+                    details.discussions.len().to_string()
+                },
                 item.unresolved
                     .map_or_else(|| "unknown".into(), |n| n.to_string()),
-                details.diffs.len()
+                if state.detail_pending.is_some() && !details.loaded.contains(&DetailPart::Changes)
+                {
+                    "unknown".into()
+                } else {
+                    details.diffs.len().to_string()
+                }
             ),
         ));
     }
@@ -2425,7 +2472,37 @@ fn footer(ctx: &Context<Cronk>, colors: Colors) -> Element {
     }
     status_line = status_line.child(
         Text::new(if let Some(error) = &state.error {
-            format!("Error: {error}")
+            if ctx.elapsed() < state.blocked_until {
+                format!(
+                    "Retry in {}s · {error}",
+                    (state.blocked_until - ctx.elapsed()).as_secs()
+                )
+            } else {
+                format!("Error: {error}")
+            }
+        } else if ctx.elapsed() < state.blocked_until {
+            format!(
+                "Waiting for GitLab · retry in {}s",
+                (state.blocked_until - ctx.elapsed()).as_secs()
+            )
+        } else if let Some((id, progress)) = state.sync_progress.first_key_value() {
+            let project = state.project(*id).map_or("Project", |p| {
+                if p.alias.is_empty() {
+                    &p.path
+                } else {
+                    &p.alias
+                }
+            });
+            let others = state.sync_progress.len().saturating_sub(1);
+            format!(
+                "{project} · {}{}",
+                progress.label(),
+                if others > 0 {
+                    format!(" · +{others} projects")
+                } else {
+                    String::new()
+                }
+            )
         } else {
             state.status.clone()
         })

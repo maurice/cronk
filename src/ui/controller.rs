@@ -3,7 +3,7 @@ use crate::{
     config::{SavedView, TabState},
     demo,
 };
-use tui_lipan::{CommandLink, TaskPolicy};
+use tui_lipan::CommandLink;
 
 impl Component for Cronk {
     type Message = Msg;
@@ -111,6 +111,11 @@ impl Component for Cronk {
             },
             user_formatter,
             details,
+            shared_details: HashMap::new(),
+            detail_requests: HashMap::new(),
+            detail_sequence: 0,
+            sync_progress: BTreeMap::new(),
+            full_resync: false,
             scroll: BoundaryScroll {
                 selected,
                 offset: saved
@@ -162,6 +167,7 @@ impl Component for Cronk {
     }
 
     fn init(&mut self, ctx: &mut Context<Self>) -> Option<Command> {
+        self.enable_cache(ctx);
         ctx.link().send(Msg::Tick);
         ctx.link().send(Msg::Refresh);
         if ctx.state.config.onboarding {
@@ -249,7 +255,7 @@ impl Component for Cronk {
                     if ctx.state.user.id == 0 && !ctx.state.user_pending {
                         ctx.link().send(Msg::LoadUser);
                     }
-                    if ctx.state.scope == Scope::List && now >= ctx.state.next_lists {
+                    if now >= ctx.state.next_lists {
                         self.queue_lists(ctx);
                     }
                     if ctx.state.config.route.is_some() && now >= ctx.state.next_details {
@@ -264,12 +270,139 @@ impl Component for Cronk {
                     |link: CommandLink<Msg>| link.send(Msg::Tick),
                 ));
             }
+            Msg::FullResync => {
+                if !ctx.state.list_pending.is_empty() {
+                    ctx.state.status =
+                        "A sync is running; request full resync after it finishes".into();
+                    return Update::full();
+                }
+                ctx.state.full_resync = true;
+                return self.update(Msg::Refresh, ctx);
+            }
+            Msg::ClearCache => {
+                // Do not let an in-flight read immediately repopulate a cleared cache.
+                if !ctx.state.list_pending.is_empty()
+                    || !ctx.state.detail_requests.is_empty()
+                    || ctx.state.mutation_pending
+                {
+                    ctx.state.error = Some(
+                        "Wait for current requests to finish before clearing the cache".into(),
+                    );
+                    return Update::full();
+                }
+                if let Some(api) = &self.api {
+                    match api.clear_content_cache() {
+                        Ok(()) => {
+                            ctx.state.shared_details.clear();
+                            ctx.state.tab_cache.clear();
+                            ctx.state.items.clear();
+                            self.reset_detail(ctx);
+                            ctx.state.next_lists = Duration::MAX;
+                            ctx.state.next_details = Duration::MAX;
+                            ctx.state.next_traces = Duration::MAX;
+                            ctx.state.current_iterations.clear();
+                            ctx.state.status =
+                                "Local content cache cleared; refresh to import again".into();
+                        }
+                        Err(error) => {
+                            ctx.state.error = Some(format!("Cache not cleared: {error:#}"))
+                        }
+                    }
+                }
+            }
+            Msg::CacheWarning(key, request, error) => {
+                if ctx.state.detail_requests.get(&key) == Some(&request) {
+                    ctx.state.error = Some(error);
+                }
+            }
+            Msg::ProjectCached(id, epoch, result) => {
+                if epoch != ctx.state.list_epoch
+                    || !ctx.state.project(id).is_some_and(|p| p.visible)
+                {
+                    return Update::none();
+                }
+                match result {
+                    Ok(items) => {
+                        self.merge_items(ctx, items);
+                        ctx.state.status =
+                            "Showing cached content · refreshing GitLab changes…".into();
+                    }
+                    Err(error) => ctx.state.error = Some(format!("Cache read failed: {error}")),
+                }
+            }
+            Msg::ProjectProgress(id, epoch, progress, items) => {
+                if epoch != ctx.state.list_epoch
+                    || !ctx.state.project(id).is_some_and(|p| p.visible)
+                {
+                    return Update::none();
+                }
+                ctx.state.sync_progress.insert(id, progress);
+                self.merge_items(ctx, items);
+            }
+            Msg::DetailCached(key, request, details) => {
+                if ctx.state.detail_requests.get(&key) != Some(&request) {
+                    return Update::none();
+                }
+                ctx.state
+                    .shared_details
+                    .insert(key.clone(), ((*details).clone(), Duration::ZERO));
+                if ctx.state.config.route.as_ref() == Some(&key) {
+                    // Historical warnings are visible, but aren't fresh rate-limit
+                    // responses and must not restart backoff on startup.
+                    ctx.state.details = Some(*details);
+                    ctx.state.status = "Showing cached detail · refreshing GitLab…".into();
+                }
+            }
+            Msg::DetailProgress(key, request, part, details) => {
+                if ctx.state.detail_requests.get(&key) != Some(&request) {
+                    return Update::none();
+                }
+                ctx.state
+                    .shared_details
+                    .insert(key.clone(), ((*details).clone(), Duration::ZERO));
+                if ctx.state.config.route.as_ref() == Some(&key) {
+                    let epoch = ctx.state.detail_epoch;
+                    self.update(Msg::DetailsLoaded(key.clone(), epoch, Ok(details)), ctx);
+                    ctx.state.detail_pending = Some((key, epoch));
+                    ctx.state.status =
+                        format!("Detail: {part:?} loaded · other sections refreshing…");
+                }
+            }
+            Msg::DetailFinished(key, request, result) => {
+                if ctx.state.detail_requests.get(&key) != Some(&request) {
+                    return Update::none();
+                }
+                ctx.state.detail_requests.remove(&key);
+                if let Ok(details) = &result {
+                    ctx.state.shared_details.insert(
+                        key.clone(),
+                        (
+                            (**details).clone(),
+                            ctx.elapsed()
+                                + Duration::from_secs(ctx.state.config.detail_refresh_secs),
+                        ),
+                    );
+                }
+                if ctx.state.config.route.as_ref() == Some(&key) {
+                    ctx.state.next_details =
+                        ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs);
+                    return self
+                        .update(Msg::DetailsLoaded(key, ctx.state.detail_epoch, result), ctx);
+                } else if let Err(error) = result {
+                    self.network_error(ctx, error);
+                }
+            }
             Msg::Refresh => {
                 if ctx.elapsed() < ctx.state.blocked_until {
                     ctx.state.status =
                         "GitLab backoff is active; refresh will resume automatically".into();
                 } else {
                     ctx.state.error = None;
+                    if let Some(key) = ctx.state.config.route.as_ref()
+                        && let Some((_, due)) = ctx.state.shared_details.get_mut(key)
+                    {
+                        *due = Duration::ZERO;
+                    }
                     self.queue_lists(ctx);
                     ctx.link().send(Msg::LoadDetails);
                     ctx.link().send(Msg::LoadTraces);
@@ -290,9 +423,20 @@ impl Component for Cronk {
                 let Some(api) = self.api.clone() else {
                     return Update::none();
                 };
+                let hydrate = !ctx.state.items.iter().any(|item| item.key.project == id);
+                let full = ctx.state.full_resync;
                 return Update::with_command(ctx.link().command(move |link| {
+                    if hydrate {
+                        link.send(Msg::ProjectCached(
+                            id,
+                            epoch,
+                            api.cached_items(id).map_err(|e| e.to_string()),
+                        ));
+                    }
                     let result = api
-                        .list_project(&project)
+                        .sync_project(&project, full, |progress, items| {
+                            link.send(Msg::ProjectProgress(id, epoch, progress, items));
+                        })
                         .map(|items| (items, api.current_iteration(project.id).ok().flatten()))
                         .map_err(|e| e.to_string());
                     link.send(Msg::ProjectLoaded(id, epoch, result));
@@ -324,6 +468,10 @@ impl Component for Cronk {
                     return Update::none();
                 }
                 ctx.state.list_pending.remove(&id);
+                ctx.state.sync_progress.remove(&id);
+                if ctx.state.list_pending.is_empty() {
+                    ctx.state.full_resync = false;
+                }
                 if !ctx.state.project(id).is_some_and(|p| p.visible) {
                     return Update::none();
                 }
@@ -365,6 +513,21 @@ impl Component for Cronk {
                 {
                     return Update::none();
                 }
+                if ctx.state.detail_requests.contains_key(&key) {
+                    ctx.state.detail_pending = Some((key, ctx.state.detail_epoch));
+                    return Update::full();
+                }
+                if let Some((details, due)) = ctx.state.shared_details.get(&key).cloned() {
+                    ctx.state.details = Some(details);
+                    if ctx.state.detail_requests.contains_key(&key) {
+                        ctx.state.detail_pending = Some((key, ctx.state.detail_epoch));
+                        return Update::full();
+                    }
+                    if ctx.elapsed() < due {
+                        ctx.state.next_details = due;
+                        return Update::full();
+                    }
+                }
                 ctx.state.next_details =
                     ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs);
                 let Some(api) = self.api.clone() else {
@@ -374,16 +537,69 @@ impl Component for Cronk {
                     ctx.link().send(Msg::LoadTraces);
                     return Update::full();
                 };
+                if ctx.state.details.as_ref().is_none_or(|d| d.item.key != key) {
+                    ctx.state.details = Some(Details {
+                        item: ctx
+                            .state
+                            .items
+                            .iter()
+                            .find(|i| i.key == key)
+                            .cloned()
+                            .unwrap_or_else(|| WorkItem {
+                                key: key.clone(),
+                                title: "Loading item…".into(),
+                                ..Default::default()
+                            }),
+                        ..Default::default()
+                    });
+                }
                 let epoch = ctx.state.detail_epoch;
                 ctx.state.detail_pending = Some((key.clone(), epoch));
-                return Update::with_command(ctx.link().command_keyed(
-                    "detail",
-                    TaskPolicy::LatestOnly,
-                    move |link| {
-                        let result = api.details(&key).map(Box::new).map_err(|e| e.to_string());
-                        link.send_if_not_cancelled(Msg::DetailsLoaded(key, epoch, result));
-                    },
-                ));
+                ctx.state.detail_sequence += 1;
+                let request = ctx.state.detail_sequence;
+                ctx.state.detail_requests.insert(key.clone(), request);
+                let previous = ctx.state.details.clone().filter(|d| d.item.key == key);
+                return Update::with_command(ctx.link().command(move |link| {
+                    let previous = match api.cached_details(&key) {
+                        Ok(cached) => match previous {
+                            Some(memory)
+                                if memory.loaded.iter().any(|part| *part != DetailPart::Core) =>
+                            {
+                                Some(memory)
+                            }
+                            memory => cached.or(memory),
+                        },
+                        Err(error) => {
+                            link.send(Msg::CacheWarning(
+                                key.clone(),
+                                request,
+                                format!(
+                                    "Detail cache read failed; fetching GitLab instead: {error:#}"
+                                ),
+                            ));
+                            previous
+                        }
+                    };
+                    if let Some(cached) = &previous {
+                        link.send(Msg::DetailCached(
+                            key.clone(),
+                            request,
+                            Box::new(cached.clone()),
+                        ));
+                    }
+                    let result = api
+                        .details_progress(&key, previous, |part, details| {
+                            link.send(Msg::DetailProgress(
+                                key.clone(),
+                                request,
+                                part,
+                                Box::new(details),
+                            ));
+                        })
+                        .map(Box::new)
+                        .map_err(|e| e.to_string());
+                    link.send(Msg::DetailFinished(key, request, result));
+                }));
             }
             Msg::DetailsLoaded(key, epoch, result) => {
                 if ctx.state.config.route.as_ref() != Some(&key) || epoch != ctx.state.detail_epoch
@@ -409,7 +625,20 @@ impl Component for Cronk {
                         if let Some(item) = ctx.state.items.iter_mut().find(|i| i.key == key) {
                             *item = details.item.clone();
                         }
+                        let previous_warnings = ctx
+                            .state
+                            .details
+                            .as_ref()
+                            .map_or_else(Vec::new, |d| d.warnings.clone());
                         let warnings = details.warnings.clone();
+                        let due = if ctx.state.detail_requests.contains_key(&key) {
+                            Duration::ZERO
+                        } else {
+                            ctx.state.next_details
+                        };
+                        ctx.state
+                            .shared_details
+                            .insert(key.clone(), ((*details).clone(), due));
                         ctx.state.details = Some(*details);
                         if ctx.state.section_name() == "Jobs" {
                             if let Some(index) = ctx
@@ -430,6 +659,9 @@ impl Component for Cronk {
                             ctx.state.config.field = index;
                         }
                         for warning in warnings {
+                            if previous_warnings.contains(&warning) {
+                                continue;
+                            }
                             // Missing optional features must not stall otherwise healthy live logs.
                             if warning.contains("Retry-After:")
                                 || warning.contains("HTTP 429")
@@ -538,6 +770,10 @@ impl Component for Cronk {
                         // A list GET begun before the write must not roll its result back in the UI.
                         ctx.state.list_epoch += 1;
                         ctx.state.list_pending.clear();
+                        ctx.state.sync_progress.clear();
+                        ctx.state.shared_details.clear();
+                        ctx.state.detail_requests.clear();
+                        ctx.state.tab_cache.clear();
                         ctx.state.detail_epoch += 1;
                         ctx.state.detail_pending = None;
                         ctx.link().send(Msg::Refresh);
@@ -1319,6 +1555,19 @@ impl Cronk {
         ctx.state.config.tab_states.insert(key, tab);
         prune_tab_routes(&mut ctx.state.config);
         let config = &ctx.state.config;
+        let visible: HashSet<_> = config
+            .projects
+            .iter()
+            .filter(|p| p.visible)
+            .map(|p| p.id)
+            .collect();
+        ctx.state
+            .shared_details
+            .retain(|key, _| visible.contains(&key.project));
+        ctx.state
+            .detail_requests
+            .retain(|key, _| visible.contains(&key.project));
+        ctx.state.sync_progress.retain(|id, _| visible.contains(id));
         ctx.state.tab_cache.retain(|key, _| {
             config
                 .tab_states
@@ -1332,6 +1581,42 @@ impl Cronk {
             return false;
         }
         true
+    }
+
+    pub(super) fn enable_cache(&mut self, ctx: &mut Context<Self>) {
+        if !ctx.state.demo
+            && let (Some(api), Some(path)) = (&mut self.api, &self.path)
+            && let Err(error) = api.enable_persistence(path)
+        {
+            ctx.state.error = Some(format!(
+                "Persistent cache unavailable (using memory): {error:#}"
+            ));
+        }
+    }
+
+    fn merge_items(&self, ctx: &mut Context<Self>, items: Vec<WorkItem>) {
+        if items.is_empty() {
+            return;
+        }
+        let selected = ctx
+            .state
+            .visible_items()
+            .get(ctx.state.scroll.selected)
+            .map(|i| i.key.clone());
+        let mut merged: HashMap<_, _> = std::mem::take(&mut ctx.state.items)
+            .into_iter()
+            .map(|i| (i.key.clone(), i))
+            .collect();
+        for item in items {
+            merged.insert(item.key.clone(), item);
+        }
+        ctx.state.items = merged.into_values().collect();
+        if let Some(key) = selected
+            && let Some(index) = ctx.state.visible_items().iter().position(|i| i.key == key)
+        {
+            ctx.state.scroll.selected = index;
+        }
+        self.normalize(ctx);
     }
 
     fn normalize(&self, ctx: &mut Context<Self>) {
@@ -1470,6 +1755,12 @@ impl Cronk {
             .config
             .selections
             .insert(key.clone(), ctx.state.scroll.selected);
+        if let Some(details) = &ctx.state.details {
+            ctx.state.shared_details.insert(
+                details.item.key.clone(),
+                (details.clone(), ctx.state.next_details),
+            );
+        }
         let cache = TabCache {
             details: ctx.state.details.take(),
             traces: std::mem::take(&mut ctx.state.traces),
@@ -1515,6 +1806,17 @@ impl Cronk {
         self.close_log_mode(ctx);
         ctx.state.next_details = cache.next_details;
         ctx.state.next_traces = cache.next_traces;
+        if let Some(key) = ctx.state.config.route.clone()
+            && let Some((details, due)) = ctx.state.shared_details.get(&key)
+        {
+            ctx.state.details = Some(details.clone());
+            ctx.state.next_details = *due;
+        }
+        if let Some(key) = ctx.state.config.route.clone()
+            && ctx.state.detail_requests.contains_key(&key)
+        {
+            ctx.state.detail_pending = Some((key, ctx.state.detail_epoch));
+        }
         ctx.state.expanded = tab.expanded.into_iter().collect();
         ctx.state.collapsed = tab.collapsed.into_iter().collect();
         ctx.state.content_offset = tab.content_offset;
@@ -1611,11 +1913,28 @@ impl Cronk {
         ctx.state.collapsed.clear();
         ctx.state.log_views.clear();
         self.close_log_mode(ctx);
-        ctx.state.details = if ctx.state.demo {
-            Some(demo::details(&key))
-        } else {
-            None
-        };
+        ctx.state.details = ctx
+            .state
+            .shared_details
+            .get(&key)
+            .map(|(d, _)| d.clone())
+            .or_else(|| {
+                if ctx.state.demo {
+                    Some(demo::details(&key))
+                } else {
+                    {
+                        ctx.state
+                            .items
+                            .iter()
+                            .find(|i| i.key == key)
+                            .map(|item| Details {
+                                item: item.clone(),
+                                loaded: HashSet::from([DetailPart::Core]),
+                                ..Default::default()
+                            })
+                    }
+                }
+            });
         ctx.link().send(Msg::LoadDetails);
     }
 
@@ -1913,6 +2232,8 @@ impl Cronk {
         }
         match action {
             Action::Refresh => { self.close_dialog(ctx); return self.update(Msg::Refresh, ctx); }
+            Action::FullResync => { self.close_dialog(ctx); return self.update(Msg::FullResync, ctx); }
+            Action::ClearCache => { self.close_dialog(ctx); return self.update(Msg::ClearCache, ctx); }
             Action::Onboarding => {
                 self.show_onboarding(ctx);
                 return Update::with_command(self.schedule_setup(ctx));

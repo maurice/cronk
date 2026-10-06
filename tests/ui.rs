@@ -8,7 +8,7 @@ use cronk::{
     build_info,
     config::{Config, SavedView, TabState, UserDisplay},
     demo,
-    model::{CurrentIteration, ItemKey, ItemKind, Mutation, TraceChunk, User},
+    model::{CurrentIteration, DetailPart, ItemKey, ItemKind, Mutation, TraceChunk, User},
     ui::{Confirmation, Cronk, Dialog, DialogKind, Msg, Scope, State},
 };
 use tui_lipan::{
@@ -1953,7 +1953,199 @@ fn cache_finished_job(ui: &mut Ui, marker: &str) -> u64 {
 }
 
 #[test]
-fn tab_switches_restore_independent_caches_and_reject_responses_from_previous_visits() {
+fn loading_detail_sections_render_skeletons_but_refresh_keeps_cached_content() {
+    let mut ui = mount_with_viewport(
+        config(),
+        None,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 110,
+            h: 40,
+        },
+    );
+    key(&mut ui, KeyCode::Char('M'));
+    key(&mut ui, KeyCode::Enter);
+    let route = ui.state().config.route.clone().unwrap();
+    let epoch = ui.state().detail_epoch;
+    let details = ui.state_mut().details.as_mut().unwrap();
+    details.loaded = std::collections::HashSet::from([DetailPart::Core]);
+    details.item.description = "Cached description remains available.".into();
+    details.warnings.clear();
+    details.jobs.clear();
+    details.discussions.clear();
+    details.diffs.clear();
+    ui.state_mut().detail_pending = Some((route.clone(), epoch));
+    ui.state_mut().sync_progress.insert(
+        route.project,
+        cronk::gitlab::SyncProgress {
+            kind: ItemKind::MergeRequest,
+            loaded: 120,
+            total: Some(300),
+            page: 2,
+            phase: "fetching",
+        },
+    );
+    ui.dispatch(Msg::DetailSection(2)).unwrap();
+    settle_layout(&mut ui);
+    let text = ui.capture_frame().plain_text();
+    assert!(text.contains("Loading Pipeline…"), "{text}");
+    assert!(text.contains("Loading Jobs…"), "{text}");
+    assert!(text.contains("120/300"), "{text}");
+    if let Ok(path) = std::env::var("CRONK_CAPTURE_PROGRESS") {
+        std::fs::write(path, ui.capture_ui_snapshot().to_png_default().unwrap()).unwrap();
+    }
+    ui.state_mut()
+        .details
+        .as_mut()
+        .unwrap()
+        .loaded
+        .insert(DetailPart::Pipeline);
+    settle_layout(&mut ui);
+    let text = ui.capture_frame().plain_text();
+    assert!(
+        !text.contains("Loading Pipeline…"),
+        "cached sections stay visible during refresh"
+    );
+    assert!(!text.contains("Loading Jobs…"));
+}
+
+#[test]
+fn detail_requests_survive_tab_navigation_and_are_shared_by_item_identity() {
+    let mut cfg = numbered_views_config(1);
+    cfg.views[0].kind = ItemKind::MergeRequest;
+    let mut ui = mount(cfg, None);
+    key(&mut ui, KeyCode::Char('M'));
+    key(&mut ui, KeyCode::Enter);
+    let route = ui.state().config.route.clone().unwrap();
+    ui.state_mut().detail_requests.insert(route.clone(), 42);
+    let mut fresh = demo::details(&route);
+    fresh.item.title = "Shared progressive content".into();
+    ui.dispatch(Msg::DetailProgress(
+        route.clone(),
+        42,
+        DetailPart::Core,
+        Box::new(fresh.clone()),
+    ))
+    .unwrap();
+    key(&mut ui, KeyCode::Char('1'));
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().config.route, Some(route.clone()));
+    assert_eq!(ui.state().detail_requests.len(), 1);
+    assert_eq!(
+        ui.state().details.as_ref().unwrap().item.title,
+        "Shared progressive content"
+    );
+    assert!(ui.state().detail_pending.is_some());
+    ui.dispatch(Msg::DetailFinished(route.clone(), 42, Ok(Box::new(fresh))))
+        .unwrap();
+    assert!(ui.state().detail_requests.is_empty());
+    assert!(ui.state().detail_pending.is_none());
+    assert!(
+        ui.state().shared_details[&route].1 > Duration::ZERO,
+        "completion in another tab schedules freshness from completion, not that tab's old timer"
+    );
+    key(&mut ui, KeyCode::Char('M'));
+    assert_eq!(
+        ui.state().details.as_ref().unwrap().item.title,
+        "Shared progressive content"
+    );
+    let mut stale = demo::details(&route);
+    stale.item.title = "Obsolete request".into();
+    ui.dispatch(Msg::DetailProgress(
+        route.clone(),
+        41,
+        DetailPart::Changes,
+        Box::new(stale),
+    ))
+    .unwrap();
+    ui.dispatch(Msg::DetailFinished(
+        route,
+        41,
+        Err("obsolete failure".into()),
+    ))
+    .unwrap();
+    assert_eq!(
+        ui.state().details.as_ref().unwrap().item.title,
+        "Shared progressive content"
+    );
+    assert!(ui.state().error.is_none());
+}
+
+#[test]
+fn cached_rate_limit_warnings_do_not_restart_backoff() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    key(&mut ui, KeyCode::Enter);
+    let route = ui.state().config.route.clone().unwrap();
+    ui.state_mut().detail_requests.insert(route.clone(), 55);
+    let mut cached = demo::details(&route);
+    cached.warnings = vec!["Notes incomplete: HTTP 429 Retry-After: 3600".into()];
+    ui.dispatch(Msg::DetailCached(route.clone(), 55, Box::new(cached)))
+        .unwrap();
+    assert_eq!(ui.state().blocked_until, Duration::ZERO);
+    assert_eq!(ui.state().failures, 0);
+    assert!(ui.state().status.contains("cached"));
+    ui.dispatch(Msg::DetailFinished(route, 54, Err("obsolete error".into())))
+        .unwrap();
+    assert!(ui.state().error.is_none());
+}
+
+#[test]
+fn partial_list_pages_preserve_selection_and_unknown_totals_are_not_percentages() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    key(&mut ui, KeyCode::Down);
+    let selected = ui.state().visible_items()[ui.state().scroll.selected]
+        .key
+        .clone();
+    let epoch = ui.state().list_epoch;
+    let project = selected.project;
+    let mut item = ui
+        .state()
+        .items
+        .iter()
+        .find(|i| i.key.project == project && i.key.kind == ItemKind::Issue)
+        .unwrap()
+        .clone();
+    item.key.iid = 999;
+    item.title = "New streamed row".into();
+    let progress = cronk::gitlab::SyncProgress {
+        kind: ItemKind::Issue,
+        loaded: 100,
+        total: None,
+        page: 1,
+        phase: "fetching",
+    };
+    assert!(progress.label().contains("100 loaded"));
+    assert!(!progress.label().contains('['));
+    ui.dispatch(Msg::ProjectProgress(project, epoch, progress, vec![item]))
+        .unwrap();
+    assert_eq!(
+        ui.state().visible_items()[ui.state().scroll.selected].key,
+        selected
+    );
+    assert!(ui.state().items.iter().any(|i| i.key.iid == 999));
+    let count = ui.state().items.len();
+    ui.dispatch(Msg::ProjectProgress(
+        project,
+        epoch + 1,
+        cronk::gitlab::SyncProgress {
+            kind: ItemKind::Issue,
+            loaded: 200,
+            total: None,
+            page: 2,
+            phase: "fetching",
+        },
+        vec![],
+    ))
+    .unwrap();
+    assert_eq!(ui.state().items.len(), count);
+    assert_eq!(ui.state().sync_progress[&project].loaded, 100);
+}
+
+#[test]
+fn tab_switches_share_content_preserve_independent_navigation_and_reject_stale_responses() {
     let mut config = numbered_views_config(1);
     config.views[0].kind = ItemKind::MergeRequest;
     let mut ui = mount(config, None);
@@ -1985,7 +2177,7 @@ fn tab_switches_restore_independent_caches_and_reject_responses_from_previous_vi
     let saved_traces = traces(ui.state());
     assert_ne!(
         builtin_traces, saved_traces,
-        "even the same route has per-tab caches"
+        "log buffers and reading positions remain independent per tab"
     );
     let saved_epoch = ui.state().detail_epoch;
     assert!(saved_epoch > old_epoch);
@@ -1994,7 +2186,7 @@ fn tab_switches_restore_independent_caches_and_reject_responses_from_previous_vi
     assert_tab_state(&ui, &builtin, builtin_selected);
     assert_eq!(
         ui.state().details.as_ref().unwrap().item.title,
-        "Built-in cached detail"
+        "Saved tab cached detail"
     );
     assert_eq!(traces(ui.state()), builtin_traces);
     let epoch = ui.state().detail_epoch;
@@ -2043,7 +2235,7 @@ fn tab_switches_restore_independent_caches_and_reject_responses_from_previous_vi
         assert_tab_state(&ui, &builtin, builtin_selected);
         assert_eq!(
             ui.state().details.as_ref().unwrap().item.title,
-            "Built-in cached detail"
+            "Saved tab cached detail"
         );
         assert_eq!(traces(ui.state()), builtin_traces);
         assert_eq!(ui.state().detail_pending, Some((route.clone(), epoch)));

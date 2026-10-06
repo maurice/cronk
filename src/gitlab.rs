@@ -3,10 +3,9 @@
 //! Installation URLs retain their subpath (an existing `/api/v4` suffix is accepted).
 //! Collections are paginated to completion, with no arbitrary item/page cutoff. Individual
 //! JSON responses are limited to 8 MiB and the shared validator cache to 128 entries/16 MiB.
-//! Each list refresh still reads all history: updated_after is not a deletion/visibility
-//! change feed, nor does it reliably cover pipeline/discussion updates. No incremental
-//! snapshot is retained. The validator cache bounds retained backend list memory, not the
-//! complete returned collection. A future delta cache needs periodic full reconciliation.
+//! Persistent list sync uses overlapping updated_at windows and resumable timestamp
+//! boundaries. Full reconciliation runs daily or on demand; missing identities are
+//! verified individually before deletion. Pipelines/discussions refresh independently.
 //!
 //! Dashboard reads enrich at most 12 recently updated open MRs missing a pipeline or exact
 //! discussion count, with up to one MR-detail request each (only for a missing pipeline)
@@ -37,7 +36,7 @@
 //! A trailing incomplete UTF-8 character (at most three bytes) is held until another poll.
 
 use crate::model::{
-    CurrentIteration, Details, Diff, Discussion, ItemKey, ItemKind, Label, LookupKind,
+    CurrentIteration, DetailPart, Details, Diff, Discussion, ItemKey, ItemKind, Label, LookupKind,
     LookupOption, Mutation, Pipeline, Project, TraceChunk, User, WorkItem,
 };
 use anyhow::{Result, anyhow, bail};
@@ -82,6 +81,44 @@ pub struct GitLab {
     traces: Arc<Mutex<VecDeque<Arc<TraceState>>>>,
     // 0 = unknown (including empty traces), 1 = supported, 2 = legacy Range fallback.
     trace_byte_params: Arc<AtomicU8>,
+    persistent: Option<Arc<crate::cache::ContentCache>>,
+    sync_locks: Arc<Mutex<HashMap<u64, Arc<Mutex<()>>>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SyncProgress {
+    pub kind: ItemKind,
+    pub loaded: usize,
+    pub total: Option<usize>,
+    pub page: usize,
+    pub phase: &'static str,
+}
+
+impl SyncProgress {
+    pub fn label(&self) -> String {
+        if self.phase == "dashboard enrichment" {
+            return "Refreshing dashboard signals…".into();
+        }
+        let resource = match self.kind {
+            ItemKind::Issue => "Issues",
+            ItemKind::MergeRequest => "MRs",
+        };
+        let count = self.total.map_or_else(
+            || format!("{} loaded", self.loaded),
+            |total| format!("{}/{total}", self.loaded),
+        );
+        let bar = self
+            .total
+            .filter(|total| *total > 0)
+            .map_or_else(String::new, |total| {
+                let filled = (self.loaded.saturating_mul(8) / total).min(8);
+                format!(" [{}{}]", "█".repeat(filled), "░".repeat(8 - filled))
+            });
+        format!(
+            "{resource}: {count}{bar} · page {} · {}",
+            self.page, self.phase
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -308,6 +345,8 @@ impl GitLab {
             cache: Arc::new(Mutex::new(Cache::default())),
             traces: Arc::new(Mutex::new(VecDeque::new())),
             trace_byte_params: Arc::new(AtomicU8::new(0)),
+            persistent: None,
+            sync_locks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -578,7 +617,16 @@ impl GitLab {
         self.decode(url, &self.document(url)?)
     }
 
-    fn pages<T: DeserializeOwned>(&self, mut url: Url, result: &mut Vec<T>) -> Result<()> {
+    fn pages<T: DeserializeOwned>(&self, url: Url, result: &mut Vec<T>) -> Result<()> {
+        self.pages_progress(url, Some(result), |_, _| Ok(()))
+    }
+
+    fn pages_progress<T: DeserializeOwned>(
+        &self,
+        mut url: Url,
+        mut result: Option<&mut Vec<T>>,
+        mut progress: impl FnMut(&[T], &HeaderMap) -> Result<()>,
+    ) -> Result<()> {
         url.query_pairs_mut()
             .append_pair("per_page", &PAGE_SIZE.to_string())
             .append_pair("page", "1");
@@ -601,7 +649,10 @@ impl GitLab {
                 );
             }
             previous = Some(doc.body.clone());
-            result.extend(page);
+            progress(&page, &doc.headers)?;
+            if let Some(result) = result.as_mut() {
+                result.extend(page);
+            }
             let next = self.next_page(&url, &doc.headers, count)?;
             let Some(next) = next else { return Ok(()) };
             url = next;
@@ -704,6 +755,33 @@ impl GitLab {
                 (result, false)
             }
         }
+    }
+
+    pub fn enable_persistence(&mut self, workspace: &std::path::Path) -> Result<()> {
+        self.persistent = Some(Arc::new(crate::cache::ContentCache::open(
+            workspace,
+            self.api.as_str(),
+            &self.token,
+        )?));
+        Ok(())
+    }
+
+    pub fn cached_items(&self, project: u64) -> Result<Vec<WorkItem>> {
+        self.persistent
+            .as_ref()
+            .map_or_else(|| Ok(Vec::new()), |cache| cache.items(project))
+    }
+
+    pub fn cached_details(&self, key: &ItemKey) -> Result<Option<Details>> {
+        self.persistent
+            .as_ref()
+            .map_or_else(|| Ok(None), |cache| cache.detail(key))
+    }
+
+    pub fn clear_content_cache(&self) -> Result<()> {
+        self.persistent
+            .as_ref()
+            .map_or(Ok(()), |cache| cache.clear())
     }
 
     pub fn current_user(&self) -> Result<User> {
@@ -810,8 +888,35 @@ impl GitLab {
     }
 
     pub fn list_project(&self, project: &Project) -> Result<Vec<WorkItem>> {
-        let mut items = Vec::new();
-        for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
+        self.sync_project(project, false, |_, _| {})
+    }
+
+    /// Publish durable pages immediately. A per-project lock prevents overlapping
+    /// refreshes from racing checkpoints, including refreshes after remote writes.
+    pub fn sync_project(
+        &self,
+        project: &Project,
+        full: bool,
+        progress: impl FnMut(SyncProgress, Vec<WorkItem>) + Send,
+    ) -> Result<Vec<WorkItem>> {
+        let lock = self
+            .sync_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(project.id)
+            .or_default()
+            .clone();
+        let _sync = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let revision = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation;
+        let progress = Mutex::new(progress);
+        let report =
+            |status, items| (progress.lock().unwrap_or_else(|e| e.into_inner()))(status, items);
+        let fetch_kind = |kind: ItemKind| -> Result<Vec<WorkItem>> {
+            let mut items = Vec::new();
             let mut url = self.url(&["projects", &project.id.to_string(), kind.segment()]);
             url.query_pairs_mut()
                 .append_pair("state", "all")
@@ -819,8 +924,67 @@ impl GitLab {
                 .append_pair("order_by", "updated_at")
                 .append_pair("sort", "desc")
                 .append_pair("with_labels_details", "true");
-            let collection = match self.all::<ApiItem>(url) {
-                Ok(collection) => collection,
+            let plan = self
+                .persistent
+                .as_ref()
+                .map(|cache| cache.plan(project.id, kind, full))
+                .transpose()?;
+            if let Some(plan) = &plan {
+                if let Some(after) = &plan.after {
+                    url.query_pairs_mut().append_pair("updated_after", after);
+                }
+                url.query_pairs_mut()
+                    .append_pair("updated_before", &plan.before);
+            }
+            let mut loaded = 0;
+            let mut page_number = 0;
+            let mut label_colors = None;
+            match self.pages_progress::<ApiItem>(url, None, |raw, headers| {
+                page_number += 1;
+                loaded += raw.len();
+                let total = headers
+                    .get("x-total")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok());
+                let mut page: Vec<WorkItem> = raw
+                    .iter()
+                    .cloned()
+                    .map(|raw| raw.into_item(project.id, kind))
+                    .collect();
+                if page.iter().any(needs_label_colors) {
+                    if label_colors.is_none() {
+                        label_colors = Some(self.labels(project.id)?);
+                    }
+                    for item in &mut page {
+                        apply_label_colors(item, label_colors.as_ref().unwrap());
+                    }
+                }
+                let mut status = SyncProgress {
+                    kind,
+                    loaded,
+                    total,
+                    page: page_number,
+                    phase: "saving",
+                };
+                report(status.clone(), Vec::new());
+                // Serialize writes with successful mutations: an older GET cannot
+                // repopulate disk after mutation invalidation.
+                let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.generation != revision {
+                    bail!("Sync superseded by a GitLab write; refresh again");
+                }
+                if let (Some(cache), Some(plan)) = (&self.persistent, &plan) {
+                    cache.page(project.id, kind, plan, &page)?;
+                }
+                drop(guard);
+                if self.persistent.is_none() {
+                    items.extend(page.clone());
+                }
+                status.phase = "fetching";
+                report(status, page);
+                Ok(())
+            }) {
+                Ok(()) => (),
                 Err(error)
                     if matches!(
                         http_status(&error),
@@ -828,7 +992,7 @@ impl GitLab {
                     ) =>
                 {
                     match self.feature_disabled(project.id, kind) {
-                        Ok(true) => continue,
+                        Ok(true) => (),
                         Ok(false) => return Err(error),
                         Err(verification) => {
                             return Err(error.context(format!(
@@ -839,13 +1003,87 @@ impl GitLab {
                 }
                 Err(error) => return Err(error),
             };
-            for raw in collection {
-                items.push(raw.into_item(project.id, kind));
+            // Feature-disabled handling above must still finish its empty collection.
+            if let (Some(cache), Some(plan)) = (&self.persistent, &plan) {
+                report(
+                    SyncProgress {
+                        kind,
+                        loaded,
+                        total: None,
+                        page: page_number,
+                        phase: "reconciling",
+                    },
+                    Vec::new(),
+                );
+                let mut removed = Vec::new();
+                for key in cache.missing(project.id, kind, plan)? {
+                    // Offset pagination is not an atomic snapshot: an updated item
+                    // may have moved out of the bounded import window. Verify it.
+                    match self.get::<ApiItem>(&self.item_url(&key, &[])) {
+                        Ok(raw) => {
+                            let item = raw.into_item(project.id, kind);
+                            let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                            if guard.generation != revision {
+                                bail!("Sync superseded by a GitLab write; refresh again");
+                            }
+                            cache.enrich(std::slice::from_ref(&item))?;
+                            items.push(item);
+                        }
+                        Err(error)
+                            if matches!(
+                                http_status(&error),
+                                Some(StatusCode::NOT_FOUND | StatusCode::FORBIDDEN)
+                            ) =>
+                        {
+                            removed.push(key)
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.generation != revision {
+                    bail!("Sync superseded by a GitLab write; refresh again");
+                }
+                cache.finish(project.id, kind, plan, &removed)?;
             }
+            Ok(items)
+        };
+        let mut items = if self.persistent.is_some() {
+            // Show recent MRs even while a long issue history is being imported.
+            std::thread::scope(|scope| -> Result<Vec<WorkItem>> {
+                let issues = scope.spawn(|| fetch_kind(ItemKind::Issue));
+                let mrs = fetch_kind(ItemKind::MergeRequest);
+                let mut items = issues
+                    .join()
+                    .map_err(|_| anyhow!("List worker panicked"))??;
+                items.extend(mrs?);
+                Ok(items)
+            })?
+        } else {
+            let mut items = fetch_kind(ItemKind::Issue)?;
+            items.extend(fetch_kind(ItemKind::MergeRequest)?);
+            items
+        };
+        if let Some(cache) = &self.persistent {
+            items = cache.items(project.id)?;
         }
+        report(
+            SyncProgress {
+                kind: ItemKind::MergeRequest,
+                loaded: items.len(),
+                total: None,
+                page: 0,
+                phase: "dashboard enrichment",
+            },
+            Vec::new(),
+        );
+        let mut enriched_keys = HashSet::new();
         if items.iter().any(needs_label_colors) {
             let labels = self.labels(project.id)?;
             for item in &mut items {
+                if needs_label_colors(item) {
+                    enriched_keys.insert(item.key.clone());
+                }
                 apply_label_colors(item, &labels);
             }
         }
@@ -855,7 +1093,9 @@ impl GitLab {
             .filter_map(|(i, item)| {
                 (item.key.kind == ItemKind::MergeRequest
                     && item.state == "opened"
-                    && (item.pipeline.is_none() || item.unresolved.is_none()))
+                    && (self.persistent.is_some()
+                        || item.pipeline.is_none()
+                        || item.unresolved.is_none()))
                 .then_some(i)
             })
             .collect();
@@ -867,6 +1107,13 @@ impl GitLab {
         });
         let mut discussion_pages = DASHBOARD_DISCUSSION_PAGES;
         for index in candidates.into_iter().take(DASHBOARD_ENRICHMENT) {
+            enriched_keys.insert(items[index].key.clone());
+            // Pipeline/discussion changes need not bump MR updated_at. Refresh the
+            // bounded dashboard candidates independently of the list delta feed.
+            if self.persistent.is_some() {
+                items[index].pipeline = None;
+                items[index].unresolved = None;
+            }
             if items[index].pipeline.is_none() {
                 match self.get::<ApiItem>(&self.item_url(&items[index].key, &[])) {
                     Ok(raw) => {
@@ -883,6 +1130,22 @@ impl GitLab {
                     self.dashboard_discussions(&items[index].key, &mut discussion_pages)?;
             }
         }
+        if let Some(cache) = &self.persistent {
+            // Write only enriched identities, not the entire historical snapshot on
+            // every small delta. Preserve synchronization cursors/identity markers.
+            let enriched: Vec<_> = items
+                .iter()
+                .filter(|i| enriched_keys.contains(&i.key))
+                .cloned()
+                .collect();
+            let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.generation != revision {
+                bail!("Sync superseded by a GitLab write; refresh again");
+            }
+            if !enriched.is_empty() {
+                cache.enrich(&enriched)?;
+            }
+        }
         items.sort_by(|a, b| {
             b.updated_at
                 .cmp(&a.updated_at)
@@ -893,122 +1156,243 @@ impl GitLab {
     }
 
     pub fn details(&self, key: &ItemKey) -> Result<Details> {
+        self.fetch_details(key, false, None, |_, _| {})
+    }
+
+    pub fn details_progress(
+        &self,
+        key: &ItemKey,
+        previous: Option<Details>,
+        progress: impl Fn(DetailPart, Details) + Sync,
+    ) -> Result<Details> {
+        self.fetch_details(key, true, previous, progress)
+    }
+
+    fn fetch_details(
+        &self,
+        key: &ItemKey,
+        parallel: bool,
+        previous: Option<Details>,
+        progress: impl Fn(DetailPart, Details) + Sync,
+    ) -> Result<Details> {
+        let revision = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation;
         let raw: ApiItem = self.get(&self.item_url(key, &[]))?;
-        let mut pipeline = raw.head_pipeline.clone();
-        let head_sha = raw
-            .sha
-            .clone()
-            .or_else(|| raw.diff_refs.as_ref().map(|refs| refs.head_sha.clone()));
-        let changes_count = raw.changes_count.clone();
-        let mut details = Details {
-            item: raw.into_item(key.project, key.kind),
-            ..Details::default()
+        let mut details = previous.unwrap_or_default();
+        let colors: HashMap<_, _> = details
+            .item
+            .labels
+            .iter()
+            .map(|label| (label.name.clone(), label.clone()))
+            .collect();
+        details.item = raw.clone().into_item(key.project, key.kind);
+        apply_label_colors(&mut details.item, &colors);
+        details.warnings.clear();
+        details.loaded.insert(DetailPart::Core);
+        let shared = Mutex::new(details);
+        let publish = |part, fresh: Option<Details>| -> Result<()> {
+            let mut details = shared.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(fresh) = fresh {
+                // Failed optional sections retain cached content; partial first loads
+                // remain useful and carry a visible warning instead of a fake empty state.
+                let section_failed = fresh.warnings.iter().any(|warning| match part {
+                    DetailPart::Activity => warning.starts_with("Notes incomplete"),
+                    _ => true,
+                });
+                let usable = !section_failed || !details.loaded.contains(&part);
+                if part == DetailPart::Activity {
+                    details.item.labels = fresh.item.labels.clone();
+                }
+                if usable {
+                    match part {
+                        DetailPart::Activity => details.notes = fresh.notes,
+                        DetailPart::Discussions => {
+                            details.discussions = fresh.discussions;
+                            details.item.unresolved = fresh.item.unresolved;
+                        }
+                        DetailPart::Pipeline => {
+                            details.jobs = fresh.jobs;
+                            details.jobs_project = fresh.jobs_project;
+                            details.item.pipeline = fresh.item.pipeline;
+                        }
+                        DetailPart::Changes => details.diffs = fresh.diffs,
+                        DetailPart::Core => {}
+                    }
+                }
+                details.loaded.insert(part);
+                details.warnings.extend(fresh.warnings);
+            }
+            let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.generation != revision {
+                bail!("Detail request superseded by a GitLab write");
+            }
+            if let Some(cache) = &self.persistent {
+                cache.save_detail(&details)?;
+            }
+            drop(guard);
+            progress(part, details.clone());
+            Ok(())
         };
-        if needs_label_colors(&details.item) {
-            match self.labels(key.project) {
-                Ok(labels) => apply_label_colors(&mut details.item, &labels),
-                Err(error) => details
-                    .warnings
-                    .push(format!("Label colors unavailable: {error}")),
+        publish(DetailPart::Core, None)?;
+        let mut parts = vec![DetailPart::Activity, DetailPart::Discussions];
+        if key.kind == ItemKind::MergeRequest {
+            parts.extend([DetailPart::Pipeline, DetailPart::Changes]);
+        }
+        if parallel {
+            std::thread::scope(|scope| -> Result<()> {
+                let handles: Vec<_> = parts
+                    .into_iter()
+                    .map(|part| {
+                        let raw = &raw;
+                        let publish = &publish;
+                        scope.spawn(move || publish(part, Some(self.detail_part(key, raw, part))))
+                    })
+                    .collect();
+                for handle in handles {
+                    handle
+                        .join()
+                        .map_err(|_| anyhow!("Detail worker panicked"))??;
+                }
+                Ok(())
+            })?;
+        } else {
+            for part in parts {
+                publish(part, Some(self.detail_part(key, &raw, part)))?;
             }
         }
-        let mut notes = self.item_url(key, &["notes"]);
-        notes
-            .query_pairs_mut()
-            .append_pair("order_by", "created_at")
-            .append_pair("sort", "desc");
-        details.notes = self.optional(notes, "Notes", &mut details.warnings).0;
-        details.notes.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
-                .then_with(|| b.id.cmp(&a.id))
-        });
-        let (discussions, complete) = self.optional::<Discussion>(
-            self.item_url(key, &["discussions"]),
-            "Discussions",
-            &mut details.warnings,
-        );
-        details.item.unresolved = complete.then(|| {
-            discussions
-                .iter()
-                .filter(|d| d.notes.iter().any(|n| n.resolvable && !n.resolved))
-                .count()
-        });
-        details.discussions = discussions;
-        if key.kind == ItemKind::MergeRequest {
-            if pipeline.is_none() {
-                if let Some(sha) = head_sha.filter(|sha| !sha.is_empty()) {
-                    let (pipelines, complete) = self.optional::<ApiPipeline>(
-                        self.item_url(key, &["pipelines"]),
-                        "Head pipelines",
-                        &mut details.warnings,
-                    );
-                    if complete {
-                        pipeline = pipelines
-                            .into_iter()
-                            .filter(|p| p.sha.as_deref() == Some(sha.as_str()))
-                            .max_by_key(|p| p.pipeline.id);
-                        if let Some(summary) = &pipeline {
-                            let project = summary.project_id.unwrap_or(key.project);
-                            match self.get::<ApiPipeline>(&self.url(&[
-                                "projects",
-                                &project.to_string(),
-                                "pipelines",
-                                &summary.pipeline.id.to_string(),
-                            ])) {
-                                Ok(full) => pipeline = Some(full),
-                                Err(error) => details.warnings.push(format!(
-                                    "Pipeline details unavailable; using summary: {error}"
-                                )),
+        Ok(shared.into_inner().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn detail_part(&self, key: &ItemKey, raw: &ApiItem, part: DetailPart) -> Details {
+        let mut details = Details {
+            item: raw.clone().into_item(key.project, key.kind),
+            ..Default::default()
+        };
+        match part {
+            DetailPart::Activity => {
+                // Optional label enrichment must not gate the first usable core or
+                // unrelated sections. Share the activity worker to keep the cap at four.
+                if needs_label_colors(&details.item) {
+                    match self.labels(key.project) {
+                        Ok(labels) => apply_label_colors(&mut details.item, &labels),
+                        Err(error) => details
+                            .warnings
+                            .push(format!("Label colors unavailable: {error}")),
+                    }
+                }
+                let mut notes = self.item_url(key, &["notes"]);
+                notes
+                    .query_pairs_mut()
+                    .append_pair("order_by", "created_at")
+                    .append_pair("sort", "desc");
+                details.notes = self.optional(notes, "Notes", &mut details.warnings).0;
+                details.notes.sort_by(|a, b| {
+                    b.created_at
+                        .cmp(&a.created_at)
+                        .then_with(|| b.id.cmp(&a.id))
+                });
+            }
+            DetailPart::Discussions => {
+                let (discussions, complete) = self.optional::<Discussion>(
+                    self.item_url(key, &["discussions"]),
+                    "Discussions",
+                    &mut details.warnings,
+                );
+                details.item.unresolved = complete.then(|| {
+                    discussions
+                        .iter()
+                        .filter(|d| d.notes.iter().any(|n| n.resolvable && !n.resolved))
+                        .count()
+                });
+                details.discussions = discussions;
+            }
+            DetailPart::Pipeline => {
+                let mut pipeline = raw.head_pipeline.clone();
+                let head_sha = raw
+                    .sha
+                    .clone()
+                    .or_else(|| raw.diff_refs.as_ref().map(|refs| refs.head_sha.clone()));
+                if pipeline.is_none() {
+                    if let Some(sha) = head_sha.filter(|sha| !sha.is_empty()) {
+                        let (pipelines, complete) = self.optional::<ApiPipeline>(
+                            self.item_url(key, &["pipelines"]),
+                            "Head pipelines",
+                            &mut details.warnings,
+                        );
+                        if complete {
+                            pipeline = pipelines
+                                .into_iter()
+                                .filter(|p| p.sha.as_deref() == Some(sha.as_str()))
+                                .max_by_key(|p| p.pipeline.id);
+                            if let Some(summary) = &pipeline {
+                                let project = summary.project_id.unwrap_or(key.project);
+                                match self.get::<ApiPipeline>(&self.url(&[
+                                    "projects",
+                                    &project.to_string(),
+                                    "pipelines",
+                                    &summary.pipeline.id.to_string(),
+                                ])) {
+                                    Ok(full) => pipeline = Some(full),
+                                    Err(error) => details.warnings.push(format!(
+                                        "Pipeline details unavailable; using summary: {error}"
+                                    )),
+                                }
                             }
                         }
+                    } else {
+                        details.warnings.push("Head pipeline unknown: GitLab supplied neither head_pipeline nor a current head SHA".into());
                     }
-                } else {
-                    details.warnings.push("Head pipeline unknown: GitLab supplied neither head_pipeline nor a current head SHA".into());
+                }
+                if let Some(pipeline) = pipeline {
+                    let project = pipeline.project_id.unwrap_or(key.project);
+                    details.jobs_project = Some(project);
+                    let mut jobs = self.url(&[
+                        "projects",
+                        &project.to_string(),
+                        "pipelines",
+                        &pipeline.pipeline.id.to_string(),
+                        "jobs",
+                    ]);
+                    jobs.query_pairs_mut()
+                        .append_pair("include_retried", "false");
+                    details.jobs = self
+                        .optional(jobs, "Pipeline jobs", &mut details.warnings)
+                        .0;
+                    details.item.pipeline = Some(pipeline.pipeline);
                 }
             }
-            if let Some(pipeline) = pipeline {
-                let project = pipeline.project_id.unwrap_or(key.project);
-                details.jobs_project = Some(project);
-                let mut jobs = self.url(&[
-                    "projects",
-                    &project.to_string(),
-                    "pipelines",
-                    &pipeline.pipeline.id.to_string(),
-                    "jobs",
-                ]);
-                jobs.query_pairs_mut()
-                    .append_pair("include_retried", "false");
-                details.jobs = self
-                    .optional(jobs, "Pipeline jobs", &mut details.warnings)
+            DetailPart::Changes => {
+                details.diffs = self
+                    .optional::<Diff>(
+                        self.item_url(key, &["diffs"]),
+                        "Diffs",
+                        &mut details.warnings,
+                    )
                     .0;
-                details.item.pipeline = Some(pipeline.pipeline);
-            }
-            details.diffs = self
-                .optional::<Diff>(
-                    self.item_url(key, &["diffs"]),
-                    "Diffs",
-                    &mut details.warnings,
-                )
-                .0;
-            if details
-                .diffs
-                .iter()
-                .any(|diff| diff.too_large || diff.collapsed)
-            {
-                details.warnings.push(
+                if details
+                    .diffs
+                    .iter()
+                    .any(|diff| diff.too_large || diff.collapsed)
+                {
+                    details.warnings.push(
                     "Some diffs are collapsed or too large on GitLab; patch content is incomplete"
                         .into(),
                 );
-            }
-            if let Some(count) = changes_count {
-                let lower_bound = count.trim_end_matches('+').parse::<usize>().ok();
-                if count.ends_with('+') || lower_bound.is_some_and(|n| n > details.diffs.len()) {
-                    details.warnings.push(format!("GitLab reports {} changed files but returned {} diffs; server diff limits may apply", self.redacted(&count), details.diffs.len()));
+                }
+                if let Some(count) = raw.changes_count.clone() {
+                    let lower_bound = count.trim_end_matches('+').parse::<usize>().ok();
+                    if count.ends_with('+') || lower_bound.is_some_and(|n| n > details.diffs.len())
+                    {
+                        details.warnings.push(format!("GitLab reports {} changed files but returned {} diffs; server diff limits may apply", self.redacted(&count), details.diffs.len()));
+                    }
                 }
             }
+            DetailPart::Core => {}
         }
-        Ok(details)
+        details
     }
 
     /// Supported edits: title, description, labels/add_labels/remove_labels, state_event
@@ -1092,10 +1476,11 @@ impl GitLab {
         if !response.status().is_success() {
             return Err(self.status_error(&method, &url, &response));
         }
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .invalidate();
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        guard.invalidate();
+        if let Some(cache) = &self.persistent {
+            cache.invalidate_details().map_err(|error| anyhow!("GitLab write succeeded, but local cache invalidation failed: {error:#}. Do not repeat the write; clear the local cache."))?;
+        }
         Ok(())
     }
 
@@ -1442,14 +1827,14 @@ struct ApiPipeline {
     project_id: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(untagged)]
 enum ApiLabel {
     Name(String),
     Detail(Label),
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Title {
     #[serde(default)]
     id: Option<u64>,
@@ -1459,12 +1844,12 @@ struct Title {
     iid: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct DiffRefs {
     head_sha: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ApiItem {
     iid: u64,
     title: String,
@@ -2178,6 +2563,64 @@ mod tests {
                 requests,
             }
         }
+        fn concurrent(route: impl Fn(&Request) -> Reply + Send + Sync + 'static) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let log = requests.clone();
+            let route = Arc::new(route);
+            let worker = thread::spawn(move || {
+                let mut workers = Vec::new();
+                while !flag.load(Ordering::SeqCst) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(pair) => pair,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(e) => panic!("mock accept: {e}"),
+                    };
+                    let route = route.clone();
+                    let log = log.clone();
+                    workers.push(thread::spawn(move || {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        let request = read_request(&mut stream);
+                        let reply = route(&request);
+                        log.lock().unwrap().push(request);
+                        let mut headers = format!(
+                            "HTTP/1.1 {} Test\r\nConnection: close\r\nContent-Length: {}\r\n",
+                            reply.status,
+                            reply.body.len()
+                        );
+                        for (key, value) in reply.headers {
+                            headers.push_str(&format!("{key}: {value}\r\n"));
+                        }
+                        headers.push_str("\r\n");
+                        if stream.write_all(headers.as_bytes()).is_ok() {
+                            let _ = stream.write_all(&reply.body);
+                        }
+                    }));
+                }
+                for worker in workers {
+                    worker.join().unwrap();
+                }
+            });
+            Self {
+                base,
+                stop,
+                requests,
+                worker: Some(worker),
+            }
+        }
+
         fn client(&self) -> GitLab {
             GitLab::new(&self.base, "test-private-secret").unwrap()
         }
@@ -2255,6 +2698,329 @@ mod tests {
             iid: 1,
             kind,
         }
+    }
+
+    #[test]
+    fn persistent_sync_publishes_pages_and_warm_restart_requests_only_deltas() {
+        let mock = Mock::new(|request| {
+            let url = request.url();
+            if url.path().ends_with("/merge_requests") {
+                return Reply::json(json!([]));
+            }
+            assert!(url.path().ends_with("/issues"));
+            let delta = url.query_pairs().any(|(k, _)| k == "updated_after");
+            if delta {
+                let mut item = raw_item(1, "closed");
+                item["title"] = json!("Changed after import");
+                return Reply::json(json!([item])).header("x-total", "1");
+            }
+            let page = request.page();
+            let rows: Vec<_> = ((page - 1) * 100 + 1..=page * 100)
+                .map(|iid| raw_item(iid, "opened"))
+                .collect();
+            Reply::json(json!(rows)).header("x-total", "1000").header(
+                "x-next-page",
+                &if page < 10 {
+                    (page + 1).to_string()
+                } else {
+                    String::new()
+                },
+            )
+        });
+        let legacy = mock.client();
+        assert_eq!(legacy.list_project(&project()).unwrap().len(), 1000);
+        assert_eq!(
+            mock.requests.lock().unwrap().len(),
+            11,
+            "uncached all-history baseline"
+        );
+        mock.requests.lock().unwrap().clear();
+        drop(legacy);
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("config.toml");
+        let mut api = mock.client();
+        api.enable_persistence(&workspace).unwrap();
+        let mut delivered = 0;
+        let items = api
+            .sync_project(&project(), false, |status, page| {
+                if !page.is_empty() {
+                    delivered += page.len();
+                    assert_eq!(
+                        api.cached_items(7).unwrap().len(),
+                        delivered,
+                        "UI pages are already durable"
+                    );
+                    assert_eq!(status.total, Some(1000));
+                    if status.page == 1 {
+                        assert_eq!(
+                            mock.requests
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .filter(|r| r.url().path().ends_with("/issues"))
+                                .count(),
+                            1,
+                            "first page is delivered before second issue request"
+                        );
+                    }
+                }
+            })
+            .unwrap();
+        assert_eq!(items.len(), 1000);
+        assert_eq!(delivered, 1000);
+        let cold_requests = mock.requests.lock().unwrap().len();
+        assert_eq!(cold_requests, 11);
+        drop(api);
+        let mut api = mock.client();
+        api.enable_persistence(&workspace).unwrap();
+        assert_eq!(api.cached_items(7).unwrap().len(), 1000);
+        let items = api.sync_project(&project(), false, |_, _| {}).unwrap();
+        assert_eq!(items.len(), 1000);
+        assert_eq!(
+            items.iter().find(|i| i.key.iid == 1).unwrap().title,
+            "Changed after import"
+        );
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len() - cold_requests, 2);
+        assert!(
+            requests[cold_requests..]
+                .iter()
+                .all(|r| r.url().query_pairs().any(|(k, _)| k == "updated_after"))
+        );
+    }
+
+    #[test]
+    fn interrupted_network_import_resumes_its_saved_timestamp_boundary() {
+        let failed = Arc::new(AtomicBool::new(false));
+        let route_flag = failed.clone();
+        let mock = Mock::new(move |request| {
+            if request.url().path().ends_with("/merge_requests") {
+                return Reply::json(json!([]));
+            }
+            if request.page() == 2 && !route_flag.swap(true, Ordering::SeqCst) {
+                return Reply::bytes(503, "temporarily unavailable");
+            }
+            if request.page() == 1 {
+                return Reply::json(json!([raw_item(1, "opened")])).header("x-next-page", "2");
+            }
+            Reply::json(json!([raw_item(2, "closed")])).header("x-next-page", "")
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut api = mock.client();
+        api.enable_persistence(&path).unwrap();
+        assert!(api.sync_project(&project(), false, |_, _| {}).is_err());
+        assert_eq!(api.cached_items(7).unwrap().len(), 1);
+        let restart_index = mock.requests.lock().unwrap().len();
+        drop(api);
+        let mut api = mock.client();
+        api.enable_persistence(&path).unwrap();
+        let items = api.sync_project(&project(), false, |_, _| {}).unwrap();
+        assert_eq!(items.len(), 2);
+        let requests = mock.requests.lock().unwrap();
+        let resume = requests[restart_index..]
+            .iter()
+            .find(|r| r.url().path().ends_with("/issues"))
+            .unwrap()
+            .url();
+        assert!(
+            resume
+                .query_pairs()
+                .any(|(k, v)| k == "updated_before" && v == "2026-09-02T00:00:00Z")
+        );
+        assert!(!resume.query_pairs().any(|(k, _)| k == "updated_after"));
+    }
+
+    #[test]
+    fn reconciliation_verifies_missing_items_before_removing_them() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/issues" | "/api/v4/projects/7/merge_requests" => {
+                Reply::json(json!([]))
+            }
+            "/api/v4/projects/7/issues/1" => Reply::json(raw_item(1, "opened")),
+            "/api/v4/projects/7/issues/2" => Reply::bytes(404, "gone"),
+            other => panic!("unexpected {other}"),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = mock.client();
+        api.enable_persistence(&dir.path().join("config.toml"))
+            .unwrap();
+        let cache = api.persistent.as_ref().unwrap();
+        let plan = cache.plan(7, ItemKind::Issue, false).unwrap();
+        let items: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|iid| {
+                serde_json::from_value::<ApiItem>(raw_item(iid, "opened"))
+                    .unwrap()
+                    .into_item(7, ItemKind::Issue)
+            })
+            .collect();
+        cache.page(7, ItemKind::Issue, &plan, &items).unwrap();
+        cache.finish(7, ItemKind::Issue, &plan, &[]).unwrap();
+        let result = api.sync_project(&project(), true, |_, _| {}).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key.iid, 1);
+    }
+
+    #[test]
+    fn progressive_details_publish_core_first_and_persist_completed_sections() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/issues/1" => Reply::json(raw_item(1, "opened")),
+            "/api/v4/projects/7/issues/1/notes" | "/api/v4/projects/7/issues/1/discussions" => {
+                Reply::json(json!([]))
+            }
+            other => panic!("unexpected {other}"),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = mock.client();
+        api.enable_persistence(&dir.path().join("config.toml"))
+            .unwrap();
+        let delivered = Mutex::new(Vec::new());
+        let details = api
+            .details_progress(&key(ItemKind::Issue), None, |part, details| {
+                if part == DetailPart::Core {
+                    assert_eq!(mock.requests.lock().unwrap().len(), 1);
+                }
+                assert!(details.loaded.contains(&part));
+                assert!(
+                    api.cached_details(&details.item.key)
+                        .unwrap()
+                        .unwrap()
+                        .loaded
+                        .contains(&part)
+                );
+                delivered.lock().unwrap().push(part);
+            })
+            .unwrap();
+        assert_eq!(details.loaded.len(), 3);
+        assert_eq!(delivered.lock().unwrap()[0], DetailPart::Core);
+        assert_eq!(
+            api.cached_details(&details.item.key)
+                .unwrap()
+                .unwrap()
+                .loaded,
+            details.loaded
+        );
+        api.mutate(Mutation::Edit {
+            key: details.item.key.clone(),
+            field: "title".into(),
+            value: "new".into(),
+        })
+        .unwrap();
+        assert!(api.cached_details(&details.item.key).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_blocked_activity_section_does_not_block_discussions_jobs_or_changes() {
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let mock = Mock::concurrent(move |request| match request.url().path() {
+            "/api/v4/projects/7/merge_requests/1" => {
+                let mut item = raw_item(1, "opened");
+                item["head_pipeline"] = json!({"id":4,"status":"running"});
+                Reply::json(item)
+            }
+            "/api/v4/projects/7/merge_requests/1/notes" => {
+                blocked_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+                Reply::json(json!([]))
+            }
+            "/api/v4/projects/7/merge_requests/1/discussions"
+            | "/api/v4/projects/7/merge_requests/1/diffs"
+            | "/api/v4/projects/7/pipelines/4/jobs" => Reply::json(json!([])),
+            other => panic!("unexpected {other}"),
+        });
+        let api = mock.client();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            api.details_progress(&key(ItemKind::MergeRequest), None, |part, _| {
+                tx.send(part).unwrap();
+            })
+        });
+        blocked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut parts = HashSet::new();
+        while let Ok(part) = rx.recv_timeout(Duration::from_secs(2)) {
+            parts.insert(part);
+            if [
+                DetailPart::Discussions,
+                DetailPart::Pipeline,
+                DetailPart::Changes,
+            ]
+            .iter()
+            .all(|p| parts.contains(p))
+            {
+                break;
+            }
+        }
+        // Always release before assertions, so a sequential-loading regression can't
+        // leave blocked workers behind when this test fails.
+        release_tx.send(()).unwrap();
+        let details = worker.join().unwrap().unwrap();
+        assert!(parts.contains(&DetailPart::Discussions));
+        assert!(parts.contains(&DetailPart::Pipeline));
+        assert!(parts.contains(&DetailPart::Changes));
+        assert!(!parts.contains(&DetailPart::Activity));
+        assert_eq!(details.loaded.len(), 5);
+    }
+
+    #[test]
+    fn a_successful_write_cannot_be_followed_by_stale_detail_cache_repopulation() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/issues/1" => Reply::json(raw_item(1, "opened")),
+            "/api/v4/projects/7/issues/1/notes" | "/api/v4/projects/7/issues/1/discussions" => {
+                Reply::json(json!([]))
+            }
+            other => panic!("unexpected {other}"),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = mock.client();
+        api.enable_persistence(&dir.path().join("config.toml"))
+            .unwrap();
+        let result = api.details_progress(&key(ItemKind::Issue), None, |part, _| {
+            if part == DetailPart::Core {
+                api.mutate(Mutation::Comment {
+                    key: key(ItemKind::Issue),
+                    body: "A write during detail loading".into(),
+                })
+                .unwrap();
+            }
+        });
+        assert!(result.unwrap_err().to_string().contains("superseded"));
+        assert!(api.cached_details(&key(ItemKind::Issue)).unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_optional_refresh_retains_cached_content_with_a_warning() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/issues/1" => Reply::json(raw_item(1, "opened")),
+            "/api/v4/projects/7/issues/1/notes" => Reply::bytes(503, "retry later"),
+            "/api/v4/projects/7/issues/1/discussions" => Reply::json(json!([])),
+            other => panic!("unexpected {other}"),
+        });
+        let previous = Details {
+            notes: vec![crate::model::Note {
+                body: "Already cached".into(),
+                ..Default::default()
+            }],
+            loaded: HashSet::from([DetailPart::Activity]),
+            ..Default::default()
+        };
+        let details = mock
+            .client()
+            .details_progress(&key(ItemKind::Issue), Some(previous), |_, _| {})
+            .unwrap();
+        assert_eq!(details.notes[0].body, "Already cached");
+        assert!(
+            details
+                .warnings
+                .iter()
+                .any(|w| w.contains("Notes incomplete"))
+        );
     }
 
     #[test]

@@ -7,3 +7,5 @@ After completing each requested change, run the relevant validation, commit the 
 Do not include unrelated work or secrets, force-push is only allowed if a feature-branch needs rebasing. Report any validation, commit, or push failure.
 
 Create a Pull Request with a summary of the changes, screenshots if relevant, interesting technical implementation details, before and after benchmarks if appropriate.
+
+Commit messages and PR titles should be a concise description of the change, without prefix: do not use commitlint style titles.

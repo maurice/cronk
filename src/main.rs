@@ -1,16 +1,19 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use cronk::{
+    build_info,
     config::{Config, default_path},
     demo,
     gitlab::GitLab,
     ui::Cronk,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::LazyLock};
 use tui_lipan::{TestBackend, prelude::*};
 
+static CLI_VERSION: LazyLock<String> = LazyLock::new(build_info::display_version);
+
 #[derive(Parser)]
-#[command(version, about = "A keyboard-first, multi-project GitLab workspace")]
+#[command(version = CLI_VERSION.as_str(), about = "A keyboard-first, multi-project GitLab workspace")]
 struct Args {
     /// Use fictional, read-only data (local state uses a separate .demo.toml file).
     #[arg(long)]

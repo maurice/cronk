@@ -355,7 +355,9 @@ release-version tag:
     if text.count(placeholder) != 1:
         raise SystemExit('Cargo.toml package version placeholder is missing or ambiguous')
     manifest.write_text(text.replace(placeholder, f'version = "{tag[1:]}"', 1))
-    subprocess.run(['just', '_cargo', 'update', '--workspace', '--offline'], check=True)
+    # Cold runners need registry metadata even when dependency versions stay locked.
+    result = subprocess.run(['just', '_cargo', 'update', '--workspace'])
+    raise SystemExit(result.returncode)
 
 # Build the release binary for one cross target.
 release-build target:

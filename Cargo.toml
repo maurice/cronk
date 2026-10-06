@@ -30,6 +30,11 @@ version = "1"
 default-features = false
 features = ["user-hooks"]
 
+# Keep line-number backtraces without full variable/type debug information.
+# The test profile inherits these settings; incremental compilation stays enabled.
+[profile.dev]
+debug = 1
+
 [profile.release]
 lto = "thin"
 strip = true

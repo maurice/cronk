@@ -30,7 +30,7 @@ Missing sections display skeletons; refresh preserves already usable sections. E
 Run:
 
 ```sh
-cargo test --lib persistent_sync_publishes_pages_and_warm_restart_requests_only_deltas
+just test-lib -E 'test(persistent_sync_publishes_pages_and_warm_restart_requests_only_deltas)'
 ```
 
 The mock project has 1,000 issues, zero MRs, 100 entries per page, and one changed issue on refresh. The test explicitly compares the uncached all-history path with a process-restarted persistent client:
@@ -48,5 +48,5 @@ Other coverage includes interrupted imports/resumption, account isolation, restr
 The screenshot in `progressive-loading.png` uses fictional demo fixtures and can be regenerated with:
 
 ```sh
-CRONK_CAPTURE_PROGRESS=docs/progressive-loading.png cargo test --test ui loading_detail_sections
+CRONK_CAPTURE_PROGRESS=docs/progressive-loading.png just test-integration ui -E 'test(loading_detail_sections)'
 ```

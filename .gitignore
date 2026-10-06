@@ -3,6 +3,9 @@
 debug
 target
 
+# Local workflow regression tests
+__pycache__/
+
 # Local framework reference and UI captures
 .reference/
 .snapshots/

@@ -6,7 +6,7 @@ This is a historical benchmark record, not the current agent workflow. Use [the 
 
 Measured on 2026-10-05 in an isolated worktree based on `7f9afc1`, with unchanged test sources and dependencies:
 
-| Paired run | `cargo test --locked --all-targets` | `cargo nextest run --locked --all-targets` | Speedup |
+| Paired run | Cargo's built-in test runner | nextest | Speedup |
 | --- | ---: | ---: | ---: |
 | 1 | 324.207 s | 192.612 s | 1.68× |
 | 2 | 182.663 s | 140.361 s | 1.30× |
@@ -28,48 +28,19 @@ This is a useful improvement, not a claim of 3× speedup for this project. Cargo
 - Three measured pairs, ordered Cargo → nextest, nextest → Cargo, Cargo → nextest. Commands ran sequentially, never concurrently with each other. Whole-command wall time was measured with Python's monotonic clock; stdout/stderr went to log files for both runners. Warm Cargo checks, discovery and runner startup are included.
 - This was a shared development host, not an exclusive benchmark machine. Other agent activity and short tooling checks can affect timings, especially the first pair. The broad range is why all samples are shown rather than just the fastest run. These are local measurements, **not GitHub Actions CI timings** or guaranteed speedups on other machines.
 
-Nextest does not run doctests. The old `--all-targets` command also did not run them. CI now runs `cargo test --locked --doc` separately to cover documentation tests; its time is **not included** in this like-for-like runner comparison. Runner installation, linting, release builds and cold compilation are also excluded. Nextest does not accelerate compilation.
+Nextest does not run doctests. The old all-targets command also did not run them. CI now runs `just doc` separately to cover documentation tests; its time is **not included** in this like-for-like runner comparison. Runner installation, linting, release builds and cold compilation are also excluded. Nextest does not accelerate compilation.
 
-## Reproduce
+## Current validation and measurements
 
-Install the runner following the [development instructions](../README.md#development), then run from the repository root. Use an otherwise idle host for a less noisy comparison:
+For normal validation, use the [development tasks](development.md), not the old runner comparison:
 
 ```sh
-cargo test --locked --all-targets --no-run
-cargo nextest run --locked --all-targets
+just test-all
+just doc
+# Isolated CI uses this nextest profile to collect every failure:
+just test-ci
 ```
 
-Then run this Python script (it records full command wall time, retains the test output, and stops if either runner fails):
+Reproducing the historical Cargo-versus-nextest comparison requires explicitly checking out the measured revision and following its recorded methodology on an idle host; it is not a supported routine agent task. The old raw-Cargo reproduction script has intentionally been removed from current instructions.
 
-```python
-import json
-from pathlib import Path
-import subprocess
-import time
-
-logs = Path("target/runner-benchmark")
-logs.mkdir(parents=True, exist_ok=True)
-commands = {
-    "cargo-test": ["cargo", "test", "--locked", "--all-targets"],
-    "nextest": ["cargo", "nextest", "run", "--locked", "--all-targets"],
-}
-results = []
-orders = [("cargo-test", "nextest"), ("nextest", "cargo-test"),
-          ("cargo-test", "nextest")]
-for run, order in enumerate(orders, 1):
-    for runner in order:
-        with (logs / f"{runner}-{run}.log").open("w") as output:
-            start = time.monotonic()
-            result = subprocess.run(commands[runner], stdout=output,
-                                    stderr=subprocess.STDOUT)
-            elapsed = time.monotonic() - start
-        results.append({"runner": runner, "run": run,
-                        "wall_seconds": round(elapsed, 3),
-                        "exit_code": result.returncode})
-        (logs / "results.json").write_text(json.dumps(results, indent=2))
-        print(results[-1], flush=True)
-        if result.returncode:
-            raise SystemExit(result.returncode)
-```
-
-Keep the Rust toolchain, nextest version, test targets, build profile, CPU allocation and output capture consistent. Avoid `--no-capture`, which serializes nextest execution. At the measured revision, CI's `--profile ci` differed only in disabling fail-fast. Today it also restores full CPU concurrency compared with the bounded local default; it still reports every failure without retries.
+Keep the Rust toolchain, nextest version, test targets, build profile, CPU allocation and output capture consistent when measuring current tasks. Avoid `--no-capture`, which serializes nextest execution. At the measured revision, CI differed only in disabling fail-fast; `just test-ci` now also restores full CPU concurrency compared with the bounded local default and still reports every failure without retries. See [the build-tool trial](build-performance.md) for separate mold/sccache observations.

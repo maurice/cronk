@@ -3,7 +3,7 @@
 The preview uses fictional demo data and simulated pending requests, without contacting GitLab.
 
 ```sh
-cargo run --locked --example sync_preview
+just sync-preview
 ffmpeg -v error \
   -framerate 20 -i target/sync-preview/midnight/%03d.png \
   -framerate 20 -i target/sync-preview/light/%03d.png \

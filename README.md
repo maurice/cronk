@@ -8,10 +8,10 @@ A keyboard-first, multi-project GitLab terminal workspace, built with Rust and [
 
 ## Try it
 
-Requires a current stable Rust toolchain and a UTF-8 terminal. Truecolor and mouse reporting give the intended appearance; no Nerd Font or emoji font is required.
+On Linux/WSL, install [just](https://just.systems/man/en/installation.html) and run `just setup` once to install the repo-pinned development tools (see [development setup](#development)). A UTF-8 terminal is required. Truecolor and mouse reporting give the intended appearance; no Nerd Font or emoji font is required.
 
 ```sh
-cargo run --locked -- --demo
+just demo
 ```
 
 Demo mode includes five deeply nested fictional projects, forty issues/MRs, discussions, diffs, and simulated live traces. **It never contacts GitLab and does not simulate successful remote writes.** Filters, project visibility, saved views, aliases, and themes work normally. Its workspace is saved separately as `config.demo.toml`.
@@ -19,19 +19,19 @@ Demo mode includes five deeply nested fictional projects, forty issues/MRs, disc
 First launch opens **Welcome to Cronk**. To revisit it, use **Ctrl+P → Set up GitLab** or:
 
 ```sh
-cargo run --locked -- --demo --onboarding
+just demo-onboarding
 ```
 
 Demo onboarding checks environment-variable names and URL syntax without reading credentials or making requests. Add fictional project paths or IDs (`9001` through `9005`), separated by commas or newlines. The existing demo projects are prefilled. **Save setup** persists the checked settings to the demo config; **Skip setup** discards the draft. Both set `onboarding = false`. To capture the dialog without changing your workspace:
 
 ```sh
-cargo run --locked -- --demo --onboarding --snapshot onboarding.png
+just demo-onboarding --snapshot onboarding.png
 ```
 
 For a faster optimized build:
 
 ```sh
-cargo build --release --locked
+just build-release
 ./target/release/cronk --demo
 ```
 
@@ -44,14 +44,14 @@ Run `cronk` to open first-run setup, even before credentials are configured. It 
 Alternatively, initialize the file from the CLI:
 
 ```sh
-cargo run --locked -- --init --host https://gitlab.company.example
+just run -- --init --host https://gitlab.company.example
 ```
 
 The command prints the configuration path. Set `GITLAB_TOKEN` using your usual secret-management workflow, then:
 
 ```sh
-cargo run --locked -- --check
-cargo run --locked
+just run -- --check
+just run
 ```
 
 Create a personal access token with `read_api` for browsing, or `api` for editing, posting, creating issues/MRs, and retrying jobs. Your account must also have the required project permissions. Do not put the token in a command argument or the TOML file. `token_env` can name a different environment variable.
@@ -62,7 +62,7 @@ Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTT
 
 ```sh
 export NODE_EXTRA_CA_CERTS=/path/to/company-ca-bundle.pem
-cargo run --locked -- --check
+just run -- --check
 ```
 
 The bundle supplements (does not replace) system trust roots and is read when the GitLab client is created; restart Cronk after changing it. An unset or empty variable uses system roots only. An unreadable, malformed, or certificate-free bundle is an initialization error rather than silently ignoring the configured trust. Certificate and hostname verification remain enabled. There is deliberately no insecure-TLS switch. Redirects are rejected rather than forwarding credentials. HTTP is permitted only for loopback development/test servers.
@@ -239,35 +239,29 @@ No background service, telemetry, third-party data service, or agent invocation 
 
 ## Development
 
-Install [just](https://just.systems/man/en/installation.html) (1.16 or newer), Bash 4+ and `flock` (util-linux), plus [cargo-nextest](https://nexte.st/docs/installation/) once (CI uses version 0.9.146). Prefer pre-built packages/installers so setup does not add a lengthy Rust compilation:
+Install [just](https://just.systems/man/en/installation.html) 1.16 or newer, then run `just setup`. That is the onboarding path for Linux/WSL and Linux devcontainers—no separate nextest, sccache, mold or mise installation, and no shell activation needed.
+
+Tool versions live in `mise.toml`, artifact resolutions/checksums in `mise.lock`, and the verified mise bootstrap pin in `.config/mise-bootstrap.json`. Setup installs pinned Rust with rustfmt/Clippy, nextest, sccache, mold and cross; configures Git hooks; and enables the local mold/sccache configuration on x86-64. Most CLIs use upstream pre-built artifacts; cross preserves the release workflow's Git-source build, now at a pinned revision. Missing native compiler prerequisites are installed through APT on Debian/Ubuntu (setup may request sudo). Other Linux hosts need those native prerequisites available first.
+
+See [development setup](docs/development.md) for tool updates, container use and configuration safety. No dependency-update bot is configured.
 
 ```sh
-brew install just  # or your system package manager
-```
-
-If a pre-built nextest installer is unavailable:
-
-```sh
-cargo install cargo-nextest --locked --version 0.9.146
-```
-
-Pre-built binaries are also available from the installation link above to avoid compiling the runner.
-
-```sh
-just setup                   # activate checked-in Git hooks
+just setup                   # install pinned tooling, hooks and local fast config
 just                         # discover tasks
 just check --lib             # compile/type feedback without linking
 just test-affected           # tests selected from changes vs origin/main
 just validate                # fmt, lint, full nextest suite, doctests
-just run -- --demo --snapshot dashboard.png
-just run --example gallery
+just demo --snapshot dashboard.png
+just gallery
+just tools                   # inspect managed tooling versions
+just cache-stats
 ```
 
-Release builds use `Cross.toml` to forward `GITHUB_SHA` into the build container. Before compiling, the release workflow sets the Cargo package version from the requested `v`-prefixed tag and updates the lockfile, making Cargo's package version the source of truth for both the TUI header and CLI output. It executes each target binary's `--version` (using cross's runner/emulation where needed) and checks it against the requested tag and source commit before packaging.
+CI uses `just fmt`, `just lint`, `just test-ci`, `just doc` and `just build-release`; isolated runners retain full compiler/test parallelism. CI bootstraps only each job's required tool subset through `just setup-ci`; releases use `just release-version`, `just release-build` and `just release-check`. `Cross.toml` forwards `GITHUB_SHA` into the build container. The package version is set from the requested `v`-prefixed tag, and each target binary's `--version` is checked (using cross's runner/emulation where needed) against the tag and source commit before packaging.
 
-Use the `justfile` tasks for local Rust commands. Heavy tasks queue across this repository's worktrees and default to two compiler jobs. Nextest defaults to two concurrent tests; CI explicitly uses all logical CPUs and collects every failure without retries. Development/test builds retain line-number debug information rather than full variable/type information.
+Use the `justfile` tasks for local Rust commands. Heavy tasks queue across this repository's worktrees and default to two compiler jobs. Nextest defaults to two concurrent tests; CI explicitly uses all logical CPUs and collects every failure without retries. Development/test builds retain line-number debug information rather than full variable/type information. `just setup` enables mold and sccache in this worktree without changing global Cargo settings (`just fast-disable` removes the generated configuration); see [the measured trial](docs/build-performance.md) and [setup details](docs/development.md#optional-mold-and-sccache).
 
-Unit/integration tests require nextest: there is no `cargo test` fallback. Nextest does not run doctests, so `just doc` is the only Cargo test runner exception. If nextest is missing, install it rather than changing runners.
+Unit/integration tests require nextest: there is no `cargo test` fallback. Nextest does not run doctests, so `just doc` is the only Cargo test runner exception. If nextest is missing, run `just setup` rather than changing runners.
 
 For a focused iteration, use `just test-lib -E 'test(filter)'` or `just test-integration ui -E 'test(tab_switches)'`. `just test-affected [base-ref]` includes committed branch changes and local edits: integration-test-only changes select those binaries; shared source/dependency/build changes conservatively run all targets. Documentation-only changes skip Rust tests (run `just doc` for doctests). This is not a semantic dependency analysis. Avoid `--no-capture`: nextest runs tests serially in that mode. See [development feedback](docs/development.md) for task details, the resource budget and further optimization options, and [the historical runner comparison](docs/test-performance.md) for measured timings.
 

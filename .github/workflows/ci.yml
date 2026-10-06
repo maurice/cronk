@@ -17,6 +17,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  format:
+    name: Check formatting
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  release-build:
+    name: Build release binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
   checks:
     name: Build, test, and lint
     runs-on: ubuntu-latest
@@ -28,7 +61,7 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -38,9 +71,6 @@ jobs:
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
       - name: Lint with Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
@@ -49,6 +79,3 @@ jobs:
 
       - name: Run doctests
         run: cargo test --locked --doc
-
-      - name: Build release binary
-        run: cargo build --locked --release

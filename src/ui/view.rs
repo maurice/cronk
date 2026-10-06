@@ -769,7 +769,7 @@ fn context_line(state: &State, colors: Colors) -> Element {
                 Scope::List => {
                     let query = state.query_text();
                     (
-                        format!("{} ITEMS", state.visible_items().len()),
+                        format!("{} ITEMS", state.visible_item_count()),
                         if !query.is_empty() {
                             format!("Filter: {query}")
                         } else if state.config.active_tab == 0 {
@@ -815,8 +815,12 @@ fn section_hint(section: &str) -> &'static str {
 
 fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
     let state = &ctx.state;
-    let items = state.visible_items();
     let projects = state.config.active_tab == 1;
+    let items = if projects {
+        Vec::new()
+    } else {
+        state.visible_items()
+    };
     let len = if projects {
         state.config.projects.len()
     } else {
@@ -850,25 +854,33 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
         };
         return empty_state(title, help, colors);
     }
-    let mut rows = Vec::with_capacity(len);
-    if projects {
-        for (index, project) in state.config.projects.iter().enumerate() {
-            rows.push(project_row(
+    // ScrollView virtualises mounting, not construction of its Element children.
+    // Build rich rows only in the viewport plus one viewport of overscan on each
+    // side. Two spacers retain the native scrollbar's full extent; callbacks
+    // still use global row indices rather than positions within the window.
+    let window = list_render_window(scroll.offset, slots, len);
+    let mut rows = Vec::with_capacity(window.len() + 2);
+    list_spacers(&mut rows, window.start * row_height);
+    for index in window.clone() {
+        rows.push(if projects {
+            project_row(
                 ctx,
-                project,
+                &state.config.projects[index],
                 index,
                 scroll.selected == index,
                 colors,
-            ));
-        }
-    } else {
-        for (index, item) in items.iter().enumerate() {
-            rows.push(work_row(ctx, item, index, scroll.selected == index, colors));
-        }
+            )
+        } else {
+            work_row(ctx, items[index], index, scroll.selected == index, colors)
+        });
     }
+    list_spacers(&mut rows, (len - window.end) * row_height);
     let offset = scroll.offset;
     let scrollbar_key = format!("main-list-{}-scrollbar", state.config.active_tab);
     let list = ScrollView::new()
+        // The child tree is already windowed. Measure it exactly so large
+        // spacer heights never pollute the widget's per-row height estimates.
+        .virtualize(false)
         .height(Length::Px(
             (slots * row_height).min(u16::MAX as usize) as u16
         ))
@@ -897,6 +909,19 @@ fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
             Element::from(list).key(format!("main-list-{}", state.config.active_tab)),
         ))
         .into()
+}
+
+fn list_spacers(rows: &mut Vec<Element>, mut height: usize) {
+    // Length::Px is u16; never truncate a large logical height on conversion.
+    while height > 0 {
+        let chunk = height.min(u16::MAX as usize);
+        rows.push(Spacer::new().height(Length::Px(chunk as u16)).into());
+        height -= chunk;
+    }
+}
+
+fn list_render_window(offset: usize, slots: usize, len: usize) -> std::ops::Range<usize> {
+    offset.saturating_sub(slots)..offset.saturating_add(slots.saturating_mul(2)).min(len)
 }
 
 /// Keep the selection edge on the normal canvas, outside the row's selection/hover fill.
@@ -3541,6 +3566,19 @@ mod tests {
         );
         assert!(status_help("Discussion", "comment").contains("does not require resolution"));
         assert!(status_help("Job", "manual").contains("manual action"));
+    }
+
+    #[test]
+    fn list_construction_is_bounded_by_the_viewport() {
+        for len in [20usize, 3_000, 30_000] {
+            for offset in [0, len / 2, len.saturating_sub(20)] {
+                let window = list_render_window(offset, 20, len);
+                assert!(window.len() <= 60);
+                assert!(window.contains(&offset));
+                assert_eq!(window.end, (offset + 40).min(len));
+            }
+        }
+        assert!(list_render_window(0, 20, 0).is_empty());
     }
 
     fn channel(value: u8) -> f64 {

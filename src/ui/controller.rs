@@ -1047,7 +1047,7 @@ impl Component for Cronk {
                     let len = if ctx.state.config.active_tab == 1 {
                         ctx.state.config.projects.len()
                     } else {
-                        ctx.state.visible_items().len()
+                        ctx.state.visible_item_count()
                     };
                     let row_height = list_row_height(ctx.state.config.active_tab);
                     let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
@@ -1623,7 +1623,7 @@ impl Cronk {
         let len = if ctx.state.config.active_tab == 1 {
             ctx.state.config.projects.len()
         } else {
-            ctx.state.visible_items().len()
+            ctx.state.visible_item_count()
         };
         let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
         ctx.state.scroll.normalize(len, height);
@@ -1947,7 +1947,7 @@ impl Cronk {
                 let len = if ctx.state.config.active_tab == 1 {
                     ctx.state.config.projects.len()
                 } else {
-                    ctx.state.visible_items().len()
+                    ctx.state.visible_item_count()
                 };
                 let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
                 ctx.state.scroll.move_by(delta, len, height);
@@ -1995,7 +1995,7 @@ impl Cronk {
                 let len = if ctx.state.config.active_tab == 1 {
                     ctx.state.config.projects.len()
                 } else {
-                    ctx.state.visible_items().len()
+                    ctx.state.visible_item_count()
                 };
                 let height = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
                 ctx.state.scroll.select(index, len, height);

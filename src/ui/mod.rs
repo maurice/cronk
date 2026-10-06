@@ -454,33 +454,37 @@ impl State {
             .get(&project)
             .and_then(Option::as_ref)
     }
-    pub fn visible_items(&self) -> Vec<&WorkItem> {
+    pub fn visible_item_count(&self) -> usize {
+        self.matching_items().count()
+    }
+
+    fn matching_items(&self) -> impl Iterator<Item = &WorkItem> {
         let query = Query::parse(self.query_text()).unwrap_or_default();
-        let mut items: Vec<_> = self
-            .items
-            .iter()
-            .filter(|item| {
-                let Some(project) = self.project(item.key.project).filter(|p| p.visible) else {
-                    return false;
-                };
-                if let Some(kind) = self.kind()
-                    && item.key.kind != kind
-                {
-                    return false;
-                }
-                if self.config.active_tab == 0
-                    && (item.state != "opened" || !item.on_dashboard_for(self.user.id))
-                {
-                    return false;
-                }
-                query.matches(
-                    item,
-                    project,
-                    &self.user.username,
-                    self.current_iteration(item.key.project),
-                )
-            })
-            .collect();
+        self.items.iter().filter(move |item| {
+            let Some(project) = self.project(item.key.project).filter(|p| p.visible) else {
+                return false;
+            };
+            if let Some(kind) = self.kind()
+                && item.key.kind != kind
+            {
+                return false;
+            }
+            if self.config.active_tab == 0
+                && (item.state != "opened" || !item.on_dashboard_for(self.user.id))
+            {
+                return false;
+            }
+            query.matches(
+                item,
+                project,
+                &self.user.username,
+                self.current_iteration(item.key.project),
+            )
+        })
+    }
+
+    pub fn visible_items(&self) -> Vec<&WorkItem> {
+        let mut items: Vec<_> = self.matching_items().collect();
         if self.config.active_tab == 0 {
             items.sort_by(|a, b| {
                 a.attention_rank(self.user.id)

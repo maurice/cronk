@@ -86,12 +86,18 @@ impl ContentCache {
 
     pub fn items(&self, project: u64) -> Result<Vec<WorkItem>> {
         let project = i64::try_from(project)?;
-        let db = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let mut statement =
-            db.prepare("SELECT body FROM items WHERE project=? ORDER BY kind,iid")?;
-        statement
-            .query_map([project], |r| r.get::<_, String>(0))?
-            .map(|body| Ok(serde_json::from_str(&body?)?))
+        let bodies = {
+            let db = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut statement =
+                db.prepare_cached("SELECT body FROM items WHERE project=? ORDER BY kind,iid")?;
+            statement
+                .query_map([project], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // JSON decoding is CPU work and must not block other cache users.
+        bodies
+            .into_iter()
+            .map(|body| Ok(serde_json::from_str(&body)?))
             .collect()
     }
 
@@ -153,20 +159,20 @@ impl ContentCache {
         items: &[WorkItem],
     ) -> Result<()> {
         let project = i64::try_from(project)?;
+        let rows = items
+            .iter()
+            .map(|item| Ok((i64::try_from(item.key.iid)?, serde_json::to_string(item)?)))
+            .collect::<Result<Vec<_>>>()?;
         let mut db = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let tx = db.transaction()?;
-        for item in items {
-            tx.execute(
+        {
+            let mut statement = tx.prepare_cached(
                 "INSERT INTO items(project,kind,iid,body,seen) VALUES(?,?,?,?,?)
                 ON CONFLICT(project,kind,iid) DO UPDATE SET body=excluded.body,seen=excluded.seen",
-                params![
-                    project,
-                    kind.segment(),
-                    i64::try_from(item.key.iid)?,
-                    serde_json::to_string(item)?,
-                    plan.generation
-                ],
             )?;
+            for (iid, body) in rows {
+                statement.execute(params![project, kind.segment(), iid, body, plan.generation])?;
+            }
         }
         if plan.full
             && let Some(last) = items.last()
@@ -183,18 +189,28 @@ impl ContentCache {
     }
 
     pub fn enrich(&self, items: &[WorkItem]) -> Result<()> {
-        let mut db = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let tx = db.transaction()?;
-        for item in items {
-            tx.execute(
-                "UPDATE items SET body=? WHERE project=? AND kind=? AND iid=?",
-                params![
+        if items.is_empty() {
+            return Ok(());
+        }
+        let rows = items
+            .iter()
+            .map(|item| {
+                Ok((
                     serde_json::to_string(item)?,
                     i64::try_from(item.key.project)?,
                     item.key.kind.segment(),
-                    i64::try_from(item.key.iid)?
-                ],
-            )?;
+                    i64::try_from(item.key.iid)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut db = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = db.transaction()?;
+        {
+            let mut statement =
+                tx.prepare_cached("UPDATE items SET body=? WHERE project=? AND kind=? AND iid=?")?;
+            for (body, project, kind, iid) in rows {
+                statement.execute(params![body, project, kind, iid])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -231,17 +247,17 @@ impl ContentCache {
         let project = i64::try_from(project)?;
         let mut db = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let tx = db.transaction()?;
-        for key in removed {
-            let project = i64::try_from(key.project)?;
-            let iid = i64::try_from(key.iid)?;
-            tx.execute(
-                "DELETE FROM items WHERE project=? AND kind=? AND iid=?",
-                params![project, key.kind.segment(), iid],
-            )?;
-            tx.execute(
-                "DELETE FROM details WHERE project=? AND kind=? AND iid=?",
-                params![project, key.kind.segment(), iid],
-            )?;
+        {
+            let mut items =
+                tx.prepare_cached("DELETE FROM items WHERE project=? AND kind=? AND iid=?")?;
+            let mut details =
+                tx.prepare_cached("DELETE FROM details WHERE project=? AND kind=? AND iid=?")?;
+            for key in removed {
+                let project = i64::try_from(key.project)?;
+                let iid = i64::try_from(key.iid)?;
+                items.execute(params![project, key.kind.segment(), iid])?;
+                details.execute(params![project, key.kind.segment(), iid])?;
+            }
         }
         tx.execute("UPDATE sync SET checkpoint=?,full_at=CASE WHEN ? THEN ? ELSE full_at END,started=NULL,cursor=NULL WHERE project=? AND kind=?",
             params![plan.started,plan.full,timestamp(),project,kind.segment()])?;
@@ -250,8 +266,10 @@ impl ContentCache {
     }
 
     pub fn detail(&self, key: &ItemKey) -> Result<Option<Details>> {
-        let db = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let body: Option<String> = db
+        let body: Option<String> = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .query_row(
                 "SELECT body FROM details WHERE project=? AND kind=? AND iid=?",
                 params![
@@ -268,13 +286,14 @@ impl ContentCache {
 
     pub fn save_detail(&self, details: &Details) -> Result<()> {
         let key = &details.item.key;
+        let body = serde_json::to_string(details)?;
         self.0.lock().unwrap_or_else(|e| e.into_inner()).execute(
             "INSERT OR REPLACE INTO details(project,kind,iid,body) VALUES(?,?,?,?)",
             params![
                 i64::try_from(key.project)?,
                 key.kind.segment(),
                 i64::try_from(key.iid)?,
-                serde_json::to_string(details)?
+                body
             ],
         )?;
         Ok(())
@@ -311,6 +330,115 @@ mod tests {
             ..Default::default()
         }
     }
+    #[test]
+    fn large_snapshot_batches_replay_enrichment_and_concurrent_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ContentCache::open(
+            &dir.path().join("workspace.toml"),
+            "https://example.test",
+            "secret",
+        )
+        .unwrap();
+        let plan = cache.plan(7, ItemKind::Issue, false).unwrap();
+        let items: Vec<_> = (1..=3_000).map(item).collect();
+        let start = std::time::Instant::now();
+        for page in items.chunks(100) {
+            cache.page(7, ItemKind::Issue, &plan, page).unwrap();
+        }
+        eprintln!(
+            "SQLite: 3,000 items in 30 page transactions: {:?}",
+            start.elapsed()
+        );
+        cache
+            .page(7, ItemKind::Issue, &plan, &items[..100])
+            .unwrap();
+        cache.finish(7, ItemKind::Issue, &plan, &[]).unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(cache.items(7).unwrap().len(), 3_000);
+        eprintln!("SQLite: read/decode 3,000 items: {:?}", start.elapsed());
+        let mut enriched = items[..100].to_vec();
+        for item in &mut enriched {
+            item.title = "Enriched".into();
+        }
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..3 {
+                    assert_eq!(cache.items(7).unwrap().len(), 3_000);
+                }
+            });
+            scope.spawn(|| cache.enrich(&enriched).unwrap());
+        });
+        let snapshot = cache.items(7).unwrap();
+        assert_eq!(
+            snapshot.iter().filter(|i| i.title == "Enriched").count(),
+            100
+        );
+        assert!(cache.missing(7, ItemKind::Issue, &plan).unwrap().is_empty());
+        let removed: Vec<_> = items.iter().map(|i| i.key.clone()).collect();
+        cache.finish(7, ItemKind::Issue, &plan, &removed).unwrap();
+        assert!(cache.items(7).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshot_and_identity_reads_use_primary_key_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ContentCache::open(
+            &dir.path().join("workspace.toml"),
+            "https://example.test",
+            "secret",
+        )
+        .unwrap();
+        let db = cache.0.lock().unwrap();
+        for sql in [
+            "EXPLAIN QUERY PLAN SELECT body FROM items WHERE project=7 ORDER BY kind,iid",
+            "EXPLAIN QUERY PLAN SELECT body FROM details WHERE project=7 AND kind='issues' AND iid=1",
+            "EXPLAIN QUERY PLAN SELECT iid FROM items WHERE project=7 AND kind='issues' AND seen<>1",
+        ] {
+            let mut statement = db.prepare(sql).unwrap();
+            let steps = statement
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step.contains("SEARCH") && step.contains("INDEX")),
+                "{steps:?}"
+            );
+            assert!(
+                !steps
+                    .iter()
+                    .any(|step| step.contains("TEMP B-TREE") || step.contains("SCAN")),
+                "{steps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_page_rolls_back_items_and_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ContentCache::open(
+            &dir.path().join("workspace.toml"),
+            "https://example.test",
+            "secret",
+        )
+        .unwrap();
+        let plan = cache.plan(7, ItemKind::Issue, false).unwrap();
+        let mut invalid = item(2);
+        invalid.updated_at = "invalid".into();
+        assert!(
+            cache
+                .page(7, ItemKind::Issue, &plan, &[item(1), invalid])
+                .is_err()
+        );
+        assert!(cache.items(7).unwrap().is_empty());
+        assert_eq!(
+            cache.plan(7, ItemKind::Issue, false).unwrap().before,
+            plan.before
+        );
+    }
+
     #[test]
     fn restart_resumes_then_uses_overlapping_delta() {
         let dir = tempfile::tempdir().unwrap();

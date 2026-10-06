@@ -45,6 +45,38 @@ impl Colors {
                 0xf7f8fc, 0xeceff6, 0xdce5fa, 0x24283b, 0x626b83, 0x5746bd, 0x187348, 0x946200,
                 0xc2354b, 0x0066bc, 0x9146ae,
             ],
+            "blade-runner" => [
+                0x0b0714, 0x140d24, 0x2c1a52, 0xf4ecff, 0xb4a6d6, 0xff3fd8, 0x3dffa2, 0xffe34d,
+                0xff5578, 0x2ee6ff, 0xb78cff,
+            ],
+            "tokyo-night" => [
+                0x1a1b26, 0x16161e, 0x28365a, 0xd5dcff, 0xaab5df, 0x7aa2f7, 0x9ece6a, 0xe0af68,
+                0xf7768e, 0x7dcfff, 0xbb9af7,
+            ],
+            "gruvbox-dark" => [
+                0x282828, 0x1d2021, 0x4a3f2c, 0xf2e5bc, 0xc4b79b, 0xfe8019, 0xb8bb26, 0xfabd2f,
+                0xff6350, 0x83a598, 0xd3869b,
+            ],
+            "nord" => [
+                0x2e3440, 0x272c36, 0x354563, 0xeceff4, 0xb4bfd3, 0x88c0d0, 0xa3be8c, 0xebcb8b,
+                0xe5808b, 0x8fb4e8, 0xc79bc0,
+            ],
+            "solarized-dark" => [
+                0x002b36, 0x073642, 0x0d4452, 0xeee8d5, 0xaebbbb, 0x3fb8ae, 0xa4bd1a, 0xe0b030,
+                0xff6b66, 0x4fa8f0, 0xa5aaf0,
+            ],
+            "solarized-light" => [
+                0xfdf6e3, 0xeee8d5, 0xd9d1b5, 0x073642, 0x42585f, 0x0f6f9f, 0x4f6200, 0x805c00,
+                0xbf2220, 0x1a62a8, 0x5c5fb0,
+            ],
+            "sepia-dark" => [
+                0x2a2118, 0x20190f, 0x4e3a22, 0xf0e4cc, 0xcdb99a, 0xe6a85c, 0xa6cc82, 0xebc66f,
+                0xf08068, 0x86b7dd, 0xcfa3c8,
+            ],
+            "sepia-light" => [
+                0xf4ecd8, 0xe9dfc4, 0xd9c9a3, 0x3b2f20, 0x5a4a35, 0x8a4510, 0x3a6326, 0x745400,
+                0xa3301d, 0x2a557f, 0x7a447a,
+            ],
             _ => [
                 0x101521, 0x192131, 0x293654, 0xe5eaf5, 0x96a3bc, 0x9b9fff, 0x63dba5, 0xf0c674,
                 0xff758f, 0x7bb8ff, 0xc69cf4,
@@ -57,8 +89,9 @@ impl Colors {
                 .and_then(parse_color)
                 .unwrap_or(Color::hex_u24(fallback))
         };
+        let background = custom(&c.background, values[0]);
         Self {
-            background: custom(&c.background, values[0]),
+            background,
             surface: custom(&c.surface, values[1]),
             selection: custom(&c.selection, values[2]),
             foreground: custom(&c.foreground, values[3]),
@@ -70,7 +103,7 @@ impl Colors {
             blue: Color::hex_u24(values[9]),
             purple: Color::hex_u24(values[10]),
             // A darker neutral keeps the light theme readable without using a warning color.
-            pending: Color::hex_u24(if config.theme == "light" {
+            pending: Color::hex_u24(if background.luminance() > 0.5 {
                 0x626262
             } else {
                 0xc7c7c7
@@ -555,6 +588,24 @@ fn tab_bar(ctx: &Context<Cronk>, colors: Colors) -> Element {
             offset.saturating_sub(1).min(u16::MAX as usize) as u16
         )))
         .key("workspace-tabs")
+}
+
+/// Display name and one-line description for the theme chooser.
+fn theme_description(theme: &str) -> (&'static str, &'static str) {
+    match theme {
+        "midnight" => ("Midnight", "Cool ink · violet · blue"),
+        "dracula" => ("Dracula", "Charcoal · orchid · electric green"),
+        "light" => ("Light", "Paper · indigo · forest green"),
+        "blade-runner" => ("Blade Runner", "Neon noir · magenta · cyan"),
+        "tokyo-night" => ("Tokyo Night", "Deep navy · periwinkle · mint"),
+        "gruvbox-dark" => ("Gruvbox Dark", "Warm charcoal · orange · olive"),
+        "nord" => ("Nord", "Arctic slate · frost · sage"),
+        "solarized-dark" => ("Solarized Dark", "Deep teal · cream · cyan"),
+        "solarized-light" => ("Solarized Light", "Cream · navy ink · ocean blue"),
+        "sepia-dark" => ("Sepia Dark", "Coffee · parchment · amber"),
+        "sepia-light" => ("Sepia Light", "Aged paper · umber · rust"),
+        _ => ("Custom", ""),
+    }
 }
 
 fn brand(state: &State, colors: Colors) -> Element {
@@ -2576,24 +2627,16 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             ));
         }
     } else if matches!(dialog.kind, DialogKind::Themes) {
-        for (index, (name, hint)) in [
-            ("Midnight", "Cool ink · violet · blue"),
-            ("Dracula", "Charcoal · orchid · electric green"),
-            ("Light", "Paper · indigo · forest green"),
-        ]
-        .iter()
-        .enumerate()
-        {
-            body = body
-                .child(dialog_option(
-                    ctx,
-                    index,
-                    &format!("{name:<10} {hint}"),
-                    dialog.selected == index,
-                    colors,
-                    false,
-                ))
-                .child(blank());
+        for (index, theme) in crate::config::THEMES.iter().enumerate() {
+            let (name, hint) = theme_description(theme);
+            body = body.child(dialog_option(
+                ctx,
+                index,
+                &format!("{name:<16} {hint}"),
+                dialog.selected == index,
+                colors,
+                false,
+            ));
         }
         if [
             &ctx.state.config.colors.background,
@@ -3093,6 +3136,138 @@ mod tests {
         );
         assert!(status_help("Discussion", "comment").contains("does not require resolution"));
         assert!(status_help("Job", "manual").contains("manual action"));
+    }
+
+    fn channel(value: u8) -> f64 {
+        let v = f64::from(value) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let lum = |color: Color| {
+            let (r, g, b) = color.to_rgb().unwrap();
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        };
+        let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    fn themed(theme: &str) -> Colors {
+        Colors::new(&Config {
+            theme: theme.into(),
+            ..Config::default()
+        })
+    }
+
+    #[test]
+    fn every_theme_has_a_description_and_a_distinct_palette() {
+        let mut seen = std::collections::HashSet::new();
+        for theme in crate::config::THEMES {
+            assert_ne!(theme_description(theme).0, "Custom", "{theme}");
+            let c = themed(theme);
+            assert!(
+                seen.insert(format!("{:?}{:?}{:?}", c.background, c.accent, c.selection)),
+                "{theme} duplicates another palette"
+            );
+        }
+    }
+
+    #[test]
+    fn new_themes_have_high_contrast_text_and_status_colors() {
+        let mut failures = Vec::new();
+        // The three original themes predate this bar and keep their palettes.
+        for theme in &crate::config::THEMES[3..] {
+            let c = themed(theme);
+            for (surface_name, surface) in [
+                ("background", c.background),
+                ("surface", c.surface),
+                ("selection", c.selection),
+            ] {
+                // Accent and status colors are glyphs and short words drawn over
+                // selected rows too, where the non-text 3:1 bar applies.
+                let colored = if surface_name == "selection" {
+                    3.0
+                } else {
+                    4.5
+                };
+                for (name, fg, minimum) in [
+                    ("foreground", c.foreground, 7.0),
+                    ("muted", c.muted, 4.5),
+                    ("accent", c.accent, colored),
+                    ("green", c.green, colored),
+                    ("yellow", c.yellow, colored),
+                    ("red", c.red, colored),
+                    ("blue", c.blue, colored),
+                    ("purple", c.purple, colored),
+                    ("pending", c.pending, colored),
+                ] {
+                    let ratio = contrast(fg, surface);
+                    if ratio < minimum {
+                        failures.push(format!(
+                            "{theme}: {name} on {surface_name} is {ratio:.2}:1, need {minimum}:1"
+                        ));
+                    }
+                }
+            }
+            // The selection must be visibly different from the page it sits on.
+            if contrast(c.selection, c.background) < 1.15 {
+                failures.push(format!("{theme}: selection too close to background"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn hover_is_visibly_different_from_rest_and_selection_in_new_themes() {
+        let hover = ColorTransform::elevate(0.08);
+        let mut failures = Vec::new();
+        for theme in &crate::config::THEMES[3..] {
+            let c = themed(theme);
+            for (name, rest) in [
+                ("background", c.background),
+                ("surface", c.surface),
+                ("selection", c.selection),
+            ] {
+                let hovered = hover.apply(rest);
+                let ratio = contrast(hovered, rest);
+                if ratio < 1.06 {
+                    failures.push(format!("{theme}: hover on {name} only {ratio:.3}:1"));
+                }
+                // Hovered text must stay readable.
+                let relaxed = name == "selection";
+                for (text, fg, minimum) in [
+                    ("foreground", c.foreground, if relaxed { 6.0 } else { 7.0 }),
+                    ("muted", c.muted, if relaxed { 4.0 } else { 4.5 }),
+                ] {
+                    if contrast(fg, hovered) < minimum {
+                        failures.push(format!(
+                            "{theme}: {text} {:.2}:1 on hovered {name}",
+                            contrast(fg, hovered)
+                        ));
+                    }
+                }
+            }
+            // A hovered ordinary row must not be mistaken for a selected one. Selection
+            // may differ by hue rather than brightness, so compare RGB distance.
+            let (h, sel) = (
+                hover.apply(c.background).to_rgb().unwrap(),
+                c.selection.to_rgb().unwrap(),
+            );
+            let distance = ((i32::from(h.0) - i32::from(sel.0)).pow(2)
+                + (i32::from(h.1) - i32::from(sel.1)).pow(2)
+                + (i32::from(h.2) - i32::from(sel.2)).pow(2)) as f64;
+            if distance.sqrt() < 14.0 {
+                failures.push(format!(
+                    "{theme}: hover resembles selection (distance {:.1})",
+                    distance.sqrt()
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

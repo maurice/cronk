@@ -173,7 +173,7 @@ kind = "issue"
 query = 'project:planning assignee:@me state:opened'
 ```
 
-Theme names are `midnight`, `dracula`, and `light`, also selectable in the palette. Optional `[colors]` overrides: `background`, `surface`, `selection`, `foreground`, `muted`, `accent`, each `"#RRGGBB"`. Overrides remain active after choosing another preset. Label colors always come from GitLab and remain intact over selection and hover backgrounds. Set `animations = false` to keep static hover feedback while disabling click flashes.
+Theme names are `midnight`, `dracula`, `light`, `blade-runner` (neon), `tokyo-night`, `gruvbox-dark`, `nord`, `solarized-dark`, `solarized-light`, `sepia-dark`, and `sepia-light`, also selectable in the palette (Choose theme). The newer themes are checked for high text contrast and a visible hover state. Optional `[colors]` overrides: `background`, `surface`, `selection`, `foreground`, `muted`, `accent`, each `"#RRGGBB"`. Overrides remain active after choosing another preset. Label colors always come from GitLab and remain intact over selection and hover backgrounds. Set `animations = false` to keep static hover feedback while disabling click flashes.
 
 ### Refresh and request budget
 

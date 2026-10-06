@@ -13,7 +13,7 @@ use tui_lipan::{
 };
 
 type Ui = TestBackend<Cronk>;
-const THEMES: [&str; 3] = ["midnight", "dracula", "light"];
+const THEMES: [&str; 11] = cronk::config::THEMES;
 
 fn mount(config: Config) -> Ui {
     let mut ui = TestBackend::new_with_app_and_viewport(

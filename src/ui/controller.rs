@@ -1639,7 +1639,7 @@ impl Cronk {
     ) {
         let (selected, original_theme) = if matches!(kind, DialogKind::Themes) {
             let original = ctx.state.config.theme.clone();
-            let selected = ["midnight", "dracula", "light"]
+            let selected = crate::config::THEMES
                 .iter()
                 .position(|theme| *theme == original)
                 .unwrap_or(0);
@@ -1695,7 +1695,7 @@ impl Cronk {
             .as_ref()
             .is_some_and(|d| matches!(d.kind, DialogKind::Themes))
         {
-            3
+            crate::config::THEMES.len()
         } else {
             ctx.state.dialog.as_ref().map_or(0, |d| d.fields.len())
         };
@@ -1724,7 +1724,7 @@ impl Cronk {
         let Some(selected) = ctx.state.dialog.as_ref().map(|dialog| dialog.selected) else {
             return;
         };
-        if let Some(theme) = ["midnight", "dracula", "light"].get(selected) {
+        if let Some(theme) = crate::config::THEMES.get(selected) {
             ctx.state.config.theme = (*theme).into();
         }
     }
@@ -1965,7 +1965,7 @@ impl Cronk {
                 return Update::none();
             }
             DialogKind::Themes => {
-                if let Some(theme) = ["midnight", "dracula", "light"].get(selected) {
+                if let Some(theme) = crate::config::THEMES.get(selected) {
                     ctx.state.config.theme = (*theme).into();
                 }
                 if let Some(dialog) = &mut ctx.state.dialog {

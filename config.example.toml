@@ -2,7 +2,8 @@
 # Never put access tokens in this file. IDs/paths below are illustrative.
 gitlab_url = "https://gitlab.company.example"
 token_env = "GITLAB_TOKEN"
-theme = "midnight" # midnight | dracula | light
+theme = "midnight" # midnight | dracula | light | blade-runner | tokyo-night | gruvbox-dark
+                    # | nord | solarized-dark | solarized-light | sepia-dark | sepia-light
 animations = true # false keeps hover feedback but disables click flashes
 user_display = "username" # username | name | id
 # When user_display = "name", optionally transform GitLab names with named regex captures:

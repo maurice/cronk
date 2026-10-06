@@ -2962,3 +2962,40 @@ fn selecting_the_current_tab_returns_to_its_list_and_other_tabs_restore_drill_do
     ui.dispatch(Msg::Tab(3)).unwrap();
     assert!(ui.state().config.route.is_none());
 }
+
+#[test]
+fn theme_picker_lists_every_theme_without_blank_rows_and_previews_each() {
+    let mut ui = mount_with_viewport(
+        config(),
+        None,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 40,
+        },
+    );
+    palette_command(&mut ui, "Choose theme");
+    let themes = cronk::config::THEMES;
+    let rows: Vec<i16> = (0..themes.len())
+        .map(|index| {
+            ui.rect_of_key(&format!("dialog-option-{index}").into())
+                .unwrap_or_else(|| panic!("option {index} is not rendered"))
+                .y
+        })
+        .collect();
+    assert!(
+        rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "theme choices must be on consecutive rows: {rows:?}"
+    );
+    for (index, theme) in themes.iter().enumerate() {
+        if index > 0 {
+            key(&mut ui, KeyCode::Down);
+        }
+        assert_eq!(dialog(&ui).selected, index);
+        assert_eq!(&ui.state().config.theme, theme, "preview of option {index}");
+    }
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().config.theme, *themes.last().unwrap());
+    assert!(ui.state().dialog.is_none());
+}

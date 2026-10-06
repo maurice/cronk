@@ -80,7 +80,24 @@ jobs:
       - name: Build release binary
         env:
           CRONK_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          GITHUB_SHA: ${{ github.sha }}
         run: cross build --locked --release --target ${{ matrix.target }} --bin $BINARY_NAME
+
+      - name: Verify embedded release version
+        env:
+          CRONK_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          GITHUB_SHA: ${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          expected="${BINARY_NAME} ${CRONK_RELEASE_TAG}@${GITHUB_SHA:0:12}"
+          actual="$(cross run --locked --release --target "$TARGET" --bin "$BINARY_NAME" -- --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Release version mismatch: expected '$expected', got '$actual'" >&2
+            exit 1
+          fi
+          echo "$actual"
 
       - name: Package release archive
         env:

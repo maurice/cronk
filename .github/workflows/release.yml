@@ -86,7 +86,8 @@ jobs:
             exit 1
           fi
           sed -i "s/^version = \"0.0.0\"$/version = \"${TAG#v}\"/" Cargo.toml
-          cargo update --workspace --offline
+          # Cold runners need registry metadata even though locked versions are unchanged.
+          cargo update --workspace
 
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross --rev 74e99b2223de06166f8cdcc1af7f1308ec52baf4 --locked

@@ -2598,6 +2598,23 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                     } else {
                         editor.key(format!("dialog-field-{index}"))
                     })
+                    .child(if matches!(dialog.kind, DialogKind::Onboarding) {
+                        Element::from(
+                            Text::new(
+                                ctx.state
+                                    .onboarding
+                                    .feedback
+                                    .get(index)
+                                    .cloned()
+                                    .unwrap_or_else(|| "Checking…".into()),
+                            )
+                            .height(Length::Auto)
+                            .overflow(Overflow::Wrap)
+                            .style(Style::new().fg(colors.muted)),
+                        )
+                    } else {
+                        VStack::new().height(Length::Px(0)).into()
+                    })
                     .child(if selected == index {
                         field
                             .completion
@@ -2676,7 +2693,9 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
                 .style(Style::new().fg(colors.red)),
         );
     }
-    let hint = if commands {
+    let hint = if matches!(dialog.kind, DialogKind::Onboarding) {
+        "Enter save · Tab next · Ctrl+J newline · Esc skip"
+    } else if commands {
         "↑ ↓ / Tab choose · Enter run · Esc cancel"
     } else if matches!(dialog.kind, DialogKind::Themes) {
         "↑ ↓ choose · Enter apply · Esc cancel"
@@ -2698,7 +2717,12 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
         actions = actions.child(click(
             ctx,
             "dialog-submit",
-            Text::new(" Confirm ").style(interaction::style(
+            Text::new(if matches!(dialog.kind, DialogKind::Onboarding) {
+                " Save setup "
+            } else {
+                " Confirm "
+            })
+            .style(interaction::style(
                 ctx,
                 "dialog-submit",
                 colors.selected().fg(colors.accent).bold(),
@@ -2709,7 +2733,12 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
     actions = actions.child(click(
         ctx,
         "dialog-close",
-        Text::new(" Close ").style(interaction::style(
+        Text::new(if matches!(dialog.kind, DialogKind::Onboarding) {
+            " Skip setup "
+        } else {
+            " Close "
+        })
+        .style(interaction::style(
             ctx,
             "dialog-close",
             Style::new().fg(colors.muted).bg(colors.surface),

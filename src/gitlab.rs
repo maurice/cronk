@@ -1934,9 +1934,13 @@ mod tests {
         let mut ui = TestBackend::new_with_app(
             App::new().focus_policy(FocusPolicy::Manual),
             Cronk {
-                config: Config::default(),
+                config: Config {
+                    onboarding: false,
+                    ..Config::default()
+                },
                 path: None,
                 api: Some(mock.client()),
+                demo: false,
             },
             (),
         );

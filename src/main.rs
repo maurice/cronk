@@ -15,6 +15,9 @@ struct Args {
     /// Use fictional, read-only data (local state uses a separate .demo.toml file).
     #[arg(long)]
     demo: bool,
+    /// Reopen first-run setup (also works with --demo and --snapshot).
+    #[arg(long)]
+    onboarding: bool,
     /// Workspace TOML path. Defaults to the platform's user config directory.
     #[arg(long)]
     config: Option<PathBuf>,
@@ -61,7 +64,13 @@ fn main() -> Result<()> {
     }
     if args.demo && !exists {
         config.projects = demo::projects();
-        config.gitlab_url = "https://gitlab.example.com".into();
+    }
+    if args.onboarding {
+        config.onboarding = true;
+    }
+    // Regular demo snapshots remain workspace previews; opt in to setup explicitly.
+    if args.snapshot.is_some() && !args.onboarding {
+        config.onboarding = false;
     }
     config.validate()?;
     if args.init {
@@ -79,10 +88,10 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-    let api = if args.demo {
+    let api = if args.demo || (config.onboarding && !args.check) {
         None
     } else {
-        let token = std::env::var(&config.token_env).with_context(|| format!("Set {} to a GitLab personal access token. Use --demo to explore without credentials, or --init --host https://gitlab.company.example to configure your instance.", config.token_env))?;
+        let token = std::env::var(&config.token_env).with_context(|| format!("Set {} to a GitLab personal access token. Use --onboarding to configure your instance, or --demo to explore without credentials.", config.token_env))?;
         Some(GitLab::new(&config.gitlab_url, &token)?)
     };
     if args.check {
@@ -99,8 +108,9 @@ fn main() -> Result<()> {
         }
         let mut backend = TestBackend::new(Cronk {
             config,
-            path: None,
+            path: Some(path),
             api: None,
+            demo: true,
         });
         backend.set_viewport(Rect {
             x: 0,
@@ -126,6 +136,7 @@ fn main() -> Result<()> {
             config,
             path: Some(path),
             api,
+            demo: args.demo,
         })
         .run()?;
     Ok(())

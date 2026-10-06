@@ -26,10 +26,12 @@ fn mount(kind: ItemKind, field: usize) -> Ui {
                 }),
                 section: Some(0),
                 field,
+                onboarding: false,
                 ..Config::default()
             },
             path: None,
             api: None,
+            demo: true,
         },
         (),
     );

@@ -36,6 +36,8 @@ use crate::model::{ItemKey, ItemKind, LookupOption, Project, User};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Show first-run setup; set false after completing or skipping it.
+    pub onboarding: bool,
     pub gitlab_url: String,
     pub token_env: String,
     pub projects: Vec<Project>,
@@ -105,6 +107,7 @@ pub struct ThemeColors {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            onboarding: true,
             gitlab_url: "https://gitlab.com".into(),
             token_env: "GITLAB_TOKEN".into(),
             projects: Vec::new(),
@@ -239,8 +242,14 @@ impl Config {
                 return Err(error).with_context(|| format!("read config {}", path.display()));
             }
         };
-        let config: Self =
+        let mut config: Self =
             toml::from_str(&source).with_context(|| format!("parse config {}", path.display()))?;
+        // Existing workspaces predate onboarding. Do not interrupt their startup;
+        // users can opt back in explicitly or reopen setup from the palette.
+        let document: toml::Table = toml::from_str(&source)?;
+        if !document.contains_key("onboarding") {
+            config.onboarding = false;
+        }
         config
             .validate()
             .with_context(|| format!("validate config {}", path.display()))?;
@@ -257,7 +266,10 @@ impl Config {
     /// the file is complete, but durability could not be confirmed.
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;
-        let source = toml::to_string_pretty(self).context("serialize config")?;
+        let source = format!(
+            "# Cronk configuration — https://github.com/maurice/cronk\n# Manual changes require an app restart to take effect.\n\n{}",
+            toml::to_string_pretty(self).context("serialize config")?
+        );
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -394,6 +406,7 @@ mod tests {
         let path = directory.path().join("missing/config.toml");
         let config = Config::load(&path).unwrap();
         config.validate().unwrap();
+        assert!(config.onboarding);
         assert_eq!(config.gitlab_url, "https://gitlab.com");
         assert_eq!(config.token_env, "GITLAB_TOKEN");
         assert_eq!(config.theme, "midnight");
@@ -476,6 +489,22 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_defaults_only_for_new_workspaces_and_explicit_opt_in() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        assert!(Config::load(&path).unwrap().onboarding);
+        for (source, expected) in [
+            ("", false),
+            ("theme = 'dracula'", false),
+            ("onboarding = true", true),
+            ("onboarding = false", false),
+        ] {
+            fs::write(&path, source).unwrap();
+            assert_eq!(Config::load(&path).unwrap().onboarding, expected);
+        }
+    }
+
+    #[test]
     fn invalid_files_are_not_replaced_or_silently_defaulted() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -503,6 +532,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("nested/config.toml");
         let mut config = Config {
+            onboarding: false,
             gitlab_url: "https://gitlab.example.com/gitlab".into(),
             token_env: "WORK_GITLAB_TOKEN".into(),
             projects: vec![Project {

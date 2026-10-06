@@ -22,6 +22,7 @@ fn mount(config: Config) -> Ui {
             config,
             path: None,
             api: None,
+            demo: true,
         },
         (),
         Rect {
@@ -40,6 +41,7 @@ fn config(theme: &str, tab: usize) -> Config {
         projects: demo::projects(),
         theme: theme.into(),
         active_tab: tab,
+        onboarding: false,
         ..Config::default()
     }
 }

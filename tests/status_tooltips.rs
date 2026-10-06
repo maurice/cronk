@@ -22,10 +22,12 @@ fn mount(theme: &str, tab: usize, route: Option<ItemKey>) -> Ui {
                 theme: theme.into(),
                 active_tab: tab,
                 route,
+                onboarding: false,
                 ..Config::default()
             },
             path: None,
             api: None,
+            demo: true,
         },
         (),
         Rect {

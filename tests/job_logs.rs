@@ -35,6 +35,7 @@ fn mount(theme: &str) -> Ui {
         section: Some(3),
         theme: theme.into(),
         animations: false,
+        onboarding: false,
         ..Config::default()
     };
     let mut ui = TestBackend::new_with_app_and_viewport(
@@ -43,6 +44,7 @@ fn mount(theme: &str) -> Ui {
             config,
             path: None,
             api: None,
+            demo: true,
         },
         (),
         Rect {
@@ -451,6 +453,7 @@ fn collapsed_choices_round_trip_and_tab_visits_restore_log_positions() {
             config,
             path: None,
             api: None,
+            demo: true,
         },
         (),
         ui.viewport(),

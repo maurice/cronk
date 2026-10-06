@@ -16,6 +16,18 @@ cargo run --locked -- --demo
 
 Demo mode includes five deeply nested fictional projects, forty issues/MRs, discussions, diffs, and simulated live traces. **It never contacts GitLab and does not simulate successful remote writes.** Filters, project visibility, saved views, aliases, and themes work normally. Its workspace is saved separately as `config.demo.toml`.
 
+First launch opens **Welcome to Cronk**. To revisit it, use **Ctrl+P → Set up GitLab** or:
+
+```sh
+cargo run --locked -- --demo --onboarding
+```
+
+Demo onboarding checks environment-variable names and URL syntax without reading credentials or making requests. Add fictional project paths or IDs (`9001` through `9005`), separated by commas or newlines. The existing demo projects are prefilled. **Save setup** persists the checked settings to the demo config; **Skip setup** discards the draft. Both set `onboarding = false`. To capture the dialog without changing your workspace:
+
+```sh
+cargo run --locked -- --demo --onboarding --snapshot onboarding.png
+```
+
 For a faster optimized build:
 
 ```sh
@@ -24,6 +36,10 @@ cargo build --release --locked
 ```
 
 ### Connect to enterprise GitLab
+
+Run `cronk` to open first-run setup, even before credentials are configured. It asks for the token **environment variable name** (default `GITLAB_TOKEN`), instance URL (default `https://gitlab.com`), and one or more project paths/IDs. Checks run asynchronously after edits: authentication verifies the instance and token, and each project is resolved through GitLab. Export the token before starting Cronk; environment changes in another shell require a restart. Save is allowed only once all checks succeed. The dialog shows the config path for later manual editing.
+
+Alternatively, initialize the file from the CLI:
 
 ```sh
 cargo run --locked -- --init --host https://gitlab.company.example
@@ -147,7 +163,7 @@ Save a filter with `s` or **Save filter as a new tab**. Rename/remove it through
 
 ## Configuration and persistence
 
-Default location follows the platform configuration directory (`~/.config/cronk/config.toml` on Linux). `--config` overrides it. Demo mode always substitutes the `.demo.toml` extension, even with `--config`.
+Default location follows the platform configuration directory (`~/.config/cronk/config.toml` on Linux). `--config` overrides it. Demo mode always substitutes the `.demo.toml` extension, even with `--config`. Generated files include a Cronk project link and a reminder that manual changes require an app restart. `onboarding = false` suppresses first-run setup after saving or skipping it; set it to `true` or pass `--onboarding` to reopen setup. Existing configuration files without this setting keep their previous startup behavior.
 
 Configuration contains project IDs, full paths, local aliases, visibility, views, theme and user-display settings, active tab, list selections, open item, entered section, and selected field. `user_display` selects `username` (the default), `name`, or numeric `id`. To format structured GitLab names, set both `user_name_pattern` (a Rust regex with named captures) and `user_name_format` (a regex replacement such as `$firstname`); a non-matching name remains unchanged. Committed workspace/navigation events save immediately with a same-directory temporary file, file sync, and atomic replacement—not just on quit. Unix files are mode `0600`, with newly created directories `0700`. Invalid existing configuration is reported and not overwritten. **Do not run two instances against the same file**; there is no interprocess locking. Edit configuration while Cronk is stopped.
 

@@ -27,6 +27,7 @@ fn config(tab: usize, theme: &str) -> Config {
         }],
         active_tab: tab,
         theme: theme.into(),
+        onboarding: false,
         ..Config::default()
     }
 }
@@ -38,6 +39,7 @@ fn mount(config: Config, width: u16, height: u16) -> Ui {
             config,
             path: None,
             api: None,
+            demo: true,
         },
         (),
         Rect {

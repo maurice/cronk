@@ -58,6 +58,7 @@ fn main() -> anyhow::Result<()> {
             route,
             section,
             theme: theme.into(),
+            onboarding: false,
             ..Config::default()
         };
         let mut backend = TestBackend::new_with_app(
@@ -66,6 +67,7 @@ fn main() -> anyhow::Result<()> {
                 config,
                 path: None,
                 api: None,
+                demo: true,
             },
             (),
         );

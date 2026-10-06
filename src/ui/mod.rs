@@ -2,6 +2,7 @@ mod completion;
 mod controller;
 mod interaction;
 mod logs;
+mod onboarding;
 mod view;
 
 pub use logs::{LogView, TraceIndex};
@@ -78,6 +79,8 @@ pub struct Cronk {
     pub config: Config,
     pub path: Option<PathBuf>,
     pub api: Option<GitLab>,
+    /// Explicit mode: first-run live setup may not have a client yet.
+    pub demo: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +116,7 @@ pub struct State {
     pub log_zoom_from_focus: bool,
     pub log_search: Option<TextInput>,
     pub dialog: Option<Dialog>,
+    pub onboarding: onboarding::SetupState,
     pub current_iterations: HashMap<u64, Option<CurrentIteration>>,
     pub status: String,
     pub error: Option<String>,
@@ -212,6 +216,7 @@ pub struct Dialog {
 
 #[derive(Clone)]
 pub enum DialogKind {
+    Onboarding,
     Commands,
     Themes,
     Filter,
@@ -236,6 +241,7 @@ pub enum Confirmation {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Action {
+    Onboarding,
     Refresh,
     Filter,
     SaveView,
@@ -255,6 +261,7 @@ pub enum Action {
 }
 
 pub const COMMANDS: &[(&str, Action)] = &[
+    ("Set up GitLab · onboarding", Action::Onboarding),
     (
         "Refresh now · all visible projects and current detail",
         Action::Refresh,
@@ -295,6 +302,8 @@ pub enum Msg {
     DetailsLoaded(ItemKey, u64, Result<Box<Details>, String>),
     TraceLoaded(ItemKey, u64, u64, bool, Result<TraceChunk, String>),
     ProjectResolved(Result<Project, String>),
+    SetupValidate(u64),
+    SetupValidated(u64, Box<onboarding::Validation>),
     MutationDone(Result<(), String>),
     Tab(usize),
     Move(isize),

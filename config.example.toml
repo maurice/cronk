@@ -1,5 +1,8 @@
+# Cronk configuration — https://github.com/maurice/cronk
+# Manual changes require an app restart to take effect.
 # Copy the structure into your workspace config, or start with `cronk --init`.
 # Never put access tokens in this file. IDs/paths below are illustrative.
+onboarding = false # true opens first-run setup; also available with --onboarding
 gitlab_url = "https://gitlab.company.example"
 token_env = "GITLAB_TOKEN"
 theme = "midnight" # midnight | dracula | light | blade-runner | tokyo-night | gruvbox-dark

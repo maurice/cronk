@@ -22,6 +22,7 @@ type Ui = TestBackend<Cronk>;
 fn config() -> Config {
     Config {
         projects: demo::projects(),
+        onboarding: false,
         ..Config::default()
     }
 }
@@ -47,6 +48,7 @@ fn mount_with_viewport(config: Config, path: Option<&Path>, viewport: Rect) -> U
             config,
             path: path.map(Path::to_path_buf),
             api: None,
+            demo: true,
         },
         (),
         viewport,

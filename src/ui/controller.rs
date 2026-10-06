@@ -44,7 +44,7 @@ impl Component for Cronk {
             config.section = tab.section;
             config.field = tab.field;
         }
-        let is_demo = self.api.is_none();
+        let is_demo = self.demo;
         let open_details =
             config.route.is_some() || (config.active_tab == 1 && config.project_route.is_some());
         let scope = if open_details {
@@ -135,6 +135,7 @@ impl Component for Cronk {
             log_zoom_from_focus: false,
             log_search: None,
             dialog: None,
+            onboarding: Default::default(),
             current_iterations,
             status: if is_demo {
                 "Demo workspace · no requests or remote writes".into()
@@ -163,6 +164,10 @@ impl Component for Cronk {
     fn init(&mut self, ctx: &mut Context<Self>) -> Option<Command> {
         ctx.link().send(Msg::Tick);
         ctx.link().send(Msg::Refresh);
+        if ctx.state.config.onboarding {
+            self.show_onboarding(ctx);
+            return Some(self.schedule_setup(ctx));
+        }
         None
     }
 
@@ -171,6 +176,18 @@ impl Component for Cronk {
     }
 
     fn update(&mut self, msg: Msg, ctx: &mut Context<Self>) -> Update {
+        if ctx
+            .state
+            .dialog
+            .as_ref()
+            .is_some_and(|d| matches!(d.kind, DialogKind::Onboarding))
+            && matches!(
+                &msg,
+                Msg::Refresh | Msg::LoadUser | Msg::LoadDetails | Msg::LoadTraces
+            )
+        {
+            return Update::none();
+        }
         if matches!(
             &msg,
             Msg::Move(_)
@@ -222,7 +239,13 @@ impl Component for Cronk {
             Msg::Tick => {
                 ctx.state.tick += 1;
                 let now = ctx.elapsed();
-                if now >= ctx.state.blocked_until {
+                if now >= ctx.state.blocked_until
+                    && !ctx
+                        .state
+                        .dialog
+                        .as_ref()
+                        .is_some_and(|d| matches!(d.kind, DialogKind::Onboarding))
+                {
                     if ctx.state.user.id == 0 && !ctx.state.user_pending {
                         ctx.link().send(Msg::LoadUser);
                     }
@@ -346,7 +369,7 @@ impl Component for Cronk {
                     ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs);
                 let Some(api) = self.api.clone() else {
                     if ctx.state.details.is_none() {
-                        ctx.state.details = Some(demo::details(&key));
+                        ctx.state.details = ctx.state.demo.then(|| demo::details(&key));
                     }
                     ctx.link().send(Msg::LoadTraces);
                     return Update::full();
@@ -465,6 +488,19 @@ impl Component for Cronk {
                         ctx.state.traces.entry(id).or_default().error = Some(error.clone());
                         self.network_error(ctx, error);
                     }
+                }
+            }
+            Msg::SetupValidate(epoch) => return self.validate_setup(ctx, epoch),
+            Msg::SetupValidated(epoch, validation) => {
+                if epoch == ctx.state.onboarding.epoch
+                    && ctx
+                        .state
+                        .dialog
+                        .as_ref()
+                        .is_some_and(|d| matches!(d.kind, DialogKind::Onboarding))
+                {
+                    ctx.state.onboarding.feedback = validation.feedback.clone();
+                    ctx.state.onboarding.validated = Some(*validation);
                 }
             }
             Msg::ProjectResolved(result) => {
@@ -1084,6 +1120,14 @@ impl Component for Cronk {
                     }
                     d.error = None;
                 }
+                if ctx
+                    .state
+                    .dialog
+                    .as_ref()
+                    .is_some_and(|d| matches!(d.kind, DialogKind::Onboarding))
+                {
+                    return Update::with_command(self.schedule_setup(ctx));
+                }
                 if lookup_changed {
                     return self.schedule_lookup(ctx, index);
                 }
@@ -1102,6 +1146,14 @@ impl Component for Cronk {
                     }
                     d.error = None;
                 }
+                if ctx
+                    .state
+                    .dialog
+                    .as_ref()
+                    .is_some_and(|d| matches!(d.kind, DialogKind::Onboarding))
+                {
+                    return Update::with_command(self.schedule_setup(ctx));
+                }
                 if lookup_changed {
                     return self.schedule_lookup(ctx, index);
                 }
@@ -1114,6 +1166,14 @@ impl Component for Cronk {
                     .and_then(|d| d.fields.get_mut(index))
                 {
                     f.editor.insert_char('\n');
+                }
+                if ctx
+                    .state
+                    .dialog
+                    .as_ref()
+                    .is_some_and(|d| matches!(d.kind, DialogKind::Onboarding))
+                {
+                    return Update::with_command(self.schedule_setup(ctx));
                 }
             }
         }
@@ -1249,7 +1309,7 @@ impl Component for Cronk {
 }
 
 impl Cronk {
-    fn persist(&self, ctx: &mut Context<Self>) -> bool {
+    pub(super) fn persist(&self, ctx: &mut Context<Self>) -> bool {
         let key = ctx.state.tab_key();
         ctx.state
             .config
@@ -1513,7 +1573,7 @@ impl Cronk {
         ctx.state.log_height(ctx.viewport().h, id)
     }
 
-    fn reset_detail(&self, ctx: &mut Context<Self>) {
+    pub(super) fn reset_detail(&self, ctx: &mut Context<Self>) {
         ctx.state.config.route = None;
         ctx.state.config.project_route = None;
         ctx.state.config.section = None;
@@ -1551,7 +1611,7 @@ impl Cronk {
         ctx.state.collapsed.clear();
         ctx.state.log_views.clear();
         self.close_log_mode(ctx);
-        ctx.state.details = if self.api.is_none() {
+        ctx.state.details = if ctx.state.demo {
             Some(demo::details(&key))
         } else {
             None
@@ -1629,7 +1689,7 @@ impl Cronk {
         }
     }
 
-    fn show_dialog(
+    pub(super) fn show_dialog(
         &self,
         ctx: &mut Context<Self>,
         kind: DialogKind,
@@ -1660,11 +1720,32 @@ impl Cronk {
         });
         ctx.request_focus("dialog-field-0");
     }
-    fn close_dialog(&self, ctx: &mut Context<Self>) {
+    pub(super) fn close_dialog(&self, ctx: &mut Context<Self>) {
         if ctx.state.mutation_pending {
             ctx.state.status =
                 "Waiting for GitLab to confirm the request; the draft is retained".into();
             return;
+        }
+        if ctx
+            .state
+            .dialog
+            .as_ref()
+            .is_some_and(|d| matches!(d.kind, DialogKind::Onboarding))
+        {
+            let previous = ctx.state.config.onboarding;
+            ctx.state.config.onboarding = false;
+            if previous && !self.persist(ctx) {
+                ctx.state.config.onboarding = previous;
+                self.dialog_error(ctx, "Could not save configuration; setup is retained");
+                return;
+            }
+            ctx.state.onboarding.epoch += 1;
+            ctx.state.onboarding.validated = None;
+            if !ctx.state.demo && self.api.is_none() {
+                ctx.state.status =
+                    "Setup skipped · reopen Set up GitLab from Ctrl+P, or edit config and restart"
+                        .into();
+            }
         }
         if let Some(dialog) = ctx.state.dialog.take()
             && let Some(theme) = dialog.original_theme
@@ -1674,7 +1755,7 @@ impl Cronk {
         ctx.state.feedback.clear();
         ctx.blur();
     }
-    fn dialog_error(&self, ctx: &mut Context<Self>, error: &str) {
+    pub(super) fn dialog_error(&self, ctx: &mut Context<Self>, error: &str) {
         if let Some(d) = &mut ctx.state.dialog {
             d.error = Some(error.into());
         } else {
@@ -1832,6 +1913,10 @@ impl Cronk {
         }
         match action {
             Action::Refresh => { self.close_dialog(ctx); return self.update(Msg::Refresh, ctx); }
+            Action::Onboarding => {
+                self.show_onboarding(ctx);
+                return Update::with_command(self.schedule_setup(ctx));
+            }
             Action::Quit => { if self.persist(ctx) { ctx.quit(); } }
             Action::Help => self.show_dialog(ctx, DialogKind::Help, "Keyboard guide", "Esc returns to your workspace", vec![]),
             Action::Themes => self.show_dialog(ctx, DialogKind::Themes, "Choose theme", "↑/↓ or Tab previews · Enter applies · Esc reverts · config colors remain overrides", vec![]),
@@ -1935,6 +2020,9 @@ impl Cronk {
         let Some(dialog) = &ctx.state.dialog else {
             return Update::none();
         };
+        if matches!(dialog.kind, DialogKind::Onboarding) {
+            return self.save_setup(ctx);
+        }
         let kind = dialog.kind.clone();
         let values = dialog
             .fields
@@ -1957,6 +2045,7 @@ impl Cronk {
         let selected = dialog.selected;
         let first = values.first().map_or("", String::as_str);
         let mutation = match kind {
+            DialogKind::Onboarding => unreachable!("handled above"),
             DialogKind::Commands => {
                 if let Some((_, action)) = ctx.state.command_options().get(selected).copied() {
                     self.close_dialog(ctx);

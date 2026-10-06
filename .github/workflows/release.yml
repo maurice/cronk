@@ -14,6 +14,7 @@ permissions:
 env:
   BINARY_NAME: cronk
   CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   prepare:
@@ -66,8 +67,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Cache pinned tooling
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/cronk/mise
+            ~/.local/share/mise/installs
+            ~/.rustup/toolchains
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('mise.toml', 'mise.lock', '.config/mise-bootstrap.json') }}
+          restore-keys: tooling-${{ runner.os }}-${{ runner.arch }}-release-
+
+      - name: Set up pinned release tooling
+        run: just setup-ci release
 
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -77,46 +93,19 @@ jobs:
       - name: Set Cargo package version from release tag
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
-        run: |
-          set -euo pipefail
-
-          version="${TAG#v}"
-          python3 - "$version" <<'PY'
-          from pathlib import Path
-          import sys
-
-          manifest = Path("Cargo.toml")
-          text = manifest.read_text()
-          placeholder = 'version = "0.0.0"'
-          if text.count(placeholder) != 1:
-              raise SystemExit("Cargo.toml package version placeholder is missing or ambiguous")
-          manifest.write_text(text.replace(placeholder, f'version = "{sys.argv[1]}"', 1))
-          PY
-          cargo update --workspace --offline
-
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        run: just release-version "$TAG"
 
       - name: Build release binary
         env:
           GITHUB_SHA: ${{ github.sha }}
-        run: cross build --locked --release --target ${{ matrix.target }} --bin $BINARY_NAME
+        run: just release-build "${{ matrix.target }}"
 
       - name: Verify embedded release version
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
           GITHUB_SHA: ${{ github.sha }}
           TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-
-          expected="${BINARY_NAME} ${TAG}@${GITHUB_SHA:0:12}"
-          actual="$(cross run --locked --release --target "$TARGET" --bin "$BINARY_NAME" -- --version)"
-          if [[ "$actual" != "$expected" ]]; then
-            echo "Release version mismatch: expected '$expected', got '$actual'" >&2
-            exit 1
-          fi
-          echo "$actual"
+        run: just release-check "$TARGET" "$TAG" "$GITHUB_SHA"
 
       - name: Package release archive
         env:

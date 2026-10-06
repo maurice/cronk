@@ -1,6 +1,8 @@
 """Regression tests for just tasks, using fake Cargo rather than building Rust."""
 
+import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import shutil
@@ -20,10 +22,10 @@ class JustWorkflowTests(unittest.TestCase):
         self.repo.mkdir()
         source = Path(__file__).resolve().parents[2] / "justfile"
         shutil.copy2(source, self.repo / "justfile")
+        (self.repo / ".config").mkdir()
+        shutil.copy2(source.parent / ".config/cargo-fast.toml",
+                     self.repo / ".config/cargo-fast.toml")
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
-        self.git("add", "justfile")
-        self.commit("Initial")
-        self.git("branch", "baseline")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         cargo = self.bin / "cargo"
@@ -33,16 +35,71 @@ class JustWorkflowTests(unittest.TestCase):
             "if sys.argv[1:] == ['nextest', '--version']:\n"
             "    sys.exit(int(os.environ.get('MISSING_NEXTEST', '0')))\n"
             "with open(os.environ['CALL_LOG'], 'a') as log:\n"
-            "    log.write(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd(), "
+            "    log.write(json.dumps({'args': (['cross'] if os.path.basename(sys.argv[0]) == 'cross' else []) + sys.argv[1:], 'cwd': os.getcwd(), "
             "'jobs': os.environ.get('CARGO_BUILD_JOBS')}) + '\\n')\n"
+            "if '--message-format=json-render-diagnostics' in sys.argv:\n"
+            "    print(json.dumps({'reason': 'compiler-artifact', 'target': {'kind': ['bin']}, 'executable': os.environ['FAKE_APPLICATION']}))\n"
             "time.sleep(float(os.environ.get('CARGO_DELAY', '0')))\n"
+            "if os.path.basename(sys.argv[0]) == 'cross' and sys.argv[1] == 'run':\n"
+            "    print(os.environ.get('FAKE_CROSS_VERSION', 'wrong version'))\n"
             "sys.exit(int(os.environ.get('CARGO_EXIT', '0')))\n"
         )
         cargo.chmod(0o755)
+        shutil.copy2(cargo, self.bin / "cross")
+        application = self.bin / "application"
+        application.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys, time\n"
+            "with open(os.environ['CALL_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps({'args': ['app', *sys.argv[1:]], 'cwd': os.getcwd(), "
+            "'jobs': os.environ.get('CARGO_BUILD_JOBS')}) + '\\n')\n"
+            "time.sleep(float(os.environ.get('APP_DELAY', '0')))\n"
+        )
+        application.chmod(0o755)
+        for name in ("mold", "sccache", "clang", "rustc"):
+            tool = self.bin / name
+            tool.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, sys\n"
+                "if pathlib.Path(sys.argv[0]).name == 'rustc':\n"
+                "    print('host: ' + os.environ.get('FAKE_HOST', 'x86_64-unknown-linux-gnu'))\n"
+                "    print('compiler details\\n' * 8192)  # Catch early-exit grep/SIGPIPE.\n"
+                "if '-o' in sys.argv:\n"
+                "    output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])\n"
+                "    output.write_text('#!/bin/sh\\nexit 0\\n')\n"
+                "    output.chmod(0o755)\n"
+            )
+            tool.chmod(0o755)
+        for name in ("mise.toml", "mise.lock", ".config/mise-bootstrap.json"):
+            shutil.copy2(source.parent / name, self.repo / name)
+        bootstrap = json.loads((self.repo / ".config/mise-bootstrap.json").read_text())
+        self.data = self.root / "data"
+        self.mise = self.data / "cronk/mise" / bootstrap["version"] / "mise"
+        self.mise.parent.mkdir(parents=True)
+        self.mise.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "args = sys.argv[1:]\n"
+            "with open(os.environ['MISE_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps(args) + '\\n')\n"
+            "if args[0] == 'exec':\n"
+            "    os.environ['RUSTUP_TOOLCHAIN'] = '1.99.0'\n"
+            "    command = args[args.index('--') + 1:]\n"
+            "    os.execvp(command[0], command)\n"
+        )
+        self.mise.chmod(0o755)
+        checksum = hashlib.sha256(self.mise.read_bytes()).hexdigest()
+        bootstrap["sha256"] = {"linux-x64": checksum, "linux-arm64": checksum}
+        (self.repo / ".config/mise-bootstrap.json").write_text(json.dumps(bootstrap))
+        self.git("add", "justfile", ".config", "mise.toml", "mise.lock")
+        self.commit("Initial")
+        self.git("branch", "baseline")
         self.log = self.root / "calls.jsonl"
+        self.mise_log = self.root / "mise.jsonl"
         self.env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}",
-                    "CALL_LOG": str(self.log)}
-        for name in ("CARGO_BUILD_JOBS", "CRONK_BUILD_JOBS"):
+                    "CALL_LOG": str(self.log), "MISE_LOG": str(self.mise_log),
+                    "XDG_DATA_HOME": str(self.data), "FAKE_APPLICATION": str(application)}
+        for name in ("CARGO_BUILD_JOBS", "CRONK_BUILD_JOBS", "CI", "GITHUB_ENV", "GITHUB_PATH"):
             self.env.pop(name, None)
 
     def git(self, *args):
@@ -75,20 +132,40 @@ class JustWorkflowTests(unittest.TestCase):
             (("fmt",), ["fmt", "--all", "--", "--check"], None),
             (("format",), ["fmt", "--all"], None),
             (("check", "--lib"), ["check", "--locked", "--lib"], "2"),
+            (("check-all",), ["check", "--locked", "--all-targets"], "2"),
             (("lint",), ["clippy", "--locked", "--all-targets", "--", "-D", "warnings"], "2"),
             (("test-integration", "ui", "-E", "test(tab switches)"),
              ["nextest", "run", "--locked", "--test", "ui", "-E", "test(tab switches)"], "2"),
             (("test-all",), ["nextest", "run", "--locked", "--all-targets"], "2"),
+            (("test-ci",), ["nextest", "run", "--locked", "--all-targets", "--profile", "ci"], "2"),
             (("test-lib", "-E", "test(filter)"),
              ["nextest", "run", "--locked", "--lib", "-E", "test(filter)"], "2"),
             (("doc",), ["test", "--locked", "--doc"], "2"),
             (("build",), ["build", "--locked"], "2"),
-            (("run", "--", "--demo"), ["run", "--locked", "--", "--demo"], "2"),
+            (("build-release",), ["build", "--locked", "--release"], "2"),
+            (("release-build", "aarch64-unknown-linux-musl"),
+             ["cross", "build", "--locked", "--release", "--target", "aarch64-unknown-linux-musl", "--bin", "cronk"], "2"),
+            (("run", "--", "--demo"), ["app", "--demo"], None),
+            (("run", "--target-dir", "path with spaces", "--", "--demo"), ["app", "--demo"], None),
+            (("demo",), ["app", "--demo"], None),
+            (("demo-onboarding",), ["app", "--demo", "--onboarding"], None),
+            (("gallery",), ["app"], None),
+            (("sync-preview",), ["app"], None),
+            (("demo", "--snapshot", "image with spaces.png"),
+             ["app", "--demo", "--snapshot", "image with spaces.png"], None),
         ]
         for args, expected, jobs in cases:
             with self.subTest(args=args):
                 result = self.run_just(*args)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                if expected[0] == "app":
+                    build_args = {"gallery": ["--example", "gallery"],
+                                  "sync-preview": ["--example", "sync_preview"]}.get(args[0], [])
+                    if args[0] == "run":
+                        build_args = list(args[1:args.index("--")])
+                    self.assertEqual(self.calls()[-2]["args"],
+                                     ["build", "--locked", "--message-format=json-render-diagnostics", *build_args])
+                    self.assertEqual(self.calls()[-2]["jobs"], "2")
                 self.assertEqual(self.calls()[-1], {
                     "args": expected, "cwd": str(self.repo), "jobs": jobs,
                 })
@@ -98,6 +175,28 @@ class JustWorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cargo-nextest is required", result.stderr)
         self.assertEqual(self.calls(), [])
+
+    def test_demo_releases_build_lock_before_interactive_application_exits(self):
+        process = subprocess.Popen(
+            ["just", "--justfile", str(self.repo / "justfile"), "demo"],
+            env={**self.env, "APP_DELAY": "2"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while len(self.calls()) < 2 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(self.calls()[-1]["args"], ["app", "--demo"])
+            self.assertEqual(self.run_just("check").returncode, 0)
+            self.assertIsNone(process.poll(), "check should not wait for demo to exit")
+            self.assertEqual(process.wait(timeout=10), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        result = self.run_just("demo", env={"CARGO_EXIT": "7"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls()[-1]["args"][0], "build")
 
     def test_listing_and_unknown_task_do_not_run_cargo(self):
         self.assertEqual(self.run_just().returncode, 0)
@@ -116,11 +215,128 @@ class JustWorkflowTests(unittest.TestCase):
         self.assertEqual(self.git("config", "--get", "core.hooksPath").stdout.strip(),
                          "/custom/hooks")
 
+    def test_fast_setup_is_local_idempotent_and_reversible(self):
+        result = self.run_just("fast-setup")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self.repo / ".cargo/config.toml"
+        self.assertEqual(config.read_text(), (self.repo / ".config/cargo-fast.toml").read_text())
+        self.assertEqual(self.run_just("fast-setup").returncode, 0)
+        self.assertEqual(self.run_just("fast-disable").returncode, 0)
+        self.assertFalse(config.exists())
+        self.assertEqual(self.run_just("fast-disable").returncode, 0)
+        self.assertEqual(self.calls(), [])
+
+    def test_fast_setup_and_disable_protect_custom_config(self):
+        self.change(".cargo/config.toml", "[build]\njobs = 1\n")
+        self.assertNotEqual(self.run_just("fast-setup").returncode, 0)
+        self.assertNotEqual(self.run_just("fast-disable").returncode, 0)
+        self.assertEqual((self.repo / ".cargo/config.toml").read_text(), "[build]\njobs = 1\n")
+        (self.repo / ".cargo/config.toml").unlink()
+        self.change(".cargo/config", "[build]\njobs = 1\n")
+        self.assertNotEqual(self.run_just("fast-setup").returncode, 0)
+        self.assertFalse((self.repo / ".cargo/config.toml").exists())
+
+    def test_fast_setup_rejects_unsupported_hosts(self):
+        result = self.run_just("fast-setup", env={"FAKE_HOST": "aarch64-apple-darwin"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("x86_64 Linux/WSL", result.stderr)
+        self.assertFalse((self.repo / ".cargo/config.toml").exists())
+
+    def test_setup_uses_locked_tools_and_ci_selects_only_required_subset(self):
+        manifest = (self.repo / "mise.toml").read_text()
+        self.assertRegex(manifest, r'(?m)^exec_auto_install = false$')
+        self.assertRegex(manifest, r'(?m)^not_found_auto_install = false$')
+        result = self.run_just("setup")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = [json.loads(line) for line in self.mise_log.read_text().splitlines()]
+        self.assertIn(["install", "--locked"], entries)
+        for group, tools in (("rust", ["rust"]), ("checks", ["rust", "nextest"]),
+                             ("release", ["rust", "cross"])):
+            result = self.run_just("setup-ci", group, env={"CI": "true"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            entries = [json.loads(line) for line in self.mise_log.read_text().splitlines()]
+            self.assertEqual(entries[-1], ["install", "--locked", *tools])
+        self.assertNotEqual(self.run_just("setup-ci", "unknown").returncode, 0)
+        github_env = self.root / "github-env"
+        result = self.run_just("setup-ci", "rust", env={"CI": "true", "GITHUB_ENV": str(github_env)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(github_env.read_text(), "RUSTUP_TOOLCHAIN=1.99.0\n")
+
+    def test_missing_managed_environment_reports_setup(self):
+        self.mise.unlink()
+        result = self.run_just("check")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Run just setup", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_bootstrap_checks_download_before_installing_or_executing(self):
+        payload = self.mise.read_bytes()
+        self.mise.unlink()
+        mock = self.root / "mock_python"
+        mock.mkdir()
+        (mock / "sitecustomize.py").write_text(
+            "import io, os, urllib.request\n"
+            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(bytes.fromhex(os.environ['TEST_PAYLOAD']))\n"
+        )
+        env = {"PYTHONPATH": str(mock), "TEST_PAYLOAD": b"untrusted bytes".hex()}
+        result = self.run_just("_bootstrap-mise", env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checksum mismatch", result.stderr)
+        self.assertFalse(self.mise.exists())
+        env["TEST_PAYLOAD"] = payload.hex()
+        result = self.run_just("_bootstrap-mise", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.mise.read_bytes(), payload)
+        self.assertEqual(self.run_just("_bootstrap-mise").returncode, 0)
+
+    def test_workflow_calls_and_documentation_use_public_just_tasks(self):
+        root = Path(__file__).resolve().parents[2]
+        tasks = set(subprocess.check_output(["just", "--justfile", str(root / "justfile"),
+                                             "--summary"], text=True).split())
+        for workflow in (root / ".github/workflows").glob("*.yml"):
+            text = workflow.read_text()
+            self.assertNotRegex(text, r'(?m)^\s*(run: )?(cargo|cross) (build|test|run|clippy|fmt|install|update)\b')
+            for task in re.findall(r'\bjust ([a-z][a-z-]*)', text):
+                self.assertIn(task, tasks, f"Unknown task {task} in {workflow}")
+        for document in [root / "README.md", *(root / "docs").glob("*.md")]:
+            self.assertNotRegex(document.read_text(), r'(?m)^cargo (run|build|test|install|clippy|fmt)\b')
+
     def test_job_overrides(self):
         self.run_just("check", env={"CARGO_BUILD_JOBS": "3"})
         self.assertEqual(self.calls()[-1]["jobs"], "3")
         self.run_just("check", env={"CARGO_BUILD_JOBS": "3", "CRONK_BUILD_JOBS": "4"})
         self.assertEqual(self.calls()[-1]["jobs"], "4")
+
+    def test_ci_keeps_runner_budget_and_does_not_acquire_local_lock(self):
+        result = self.run_just("test-ci", env={"CI": "true"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(self.calls()[-1]["jobs"])
+        self.assertFalse((self.repo / ".git/cronk-dev.lock").exists())
+        self.run_just("check", env={"CI": "true", "CARGO_BUILD_JOBS": "6"})
+        self.assertEqual(self.calls()[-1]["jobs"], "6")
+
+    def test_release_version_updates_manifest_and_workspace_lock(self):
+        self.change("Cargo.toml", '[package]\nname = "cronk"\nversion = "0.0.0"\n')
+        result = self.run_just("release-version", "v1.2.3-beta.1+build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('version = "1.2.3-beta.1+build"', (self.repo / "Cargo.toml").read_text())
+        self.assertEqual(self.calls()[-1]["args"], ["update", "--workspace", "--offline"])
+        self.assertNotEqual(self.run_just("release-version", "v1.2.4").returncode, 0)
+        self.assertNotEqual(self.run_just("release-version", 'invalid"tag').returncode, 0)
+
+    def test_release_check_verifies_target_binary_output(self):
+        sha = "0123456789abcdef"
+        result = self.run_just("release-check", "aarch64-unknown-linux-gnu", "v1.2.3", sha,
+                               env={"FAKE_CROSS_VERSION": "cronk v1.2.3@0123456789ab"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cronk v1.2.3@0123456789ab", result.stdout)
+        self.assertEqual(self.calls()[-1]["args"], [
+            "cross", "run", "--locked", "--release", "--target",
+            "aarch64-unknown-linux-gnu", "--bin", "cronk", "--", "--version",
+        ])
+        result = self.run_just("release-check", "aarch64-unknown-linux-gnu", "v1.2.3", sha)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Release version mismatch", result.stderr)
 
     def test_failure_is_propagated_and_releases_lock(self):
         self.assertNotEqual(self.run_just("lint", env={"CARGO_EXIT": "7"}).returncode, 0)

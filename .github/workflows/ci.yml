@@ -15,6 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   format:
@@ -25,18 +26,26 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
           tool: just
+
+      - name: Cache pinned tooling
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/cronk/mise
+            ~/.local/share/mise/installs
+            ~/.rustup/toolchains
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('mise.toml', 'mise.lock', '.config/mise-bootstrap.json') }}
+          restore-keys: tooling-${{ runner.os }}-${{ runner.arch }}-rust-
+
+      - name: Set up pinned tooling
+        run: just setup-ci rust
+
+      - name: Check formatting
+        run: just fmt
 
       - name: Check local development workflow
         run: just workflow-test
@@ -49,14 +58,29 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Cache pinned tooling
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/cronk/mise
+            ~/.local/share/mise/installs
+            ~/.rustup/toolchains
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('mise.toml', 'mise.lock', '.config/mise-bootstrap.json') }}
+          restore-keys: tooling-${{ runner.os }}-${{ runner.arch }}-rust-
+
+      - name: Set up pinned tooling
+        run: just setup-ci rust
 
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --locked --release
+        run: just build-release
 
   checks:
     name: Build, test, and lint
@@ -66,24 +90,32 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Install cargo-nextest
+      - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: nextest@0.9.146
+          tool: just
+
+      - name: Cache pinned tooling
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/cronk/mise
+            ~/.local/share/mise/installs
+            ~/.rustup/toolchains
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-checks-${{ hashFiles('mise.toml', 'mise.lock', '.config/mise-bootstrap.json') }}
+          restore-keys: tooling-${{ runner.os }}-${{ runner.arch }}-checks-
+
+      - name: Set up pinned tooling
+        run: just setup-ci checks
 
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Lint with Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: just lint
 
       - name: Run tests with nextest
-        run: cargo nextest run --locked --all-targets --profile ci
+        run: just test-ci
 
       - name: Run doctests
-        run: cargo test --locked --doc
+        run: just doc

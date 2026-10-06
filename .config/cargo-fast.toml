@@ -1,0 +1,14 @@
+# Optional cronk fast-build configuration; activate with `just fast-setup`.
+# Copied to ignored .cargo/config.toml, never enabled implicitly in CI.
+[build]
+rustc-wrapper = "sccache"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = [
+    "-C", "linker-features=-lld",
+    "-C", "link-arg=-fuse-ld=mold",
+    "-C", "link-arg=-Wl,--threads=2",
+]
+# Keep Cargo's incremental application builds. Registry dependencies are already
+# non-incremental and can be cached; executables/proc macros cannot be cached.

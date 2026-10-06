@@ -72,45 +72,110 @@ sidecars. This change intentionally does not add that complexity without measure
 lock-wait evidence. The HTTP cache generation guard still protects persistent
 writes against concurrent GitLab mutations.
 
-## Initial debug observations
+## Controlled before/after benchmarks
 
-On this shared Linux/WSL development host, the unchanged 30-update headless
-workload produced these single-run timings (setup/compilation excluded from the
-measured section):
+After rebasing and clearing the host memory pressure, three serial paired runs
+showed a **54.1× speedup for the 3,000-MR list workload**: median **87.062 s →
+1.609 s**, a **98.2% reduction**. With 300 MRs the median improved **3.74×**.
+Increasing the collection tenfold now increases this workload's median time by
+only about 15%, rather than rebuilding thousands of rich widget trees per view.
 
-| MR count | Original full-tree construction | Windowed construction |
-| --- | ---: | ---: |
-| 300 | 11.991 s | 3.917 s |
-| 3,000 | 665.806 s | 5.317 s |
+### List: 30 selection/scroll updates
 
-These runs overlapped other compilation/testing and are **not a controlled paired
-benchmark**. In particular, the original 3,000-row run suffered substantial
-shared-host contention. Do not interpret their ratio as a reliable production
-speedup or FPS figure. The structural improvement is independently checkable:
-3,000 rich row trees per view becomes at most 60 plus spacers at this viewport
-size. Release-mode measurements on an otherwise idle host and a real GitLab
-workspace are still needed to quantify end-user latency.
+All values are seconds; setup and compilation are outside the timed section.
 
-After the final build and full test suite finished, a standalone serial run of
-just the updated workload recorded **3.293 s for 300 MRs** and **8.591 s for
-3,000 MRs**. The cache workload recorded **1.674 s for 30 durable page
-transactions containing 3,000 items**, and **205.745 ms to read/decode the
-snapshot**. These remain shared-host debug observations, not isolated-machine
-or production measurements; their variance reinforces the need for controlled
-release profiling rather than quoting a precise speedup.
+| Pair | 300 MRs before | 300 MRs after | 3,000 MRs before | 3,000 MRs after |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 5.232 | 1.399 | 88.393 | 1.511 |
+| 2 | 5.234 | 1.534 | 87.062 | 1.902 |
+| 3 | 4.799 | 1.375 | 85.586 | 1.609 |
+| **Median** | **5.232** | **1.399** | **87.062** | **1.609** |
 
-The baseline was built from `origin/main` at `4359bf8` with only
-`tests/list_performance.rs` added; the timed fixture and 30-update loop were identical. To reproduce the
-comparison, copy that test into an isolated main worktree, prebuild both
-versions, and execute the workload serially after builds finish. The SQLite
-workload uses minimal `WorkItem` bodies; description-rich production snapshots
-will have higher byte counts and potentially different timings.
+### SQLite: 3,000 minimal item bodies
+
+Writes comprise 30 separate 100-item page transactions, preserving
+`synchronous=FULL`. Reads include retrieving and JSON-decoding all 3,000 items.
+All values are milliseconds.
+
+| Pair | Write before | Write after | Read/decode before | Read/decode after |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 372.674 | 207.812 | 37.371 | 48.121 |
+| 2 | 253.695 | 193.713 | 37.978 | 35.995 |
+| 3 | 254.039 | 191.776 | 36.090 | 36.763 |
+| **Median** | **254.039** | **193.713** | **37.371** | **36.763** |
+
+Page writes improved **23.7%** (1.31×). Snapshot read/decode throughput was
+effectively unchanged: the intended read-side improvement is moving JSON work
+outside the mutex, not making the JSON parser faster. These timings do not
+quantify mutex-wait improvements; the concurrent regression test checks
+correctness, and lock-wait profiling remains a follow-up.
+
+### Environment and method
+
+- Linux/WSL2 `6.18.33.2-microsoft-standard-WSL2`; Intel Core i7-1185G7, 4 physical
+  cores / 8 logical CPUs; 7.7 GiB guest RAM on a 16 GiB Windows host.
+- Repository-managed Rust 1.99.0 and nextest 0.9.146. Both versions use the same
+  current test/dev profile (`debug=1`, unoptimised), dependencies and tool pins;
+  neither worktree enables optional mold/sccache configuration.
+- Baseline: latest main at `dd01356`, with only the identical list test file and
+  cache workload test function copied in. Feature: rebased `8d2ef73`. Separate
+  worktree target directories; no baseline production code was modified.
+- Both targets were prebuilt using `just ... --no-run`. One unmeasured warm-up
+  per version/workload preceded the three measured pairs. No compilation or
+  other validation ran concurrently with measurements.
+- Pair order: before → after, after → before, before → after. List and cache
+  commands ran sequentially through the repository's `just` lock, with one
+  nextest test process and captured successful-test output. Each command ran
+  only the relevant workload. Reported values are its internal monotonic
+  timers, not whole-command wall time or test-runner startup.
+- During the runs, `vmstat` recorded at least **3.45 GiB free guest RAM**, no
+  swap-out, and only occasional swap-in at up to **20 KiB/s**. No competing Rust
+  builds/tests were running. Ordinary Windows desktop services remained active;
+  this was a cleaned-up development host, not a laboratory-isolated machine.
+- Medians and speedups use unrounded samples. Every warm-up/measured workload
+  passed. The fixture has no network requests or workspace-file saves; SQLite
+  uses fresh temporary databases and minimal bodies. Real descriptions, filters
+  and disk configurations can change the numbers.
+
+This establishes a substantial improvement in the reproducible **debug headless
+workload**, not a production FPS claim. Release-mode and real-workspace latency
+remain worth measuring. The earlier contention-heavy observations (including
+the 665.806 s baseline) are superseded by these paired results and should not be
+used to calculate a speedup; they also used an older base/toolchain/profile.
+
+### Host-memory investigation
+
+WSL had been up for about 15 days. Before cleanup it was already 95–96% CPU idle,
+with about 0.8 GiB actively used and 6.7 GiB available. Approximately 5.8 GiB was
+filesystem cache, not a runaway compiler or test process. Clean cache was
+reclaimed once before prebuilding; no Linux editor/agent/daemon was terminated.
+Several old editor/language-server processes were mostly swapped out, and zombie
+processes had no resident memory to reclaim.
+
+Windows was the important pressure source: only **0.43 GiB free**, with
+**Windows Terminal committing about 6.8 GiB of private memory** after nearly two
+weeks of uptime (private commitment is not the same as resident RAM). Its
+resident working set was about 0.8 GiB at the first sample. The user closed
+Windows Terminal and reattached through WezTerm; Windows free memory then rose
+to **6.86 GiB**, and the user observed overall usage roughly halve. That is
+strong evidence the terminal was a major contributor, though it does not by
+itself identify the cause of its unusually large allocation.
+
+Builds refill Linux filesystem cache, so WSL's Windows footprint can rise again
+after testing without indicating a leak. Check `MemAvailable`, process memory,
+and live paging rather than treating all cache or historically occupied swap
+as current pressure. Restarting unrelated services or WSL was unnecessary.
 
 ## Reproduce
 
 ```sh
-just test-integration list_performance --test-threads=1 --success-output immediate
-just test-lib -E 'test(cache::tests::large_snapshot)' --success-output immediate
+# Prebuild both versions first; exclude these builds and one warm-up from results.
+just test-integration list_performance --no-run
+just test-lib -E 'test(cache::tests::large_snapshot)' --no-run
+
+# Run serially in each worktree, alternating version order across three pairs.
+just test-integration list_performance -E 'test(large_list_scroll_workload)' --test-threads=1 --success-output immediate
+just test-lib -E 'test(cache::tests::large_snapshot)' --test-threads=1 --success-output immediate
 just test-all
 just doc
 ```

@@ -245,7 +245,6 @@ impl Cronk {
         ctx.state.config.token_env = validation.config.token_env.clone();
         ctx.state.config.projects = validation.config.projects.clone();
         ctx.state.config.onboarding = false;
-        self.reset_detail(ctx);
         if !self.persist(ctx) {
             ctx.state.config = previous;
             ctx.state.onboarding.validated = Some(validation);
@@ -257,6 +256,7 @@ impl Cronk {
         }
         self.api = validation.api;
         self.enable_cache(ctx);
+        self.clear_detail_content(ctx);
         ctx.state.shared_details.clear();
         ctx.state.detail_requests.clear();
         ctx.state.tab_cache.clear();
@@ -264,11 +264,20 @@ impl Cronk {
         ctx.state.list_epoch += 1;
         ctx.state.list_pending.clear();
         ctx.state.user = validation.user;
+        ctx.state.remember_selection();
+        ctx.state
+            .navigation_restoring
+            .extend(ctx.state.navigation_selections.keys().cloned());
+        ctx.state
+            .navigation_routes_restoring
+            .extend(ctx.state.config.tab_states.keys().cloned());
+        ctx.state.navigation_hydrated.clear();
         ctx.state.items = if ctx.state.demo {
             demo::items()
         } else {
             Vec::new()
         };
+        ctx.state.reset_current_iterations();
         self.close_dialog(ctx);
         ctx.link().send(Msg::Refresh);
         Update::full()
@@ -278,6 +287,181 @@ impl Cronk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_installation_setup_keeps_navigation_but_discards_credential_specific_buffers() {
+        let config = Config {
+            onboarding: false,
+            projects: demo::projects(),
+            views: vec![crate::config::SavedView {
+                name: "Current sprint".into(),
+                kind: ItemKind::Issue,
+                query: "iteration:current".into(),
+            }],
+            ..Config::default()
+        };
+        let mut ui = tui_lipan::TestBackend::new(Cronk {
+            config,
+            path: None,
+            api: None,
+            demo: true,
+        });
+        ui.dispatch(Msg::Tab(3)).unwrap();
+        ui.dispatch(Msg::Select(2)).unwrap();
+        ui.dispatch(Msg::Enter).unwrap();
+        ui.dispatch(Msg::Enter).unwrap();
+        ui.dispatch(Msg::Field(2)).unwrap();
+        let route = ui.state().config.route.clone();
+        let section = ui.state().config.section;
+        let field = ui.state().config.field;
+        let job = ui.state().details.as_ref().unwrap().jobs[0].id;
+        ui.dispatch(Msg::ToggleJob(job)).unwrap();
+        let expanded = ui.state().expanded.clone();
+        let collapsed = ui.state().collapsed.clone();
+        ui.state_mut().details.as_mut().unwrap().item.title = "old credential detail body".into();
+        ui.state_mut()
+            .traces
+            .entry(job)
+            .or_default()
+            .append("old credential trace body", true);
+        let fresh_iterations = ui.state().current_iterations.clone();
+        assert!(!fresh_iterations.is_empty());
+        ui.state_mut().current_iterations.insert(
+            9001,
+            Some(CurrentIteration {
+                id: 999,
+                title: "old credential iteration title".into(),
+                description: "old credential iteration description".into(),
+            }),
+        );
+        ui.dispatch(Msg::Action(Action::Onboarding)).unwrap();
+        let config = ui.state().config.clone();
+        let values = vec![
+            "ROTATED_TOKEN".into(),
+            config.gitlab_url.clone(),
+            config
+                .projects
+                .iter()
+                .map(|p| p.id.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        ];
+        let validation = validate(config, values, true);
+        assert!(validation.valid);
+        ui.dispatch(Msg::SetupValidated(
+            ui.state().onboarding.epoch,
+            Box::new(validation),
+        ))
+        .unwrap();
+        ui.dispatch(Msg::Submit).unwrap();
+        assert_eq!(ui.state().config.token_env, "ROTATED_TOKEN");
+        assert_eq!(ui.state().config.route, route);
+        assert_eq!(ui.state().config.section, section);
+        assert_eq!(ui.state().config.field, field);
+        assert_eq!(ui.state().expanded, expanded);
+        assert_eq!(ui.state().collapsed, collapsed);
+        assert_eq!(ui.state().current_iterations, fresh_iterations);
+        assert!(
+            ui.state()
+                .current_iterations
+                .values()
+                .flatten()
+                .all(|iteration| iteration.id != 999
+                    && iteration.title != "old credential iteration title"
+                    && iteration.description != "old credential iteration description")
+        );
+        assert!(
+            ui.state()
+                .details
+                .as_ref()
+                .is_none_or(|d| d.item.title != "old credential detail body")
+        );
+        assert!(
+            ui.state()
+                .traces
+                .values()
+                .all(|t| !t.text.contains("old credential trace body"))
+        );
+        assert!(
+            ui.state()
+                .shared_details
+                .values()
+                .all(|(d, _)| d.item.title != "old credential detail body")
+        );
+        ui.dispatch(Msg::Tab(4)).unwrap();
+        assert_eq!(ui.state().query_text(), "iteration:current");
+        let visible = ui.state().visible_items();
+        assert!(
+            !visible.is_empty(),
+            "Demo setup must keep symbolic current-iteration filters usable without a restart"
+        );
+        assert!(visible.iter().all(|item| {
+            item.iteration_id
+                == ui
+                    .state()
+                    .current_iteration(item.key.project)
+                    .map(|iteration| iteration.id)
+        }));
+    }
+
+    #[test]
+    fn live_setup_discards_old_iteration_metadata_without_seeding_demo_data() {
+        let config = Config {
+            onboarding: false,
+            gitlab_url: "https://gitlab.invalid".into(),
+            projects: demo::projects(),
+            ..Config::default()
+        };
+        let mut ui = tui_lipan::TestBackend::new(Cronk {
+            config,
+            path: None,
+            api: None,
+            demo: false,
+        });
+        ui.state_mut().items = demo::items();
+        ui.state_mut().current_iterations.insert(
+            9001,
+            Some(CurrentIteration {
+                id: 999,
+                title: "old private iteration".into(),
+                description: "old private description".into(),
+            }),
+        );
+        ui.dispatch(Msg::Action(Action::Onboarding)).unwrap();
+        // Model successful credential validation directly; suppress refresh via
+        // existing backoff so this focused state-boundary test makes no network requests.
+        ui.state_mut().blocked_until = Duration::MAX;
+        let mut config = ui.state().config.clone();
+        config.token_env = "ROTATED_TOKEN".into();
+        let api = GitLab::new(&config.gitlab_url, "fake-new-token").unwrap();
+        let validation = Validation {
+            config,
+            api: Some(api),
+            user: User {
+                id: 42,
+                username: "new-user".into(),
+                ..User::default()
+            },
+            feedback: Vec::new(),
+            valid: true,
+        };
+        ui.dispatch(Msg::SetupValidated(
+            ui.state().onboarding.epoch,
+            Box::new(validation),
+        ))
+        .unwrap();
+        ui.dispatch(Msg::Submit).unwrap();
+        assert_eq!(ui.state().config.token_env, "ROTATED_TOKEN");
+        assert_eq!(ui.state().user.id, 42);
+        assert!(!ui.state().demo);
+        assert!(ui.component().api.is_some());
+        assert!(ui.state().items.is_empty());
+        assert!(
+            ui.state().current_iterations.is_empty(),
+            "live mode must await fresh hydration, not inject fictional iterations"
+        );
+    }
+
     #[test]
     fn demo_checks_all_fields_and_deduplicates_projects() {
         let project = &demo::projects()[0];

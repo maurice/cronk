@@ -33,7 +33,7 @@ struct Args {
     /// Verify authentication and print the authenticated username, then exit.
     #[arg(long)]
     check: bool,
-    /// Render demo UI to a PNG or Markdown file without opening a terminal.
+    /// Preview demo TOML as PNG/Markdown without a terminal or workspace writes.
     #[arg(long, requires = "demo")]
     snapshot: Option<PathBuf>,
     /// Snapshot viewport width.
@@ -109,9 +109,11 @@ fn main() -> Result<()> {
         if args.width < 20 || args.height < 12 {
             bail!("Snapshot viewport must be at least 20×12");
         }
+        // A snapshot previews TOML input (including any legacy navigation) in
+        // memory. It must neither restore/migrate SQLite nor persist viewport state.
         let mut backend = TestBackend::new(Cronk {
             config,
-            path: Some(path),
+            path: None,
             api: None,
             demo: true,
         });

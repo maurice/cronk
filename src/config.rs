@@ -1,5 +1,5 @@
-//! Validated TOML configuration and workspace state. Call `save` after each
-//! committed UI event; there is deliberately no debounce or implicit save on load.
+//! Validated portable TOML configuration. Navigation fields remain available in
+//! memory for compatibility and legacy import; new saves do not persist them.
 //! Tokens are resolved by the caller from `token_env`, never by this module.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,6 +51,8 @@ pub struct Config {
     pub colors: ThemeColors,
     pub list_refresh_secs: u64,
     pub detail_refresh_secs: u64,
+    /// In-memory navigation and read-only legacy TOML input. `save` omits these
+    /// fields; the UI persists them independently in private local SQLite state.
     pub active_tab: usize,
     pub selections: BTreeMap<String, usize>,
     pub tab_states: BTreeMap<String, TabState>,
@@ -62,7 +64,7 @@ pub struct Config {
     pub filters: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TabState {
     pub route: Option<ItemKey>,
@@ -76,7 +78,7 @@ pub struct TabState {
     pub collapsed: BTreeSet<u64>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedView {
     pub name: String,
@@ -93,7 +95,7 @@ pub enum UserDisplay {
     Id,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeColors {
     pub background: Option<String>,
@@ -234,7 +236,8 @@ impl fmt::Debug for Config {
 
 impl Config {
     /// Missing files use defaults. All other I/O, syntax, and validation errors
-    /// are returned without creating or changing anything on disk.
+    /// are returned without creating or changing anything on disk. Local SQLite
+    /// navigation is restored separately when constructing the UI, not on load.
     pub fn load(path: &Path) -> Result<Self> {
         let source = match fs::read_to_string(path) {
             Ok(source) => source,
@@ -257,7 +260,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Synchronously replace the complete workspace, using a temporary file on
+    /// Synchronously replace portable configuration, using a temporary file on
     /// the same filesystem. Invalid state is rejected before touching the disk.
     /// Unix files are mode 0600, newly created directories are mode 0700, and the
     /// containing directory is synced after rename. Other platforms use their
@@ -265,11 +268,50 @@ impl Config {
     ///
     /// A directory-sync error can be returned *after* replacement has succeeded;
     /// the file is complete, but durability could not be confirmed.
+    /// Existing legacy navigation is preserved verbatim until local migration
+    /// commits, including saves made by main before the UI is initialized.
     pub fn save(&self, path: &Path) -> Result<()> {
+        self.save_inner(path, false)
+    }
+
+    pub(crate) fn save_migrated(&self, path: &Path) -> Result<()> {
+        self.save_inner(path, true)
+    }
+
+    fn save_inner(&self, path: &Path, migrated: bool) -> Result<()> {
         self.validate()?;
+        let mut document = toml::Table::try_from(self).context("serialize config")?;
+        for key in NAVIGATION_KEYS {
+            document.remove(key);
+        }
+        if !migrated {
+            let destination_symlink =
+                fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+            match fs::read_to_string(path) {
+                Ok(source) => {
+                    // Replacing a symlink never modifies its target. Preserve
+                    // recoverable legacy keys if that target is a TOML config;
+                    // unrelated non-TOML targets need not block safe replacement.
+                    let legacy: toml::Table = match toml::from_str(&source) {
+                        Ok(document) => document,
+                        Err(_) if destination_symlink => toml::Table::new(),
+                        Err(error) => {
+                            return Err(error).context("parse existing config before save");
+                        }
+                    };
+                    for key in NAVIGATION_KEYS {
+                        if let Some(value) = legacy.get(key) {
+                            document.insert(key.into(), value.clone());
+                        }
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("read existing config before save"),
+            }
+        }
         let source = format!(
             "# Cronk configuration — https://github.com/maurice/cronk\n# Manual changes require an app restart to take effect.\n\n{}",
-            toml::to_string_pretty(self).context("serialize config")?
+            toml::to_string_pretty(&document).context("serialize config")?
         );
         let parent = path
             .parent()
@@ -312,6 +354,34 @@ impl Config {
             .and_then(|directory| directory.sync_all())
             .with_context(|| format!("sync config directory {}", parent.display()))?;
         Ok(())
+    }
+
+    /// Compare only deliberate configuration, without serializing navigation.
+    pub(crate) fn portable_eq(&self, other: &Self) -> bool {
+        self.onboarding == other.onboarding
+            && self.gitlab_url == other.gitlab_url
+            && self.token_env == other.token_env
+            && self.projects == other.projects
+            && self.views == other.views
+            && self.theme == other.theme
+            && self.animations == other.animations
+            && self.user_display == other.user_display
+            && self.user_name_pattern == other.user_name_pattern
+            && self.user_name_format == other.user_name_format
+            && self.colors == other.colors
+            && self.list_refresh_secs == other.list_refresh_secs
+            && self.detail_refresh_secs == other.detail_refresh_secs
+            && self.filters == other.filters
+    }
+
+    pub(crate) fn clear_navigation(&mut self) {
+        self.active_tab = 0;
+        self.selections.clear();
+        self.tab_states.clear();
+        self.route = None;
+        self.project_route = None;
+        self.section = None;
+        self.field = 0;
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -388,6 +458,16 @@ impl Config {
         Ok(())
     }
 }
+
+pub(crate) const NAVIGATION_KEYS: [&str; 7] = [
+    "active_tab",
+    "selections",
+    "tab_states",
+    "route",
+    "project_route",
+    "section",
+    "field",
+];
 
 /// The live configuration path. Demo isolation is the caller's responsibility.
 pub fn default_path() -> Result<PathBuf> {
@@ -530,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_workspace_round_trips_and_replaces_per_event() {
+    fn portable_configuration_round_trips_without_navigation() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("nested/config.toml");
         let mut config = Config {
@@ -599,9 +679,17 @@ mod tests {
             config.field = field;
             config.save(&path).unwrap();
             let loaded = Config::load(&path).unwrap();
-            assert_eq!(
-                toml::to_string(&loaded).unwrap(),
-                toml::to_string(&config).unwrap()
+            assert!(loaded.portable_eq(&config));
+            assert_eq!(loaded.active_tab, 0);
+            assert!(loaded.selections.is_empty());
+            assert!(loaded.tab_states.is_empty());
+            assert!(loaded.route.is_none());
+            let document: toml::Table =
+                toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert!(
+                NAVIGATION_KEYS
+                    .iter()
+                    .all(|key| !document.contains_key(*key))
             );
         }
         config.route = None;

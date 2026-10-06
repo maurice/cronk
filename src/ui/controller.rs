@@ -12,6 +12,37 @@ impl Component for Cronk {
 
     fn create_state(&self, _: &()) -> State {
         let mut config = self.config.clone();
+        let mut navigation_writer = None;
+        let mut navigation_snapshot = None;
+        let mut navigation_error = None;
+        let mut navigation_selections = config
+            .selections
+            .iter()
+            .map(|(key, index)| (key.clone(), crate::navigation::Selection::Legacy(*index)))
+            .collect();
+        if let Some(path) = &self.path {
+            match crate::navigation::Writer::open(path, &config, self.demo) {
+                Ok((writer, snapshot, warning)) => {
+                    if let Some(snapshot) = &snapshot {
+                        navigation_selections = snapshot.restore(&mut config);
+                    }
+                    navigation_writer = Some(writer);
+                    navigation_snapshot = snapshot;
+                    navigation_error = warning;
+                }
+                Err(error) => {
+                    navigation_error = Some(format!(
+                        "Local navigation unavailable (using memory; legacy TOML retained): {error:#}"
+                    ))
+                }
+            }
+        }
+        let navigation_restoring: HashSet<String> = config
+            .tab_states
+            .keys()
+            .cloned()
+            .chain(config.selections.keys().cloned())
+            .collect();
         let user_formatter = UserFormatter::from_config(&config)
             .expect("configuration is validated before creating UI state");
         config.active_tab = config.active_tab.min(3 + config.views.len());
@@ -62,22 +93,6 @@ impl Component for Cronk {
             None
         };
         let items = if is_demo { demo::items() } else { vec![] };
-        let mut current_iterations = HashMap::new();
-        if is_demo {
-            for item in &items {
-                if let (Some(id), false) = (item.iteration_id, item.iteration.trim().is_empty()) {
-                    current_iterations
-                        .entry(item.key.project)
-                        .or_insert_with(|| {
-                            Some(CurrentIteration {
-                                id,
-                                title: item.iteration.clone(),
-                                description: format!("{} · Demo · ID {id}", item.iteration),
-                            })
-                        });
-                }
-            }
-        }
         let selected = config
             .selections
             .get(&config.active_tab.to_string())
@@ -98,7 +113,17 @@ impl Component for Cronk {
             .as_ref()
             .map_or(config.section.unwrap_or(0), |tab| tab.section_cursor)
             .min(section_last);
-        State {
+        let mut state = State {
+            saved_config: config.clone(),
+            navigation_writer,
+            navigation_snapshot,
+            navigation_selections,
+            navigation_hydrated: HashSet::new(),
+            navigation_routes_restoring: navigation_restoring.clone(),
+            navigation_restoring,
+            navigation_reported_error: navigation_error.clone(),
+            navigation_exit_failed: false,
+            navigation_error: navigation_error.clone(),
             config,
             feedback: Default::default(),
             demo: is_demo,
@@ -141,13 +166,13 @@ impl Component for Cronk {
             log_search: None,
             dialog: None,
             onboarding: Default::default(),
-            current_iterations,
+            current_iterations: HashMap::new(),
             status: if is_demo {
                 "Demo workspace · no requests or remote writes".into()
             } else {
                 "Connecting to GitLab…".into()
             },
-            error: None,
+            error: navigation_error,
             list_pending: HashSet::new(),
             detail_pending: None,
             trace_pending: HashSet::new(),
@@ -163,11 +188,25 @@ impl Component for Cronk {
             tick: 0,
             lookup_epoch: 0,
             lookup_inflight: None,
+        };
+        state.reset_current_iterations();
+        state.remember_selection();
+        if is_demo || state.config.active_tab == 1 {
+            state.restore_selection(true);
+        }
+        state
+    }
+
+    fn unmount(&mut self, ctx: &mut Context<Self>) {
+        if let Err(error) = ctx.state.flush_navigation() {
+            eprintln!("{error:#}");
         }
     }
 
     fn init(&mut self, ctx: &mut Context<Self>) -> Option<Command> {
         self.enable_cache(ctx);
+        // Capture resolved legacy identities without changing portable TOML.
+        self.persist(ctx);
         ctx.link().send(Msg::Tick);
         ctx.link().send(Msg::Refresh);
         if ctx.state.config.onboarding {
@@ -193,6 +232,19 @@ impl Component for Cronk {
             )
         {
             return Update::none();
+        }
+        if ctx.state.scope == Scope::List
+            && ctx.state.dialog.is_none()
+            && matches!(
+                &msg,
+                Msg::Move(_) | Msg::Select(_) | Msg::Activate(_) | Msg::ListScroll(_)
+            )
+        {
+            // Section/field movement and dialog input do not own the list's
+            // pending identity. Explicit list navigation does.
+            let key = ctx.state.tab_key();
+            ctx.state.navigation_restoring.remove(&key);
+            ctx.state.navigation_routes_restoring.remove(&key);
         }
         if matches!(
             &msg,
@@ -243,6 +295,16 @@ impl Component for Cronk {
                 };
             }
             Msg::Tick => {
+                let error = ctx
+                    .state
+                    .navigation_writer
+                    .as_ref()
+                    .and_then(|writer| writer.error())
+                    .or_else(|| ctx.state.navigation_error.clone());
+                if ctx.state.error == ctx.state.navigation_reported_error || error.is_some() {
+                    ctx.state.error = error.clone();
+                }
+                ctx.state.navigation_reported_error = error;
                 ctx.state.tick += 1;
                 let now = ctx.elapsed();
                 if now >= ctx.state.blocked_until
@@ -295,8 +357,18 @@ impl Component for Cronk {
                         Ok(()) => {
                             ctx.state.shared_details.clear();
                             ctx.state.tab_cache.clear();
+                            // Content eviction is not a navigation reset. Retain
+                            // routes, cursor identities, offsets and job choices.
+                            ctx.state.remember_selection();
+                            ctx.state
+                                .navigation_restoring
+                                .extend(ctx.state.navigation_selections.keys().cloned());
+                            ctx.state
+                                .navigation_routes_restoring
+                                .extend(ctx.state.config.tab_states.keys().cloned());
+                            ctx.state.navigation_hydrated.clear();
                             ctx.state.items.clear();
-                            self.reset_detail(ctx);
+                            self.clear_detail_content(ctx);
                             ctx.state.next_lists = Duration::MAX;
                             ctx.state.next_details = Duration::MAX;
                             ctx.state.next_traces = Duration::MAX;
@@ -397,7 +469,7 @@ impl Component for Cronk {
                     ctx.state.status =
                         "GitLab backoff is active; refresh will resume automatically".into();
                 } else {
-                    ctx.state.error = None;
+                    ctx.state.error = ctx.state.navigation_error.clone();
                     if let Some(key) = ctx.state.config.route.as_ref()
                         && let Some((_, due)) = ctx.state.shared_details.get_mut(key)
                     {
@@ -459,7 +531,12 @@ impl Component for Cronk {
             Msg::UserLoaded(result) => {
                 ctx.state.user_pending = false;
                 match result {
-                    Ok(user) => ctx.state.user = user,
+                    Ok(user) => {
+                        ctx.state.user = user;
+                        ctx.state
+                            .restore_selection(ctx.state.navigation_hydration_complete());
+                        self.persist(ctx);
+                    }
                     Err(error) => self.network_error(ctx, error),
                 }
             }
@@ -482,6 +559,7 @@ impl Component for Cronk {
                     .map(|i| i.key.clone());
                 match result {
                     Ok((items, current_iteration)) => {
+                        ctx.state.navigation_hydrated.insert(id);
                         ctx.state.items.retain(|i| i.key.project != id);
                         ctx.state.items.extend(items);
                         ctx.state.current_iterations.insert(id, current_iteration);
@@ -491,6 +569,8 @@ impl Component for Cronk {
                         {
                             ctx.state.scroll.selected = index;
                         }
+                        ctx.state
+                            .restore_selection(ctx.state.navigation_hydration_complete());
                         self.normalize(ctx);
                         self.persist(ctx);
                         if ctx.state.list_pending.is_empty() {
@@ -678,6 +758,7 @@ impl Component for Cronk {
                         }) {
                             self.close_log_mode(ctx);
                         }
+                        ctx.state.remember_selection();
                         ctx.state.status = "Detail updated".into();
                         ctx.link().send(Msg::LoadTraces);
                     }
@@ -910,6 +991,9 @@ impl Component for Cronk {
                             ctx.state.reveal_content = false;
                         }
                         Scope::Details => {
+                            ctx.state.remember_selection();
+                            let tab = ctx.state.tab_key();
+                            ctx.state.navigation_routes_restoring.remove(&tab);
                             ctx.state.scope = Scope::List;
                             ctx.state.config.route = None;
                             ctx.state.config.project_route = None;
@@ -922,6 +1006,8 @@ impl Component for Cronk {
                             ctx.state.collapsed.clear();
                             ctx.state.log_views.clear();
                             ctx.state.content_offset = 0;
+                            ctx.state.restore_selection(false);
+                            self.normalize(ctx);
                         }
                         Scope::List => return Update::none(),
                     }
@@ -1554,6 +1640,16 @@ impl Cronk {
         let tab = navigation(&ctx.state);
         ctx.state.config.tab_states.insert(key, tab);
         prune_tab_routes(&mut ctx.state.config);
+        ctx.state.invalidate_hidden_navigation();
+        if ctx.state.config.route.as_ref().is_some_and(|route| {
+            !ctx.state
+                .config
+                .projects
+                .iter()
+                .any(|p| p.id == route.project && p.visible)
+        }) {
+            self.reset_detail(ctx);
+        }
         let config = &ctx.state.config;
         let visible: HashSet<_> = config
             .projects
@@ -1574,11 +1670,45 @@ impl Cronk {
                 .get(key)
                 .is_some_and(|tab| tab.route.is_some())
         });
-        if let Some(path) = &self.path
-            && let Err(error) = ctx.state.config.save(path)
-        {
-            ctx.state.error = Some(format!("Workspace not saved: {error:#}"));
-            return false;
+        if !ctx.state.config.portable_eq(&ctx.state.saved_config) {
+            let installation_changed = ctx.state.config.gitlab_url.trim_end_matches('/')
+                != ctx.state.saved_config.gitlab_url.trim_end_matches('/');
+            if let Some(path) = &self.path
+                && let Err(error) = ctx.state.config.save(path)
+            {
+                ctx.state.error = Some(format!("Workspace not saved: {error:#}"));
+                return false;
+            }
+            ctx.state.saved_config = ctx.state.config.clone();
+            if installation_changed {
+                // Only discard old installation UI state after config save
+                // succeeds. The same background writer opens the new namespace.
+                self.reset_detail(ctx);
+                ctx.state.config.clear_navigation();
+                ctx.state.navigation_selections.clear();
+                ctx.state.navigation_restoring.clear();
+                ctx.state.navigation_routes_restoring.clear();
+                ctx.state.navigation_hydrated.clear();
+                ctx.state.items.clear();
+                ctx.state
+                    .config
+                    .tab_states
+                    .insert("0".into(), navigation(&ctx.state));
+                ctx.state.config.selections.insert("0".into(), 0);
+                ctx.state.scroll = BoundaryScroll::default();
+            }
+        }
+        ctx.state.remember_selection();
+        if let Some(writer) = &ctx.state.navigation_writer {
+            let snapshot = crate::navigation::Snapshot::capture(
+                &ctx.state.config,
+                &ctx.state.navigation_selections,
+                ctx.state.demo,
+            );
+            if ctx.state.navigation_snapshot.as_ref() != Some(&snapshot) {
+                writer.submit(snapshot.clone());
+                ctx.state.navigation_snapshot = Some(snapshot);
+            }
         }
         true
     }
@@ -1616,10 +1746,21 @@ impl Cronk {
         {
             ctx.state.scroll.selected = index;
         }
+        ctx.state.restore_selection(false);
         self.normalize(ctx);
     }
 
     fn normalize(&self, ctx: &mut Context<Self>) {
+        if !ctx.state.demo
+            && ctx.state.items.is_empty()
+            && ctx.state.config.active_tab != 1
+            && ctx
+                .state
+                .navigation_restoring
+                .contains(&ctx.state.tab_key())
+        {
+            return;
+        }
         let len = if ctx.state.config.active_tab == 1 {
             ctx.state.config.projects.len()
         } else {
@@ -1749,6 +1890,7 @@ impl Cronk {
         }
         ctx.state.feedback.clear();
         let key = ctx.state.tab_key();
+        ctx.state.remember_selection();
         let tab = navigation(&ctx.state);
         ctx.state.config.tab_states.insert(key.clone(), tab);
         ctx.state
@@ -1771,6 +1913,9 @@ impl Cronk {
         ctx.state.tab_cache.insert(key, cache);
         ctx.state.config.active_tab = index;
         let key = ctx.state.tab_key();
+        if ctx.state.navigation_selections.contains_key(&key) {
+            ctx.state.navigation_restoring.insert(key.clone());
+        }
         let selected = ctx.state.config.selections.get(&key).copied().unwrap_or(0);
         let tab = ctx
             .state
@@ -1831,6 +1976,9 @@ impl Cronk {
         };
         // Avoid discarding a restored cursor while the first live list is still loading.
         if self.api.is_none() || !ctx.state.items.is_empty() || index == 1 {
+            ctx.state.restore_selection(
+                self.demo || index == 1 || ctx.state.navigation_hydration_complete(),
+            );
             self.normalize(ctx);
         }
         if ctx.state.config.route.is_some() {
@@ -1843,6 +1991,9 @@ impl Cronk {
     }
 
     fn open_project(&self, ctx: &mut Context<Self>, id: u64) {
+        let tab = ctx.state.tab_key();
+        ctx.state.navigation_restoring.remove(&tab);
+        ctx.state.navigation_routes_restoring.remove(&tab);
         ctx.state.detail_viewport = None;
         ctx.state.detail_offset_request = None;
         ctx.state.reveal_content = true;
@@ -1875,7 +2026,24 @@ impl Cronk {
         ctx.state.log_height(ctx.viewport().h, id)
     }
 
+    /// Drop credential-specific buffers without resetting machine-local routes,
+    /// positions or expansion choices (cache eviction and client replacement).
+    pub(super) fn clear_detail_content(&self, ctx: &mut Context<Self>) {
+        ctx.state.details = None;
+        ctx.state.detail_epoch += 1;
+        ctx.state.detail_pending = None;
+        ctx.state.trace_pending.clear();
+        ctx.state.traces.clear();
+        ctx.state.log_views.clear();
+        ctx.state.detail_viewport = None;
+        ctx.state.detail_offset_request = Some(ctx.state.content_offset);
+        self.close_log_mode(ctx);
+    }
+
     pub(super) fn reset_detail(&self, ctx: &mut Context<Self>) {
+        ctx.state.remember_selection();
+        let tab = ctx.state.tab_key();
+        ctx.state.navigation_routes_restoring.remove(&tab);
         ctx.state.config.route = None;
         ctx.state.config.project_route = None;
         ctx.state.config.section = None;
@@ -1892,9 +2060,14 @@ impl Cronk {
         self.close_log_mode(ctx);
         ctx.state.section_cursor = 0;
         ctx.state.content_offset = 0;
+        ctx.state.restore_selection(false);
+        self.normalize(ctx);
     }
 
     fn open_item(&self, ctx: &mut Context<Self>, key: ItemKey) {
+        let tab = ctx.state.tab_key();
+        ctx.state.navigation_restoring.remove(&tab);
+        ctx.state.navigation_routes_restoring.remove(&tab);
         ctx.state.detail_viewport = None;
         ctx.state.detail_offset_request = None;
         ctx.state.reveal_content = true;
@@ -2240,7 +2413,25 @@ impl Cronk {
                 self.show_onboarding(ctx);
                 return Update::with_command(self.schedule_setup(ctx));
             }
-            Action::Quit => { if self.persist(ctx) { ctx.quit(); } }
+            Action::Quit => {
+                if self.persist(ctx) {
+                    match ctx.state.flush_navigation() {
+                        Ok(()) => ctx.quit(),
+                        Err(error) if ctx.state.navigation_exit_failed => {
+                            let error = format!("{error:#} · exiting with unsaved local navigation");
+                            eprintln!("{error}");
+                            ctx.state.error = Some(error);
+                            ctx.quit();
+                        }
+                        Err(error) => {
+                            ctx.state.navigation_exit_failed = true;
+                            let error = format!("{error:#} · Quit again to retry, then exit even if saving fails");
+                            ctx.state.navigation_reported_error = Some(error.clone());
+                            ctx.state.error = Some(error);
+                        }
+                    }
+                }
+            }
             Action::Help => self.show_dialog(ctx, DialogKind::Help, "Keyboard guide", "Esc returns to your workspace", vec![]),
             Action::Themes => self.show_dialog(ctx, DialogKind::Themes, "Choose theme", "↑/↓ or Tab previews · Enter applies · Esc reverts · config colors remain overrides", vec![]),
             Action::Filter => {
@@ -2397,6 +2588,8 @@ impl Cronk {
                     return Update::full();
                 }
                 let key = ctx.state.tab_key();
+                ctx.state.navigation_restoring.remove(&key);
+                ctx.state.navigation_routes_restoring.remove(&key);
                 ctx.state.config.filters.insert(key, first.into());
                 ctx.state.scroll = BoundaryScroll::default();
                 self.close_dialog(ctx);
@@ -2490,6 +2683,11 @@ impl Cronk {
                     shift_tab_map(&mut ctx.state.config.filters, removed);
                     shift_tab_map(&mut ctx.state.config.selections, removed);
                     shift_tab_map(&mut ctx.state.config.tab_states, removed);
+                    shift_tab_map(&mut ctx.state.navigation_selections, removed);
+                    ctx.state.navigation_restoring =
+                        shift_tab_set(&ctx.state.navigation_restoring, removed);
+                    ctx.state.navigation_routes_restoring =
+                        shift_tab_set(&ctx.state.navigation_routes_restoring, removed);
                     shift_tab_map(&mut ctx.state.tab_cache, removed);
                 }
                 self.close_dialog(ctx);
@@ -2673,6 +2871,12 @@ fn retry_after(error: &str, now: std::time::SystemTime) -> u64 {
                 .map(|date| date.duration_since(now).unwrap_or_default().as_secs())
         })
         .unwrap_or(0)
+}
+
+fn shift_tab_set(set: &HashSet<String>, removed: usize) -> HashSet<String> {
+    let mut map: BTreeMap<_, _> = set.iter().map(|key| (key.clone(), ())).collect();
+    shift_tab_map(&mut map, removed);
+    map.into_keys().collect()
 }
 
 fn shift_tab_map<T>(map: &mut std::collections::BTreeMap<String, T>, removed: usize) {

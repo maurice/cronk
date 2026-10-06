@@ -92,6 +92,16 @@ pub enum Scope {
 
 pub struct State {
     pub config: Config,
+    pub(super) saved_config: Config,
+    pub(super) navigation_writer: Option<crate::navigation::Writer>,
+    pub(super) navigation_snapshot: Option<crate::navigation::Snapshot>,
+    pub(super) navigation_selections: BTreeMap<String, crate::navigation::Selection>,
+    pub(super) navigation_restoring: HashSet<String>,
+    pub(super) navigation_routes_restoring: HashSet<String>,
+    pub(super) navigation_hydrated: HashSet<u64>,
+    pub(super) navigation_error: Option<String>,
+    pub(super) navigation_reported_error: Option<String>,
+    pub(super) navigation_exit_failed: bool,
     feedback: interaction::Feedback,
     pub demo: bool,
     pub scope: Scope,
@@ -395,6 +405,215 @@ fn editable_field_definitions(
 }
 
 impl State {
+    /// Discard client metadata. Demo has no network hydration, so reconstruct
+    /// its current iterations only from the freshly installed fictional items.
+    pub(super) fn reset_current_iterations(&mut self) {
+        self.current_iterations.clear();
+        if self.demo {
+            for item in &self.items {
+                if let (Some(id), false) = (item.iteration_id, item.iteration.trim().is_empty()) {
+                    self.current_iterations
+                        .entry(item.key.project)
+                        .or_insert_with(|| {
+                            Some(CurrentIteration {
+                                id,
+                                title: item.iteration.clone(),
+                                description: format!("{} · Demo · ID {id}", item.iteration),
+                            })
+                        });
+                }
+            }
+        }
+    }
+
+    /// Explicit durability boundary for orderly exit and headless callers.
+    /// Routine UI commits only enqueue a bounded latest snapshot.
+    pub fn flush_navigation(&self) -> anyhow::Result<()> {
+        if let Some(writer) = &self.navigation_writer {
+            writer.flush()?;
+        } else if let Some(error) = &self.navigation_error {
+            anyhow::bail!("{error}");
+        }
+        Ok(())
+    }
+
+    pub(super) fn selection_index(
+        &self,
+        selection: &crate::navigation::Selection,
+    ) -> Option<usize> {
+        use crate::navigation::Selection;
+        match selection {
+            Selection::Item(selected) => {
+                self.visible_items().iter().position(|i| &i.key == selected)
+            }
+            Selection::Project(id) => self.config.projects.iter().position(|p| &p.id == id),
+            Selection::Legacy(index) => Some(*index),
+        }
+    }
+
+    pub(super) fn remember_selection(&mut self) {
+        use crate::navigation::Selection;
+        let key = self.tab_key();
+        let open = (self.scope != Scope::List)
+            .then(|| {
+                if self.config.active_tab == 1 {
+                    self.config.project_route.map(Selection::Project)
+                } else {
+                    self.config.route.clone().map(Selection::Item)
+                }
+            })
+            .flatten()
+            .filter(|selection| match selection {
+                Selection::Item(item) => self
+                    .config
+                    .projects
+                    .iter()
+                    .any(|p| p.id == item.project && p.visible),
+                Selection::Project(id) => self.config.projects.iter().any(|p| p.id == *id),
+                Selection::Legacy(_) => false,
+            });
+        if let Some(open) = open {
+            // Detail refreshes can reorder the list in place. Its old numeric
+            // slot must never replace the identity of the object being read.
+            if let Some(index) = self.selection_index(&open) {
+                self.scroll.selected = index;
+                self.config.selections.insert(key.clone(), index);
+            } else {
+                self.navigation_restoring.insert(key.clone());
+            }
+            self.navigation_selections.insert(key, open);
+            return;
+        }
+        if self.navigation_restoring.contains(&key) {
+            return;
+        }
+        let selected = if self.config.active_tab == 1 {
+            self.config
+                .projects
+                .get(self.scroll.selected)
+                .map(|p| Selection::Project(p.id))
+        } else {
+            self.visible_items()
+                .get(self.scroll.selected)
+                .map(|i| Selection::Item(i.key.clone()))
+        };
+        if let Some(selected) = selected {
+            self.navigation_selections.insert(key, selected);
+        } else {
+            self.navigation_selections.remove(&key);
+        }
+    }
+
+    pub(super) fn invalidate_hidden_navigation(&mut self) {
+        use crate::navigation::Selection;
+        let invalid: Vec<_> = self
+            .navigation_selections
+            .iter()
+            .filter_map(|(key, selection)| {
+                let valid = match selection {
+                    Selection::Item(item) => self
+                        .config
+                        .projects
+                        .iter()
+                        .any(|p| p.id == item.project && p.visible),
+                    Selection::Project(id) => self.config.projects.iter().any(|p| p.id == *id),
+                    Selection::Legacy(_) => true,
+                };
+                (!valid).then(|| key.clone())
+            })
+            .collect();
+        for key in invalid {
+            self.navigation_selections.remove(&key);
+            self.navigation_restoring.remove(&key);
+            self.navigation_routes_restoring.remove(&key);
+            self.config.selections.insert(key.clone(), 0);
+            if let Some(tab) = self.config.tab_states.get_mut(&key) {
+                tab.list_offset = 0;
+            }
+            if key == self.tab_key() {
+                self.scroll = BoundaryScroll::default();
+            }
+        }
+        self.navigation_routes_restoring.retain(|key| {
+            self.config
+                .tab_states
+                .get(key)
+                .is_some_and(|tab| tab.route.is_some() || tab.project_route.is_some())
+        });
+    }
+
+    pub(super) fn navigation_hydration_complete(&self) -> bool {
+        self.config
+            .projects
+            .iter()
+            .filter(|p| p.visible)
+            .all(|p| self.navigation_hydrated.contains(&p.id))
+    }
+
+    pub(super) fn restore_selection(&mut self, complete: bool) {
+        use crate::navigation::Selection;
+        let key = self.tab_key();
+        let restore_selection = self.navigation_restoring.contains(&key);
+        let restore_route = self.navigation_routes_restoring.contains(&key);
+        if !restore_selection && !restore_route {
+            return;
+        }
+        // @me/dashboard predicates require the authenticated identity.
+        if !self.demo && self.config.active_tab != 1 && self.user.id == 0 {
+            return;
+        }
+        let selection = self.navigation_selections.get(&key);
+        let selection_complete = complete
+            || match selection {
+                Some(Selection::Item(item)) => self.navigation_hydrated.contains(&item.project),
+                Some(Selection::Project(_)) => true, // Portable project list is authoritative.
+                Some(Selection::Legacy(_)) | None => false,
+            };
+        let index = selection.and_then(|selection| self.selection_index(selection));
+        if restore_selection {
+            if let Some(index) = index {
+                self.scroll.selected = index;
+            } else if selection_complete {
+                self.scroll.selected = 0;
+                self.scroll.offset = 0;
+            }
+        }
+        let route_complete = complete
+            || self
+                .config
+                .route
+                .as_ref()
+                .is_some_and(|route| self.navigation_hydrated.contains(&route.project))
+            || self.config.project_route.is_some();
+        // Validate each known identity against its owning project's successful
+        // snapshot. An unrelated failure must neither delete it nor retain it
+        // forever. Only anonymous legacy indices need global hydration proof.
+        if route_complete
+            && restore_route
+            && !self.project_details()
+            && self
+                .config
+                .route
+                .as_ref()
+                .is_some_and(|route| !self.visible_items().iter().any(|i| &i.key == route))
+        {
+            self.config.route = None;
+            self.config.section = None;
+            self.config.field = 0;
+            self.scope = Scope::List;
+            self.details = None;
+            self.content_offset = 0;
+            self.expanded.clear();
+            self.collapsed.clear();
+        }
+        if selection_complete {
+            self.navigation_restoring.remove(&key);
+        }
+        if route_complete {
+            self.navigation_routes_restoring.remove(&key);
+        }
+    }
+
     pub fn selected_job(&self) -> Option<&Job> {
         (self.scope == Scope::Section && self.section_name() == "Jobs")
             .then(|| self.details.as_ref()?.jobs.get(self.config.field))

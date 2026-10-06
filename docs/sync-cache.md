@@ -4,6 +4,8 @@
 
 The cloneable GitLab client shares the bounded HTTP validator cache and per-project sync locks. A workspace-specific SQLite database stores list identities, resource checkpoints, resumable import boundaries and viewed detail snapshots. The filename is a SHA-256 installation/credential fingerprint, not a credential. Token rotation intentionally starts a separate cache. The database does not contain tokens or trace bodies and is not encrypted.
 
+Machine-local navigation is persisted separately in a private `.state/` SQLite directory, without the credential fingerprint. Clearing this content cache or rotating a token does not reset navigation. See [navigation state](navigation-state.md) for migration, coalescing and shutdown contracts.
+
 UI detail content and request ownership are keyed by `ItemKey` (project, kind, IID) within the current client/account. Tab navigation keeps independent selection, scroll, expansion and log-reading state. Switching tabs does not cancel a useful detail request or initiate a duplicate one. Changing the GitLab setup clears client-specific UI caches; obsolete request IDs cannot populate the new account's view.
 
 ## List synchronization

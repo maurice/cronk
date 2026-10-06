@@ -6,5 +6,6 @@ pub mod demo;
 pub mod filter;
 pub mod gitlab;
 pub mod model;
+mod navigation;
 pub mod scroll;
 pub mod ui;

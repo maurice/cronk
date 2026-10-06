@@ -220,6 +220,8 @@ While requests are in progress, the solid dot beside **Syncing** gently cycles t
 
 ![Five-second syncing color cycle in midnight and light themes, using fictional demo data](docs/syncing-status.gif)
 
+[Reproduce and verify the animated preview](docs/syncing-preview.md).
+
 See [sync/cache design and the reproducible request-count comparison](docs/sync-cache.md).
 
 No background service, telemetry, third-party data service, or agent invocation is involved. Runtime network traffic goes only to your configured GitLab instance. The workspace TOML contains configuration/navigation, not cached GitLab content or tokens; job traces remain memory-only. Cache initialization errors are reported and fall back to memory-only operation.

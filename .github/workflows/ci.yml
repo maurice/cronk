@@ -33,6 +33,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Check local development workflow
+        run: just workflow-test
+
   release-build:
     name: Build release binary
     runs-on: ubuntu-latest

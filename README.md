@@ -239,7 +239,13 @@ No background service, telemetry, third-party data service, or agent invocation 
 
 ## Development
 
-Install [cargo-nextest](https://nexte.st/docs/installation/) once (CI uses version 0.9.146):
+Install [just](https://just.systems/man/en/installation.html) (1.16 or newer), Bash 4+ and `flock` (util-linux), plus [cargo-nextest](https://nexte.st/docs/installation/) once (CI uses version 0.9.146). Prefer pre-built packages/installers so setup does not add a lengthy Rust compilation:
+
+```sh
+brew install just  # or your system package manager
+```
+
+If a pre-built nextest installer is unavailable:
 
 ```sh
 cargo install cargo-nextest --locked --version 0.9.146
@@ -248,21 +254,24 @@ cargo install cargo-nextest --locked --version 0.9.146
 Pre-built binaries are also available from the installation link above to avoid compiling the runner.
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo nextest run --locked --all-targets
-cargo test --locked --doc
-cargo run --locked -- --demo --snapshot dashboard.png
-cargo run --locked --example gallery
+just setup                   # activate checked-in Git hooks
+just                         # discover tasks
+just check --lib             # compile/type feedback without linking
+just test-affected           # tests selected from changes vs origin/main
+just validate                # fmt, lint, full nextest suite, doctests
+just run -- --demo --snapshot dashboard.png
+just run --example gallery
 ```
 
 Release builds use `Cross.toml` to forward `GITHUB_SHA` into the build container. Before compiling, the release workflow sets the Cargo package version from the requested `v`-prefixed tag and updates the lockfile, making Cargo's package version the source of truth for both the TUI header and CLI output. It executes each target binary's `--version` (using cross's runner/emulation where needed) and checks it against the requested tag and source commit before packaging.
 
-Nextest runs the existing unit/integration tests without changes, scheduling tests across binaries with one process per test. `.config/nextest.toml` uses the available logical CPUs and disables retries; CI uses `--profile ci` to collect all failures. Nextest does not run doctests, so keep the separate `cargo test --locked --doc` command. The original `cargo test --locked --all-targets` remains a supported fallback if nextest is unavailable.
+Use the `justfile` tasks for local Rust commands. Heavy tasks queue across this repository's worktrees and default to two compiler jobs. Nextest defaults to two concurrent tests; CI explicitly uses all logical CPUs and collects every failure without retries. Development/test builds retain line-number debug information rather than full variable/type information.
 
-For a focused iteration, use `cargo nextest run --locked --test ui` (one integration-test target) or `cargo nextest run --locked --all-targets -E 'test(tab_switches)'` (matching test names). Avoid `--no-capture` when benchmarking: nextest runs tests serially in that mode. See [the runner comparison](docs/test-performance.md) for measured timings and reproduction steps.
+Unit/integration tests require nextest: there is no `cargo test` fallback. Nextest does not run doctests, so `just doc` is the only Cargo test runner exception. If nextest is missing, install it rather than changing runners.
 
-The pre-commit hook runs the formatting check and Clippy with warnings denied. It is installed by `cargo-husky` the first time you build tests with `cargo nextest run` or `cargo test` after fetching dependencies.
+For a focused iteration, use `just test-lib -E 'test(filter)'` or `just test-integration ui -E 'test(tab_switches)'`. `just test-affected [base-ref]` includes committed branch changes and local edits: integration-test-only changes select those binaries; shared source/dependency/build changes conservatively run all targets. Documentation-only changes skip Rust tests (run `just doc` for doctests). This is not a semantic dependency analysis. Avoid `--no-capture`: nextest runs tests serially in that mode. See [development feedback](docs/development.md) for task details, the resource budget and further optimization options, and [the historical runner comparison](docs/test-performance.md) for measured timings.
+
+The pre-commit hook runs `just fmt` and `just lint` with warnings denied. Run `just setup` to use the checked-in hook directly; this also picks up hook updates without rebuilding `cargo-husky`. It refuses to overwrite a custom hooks path. The hooks path setting is shared by linked worktrees, which each use their own checked-in hook version.
 
 `gallery` writes five deterministic PNG/Markdown captures to `.snapshots/` without touching your workspace or opening a terminal. Small-viewport and keyboard/mouse integration tests run through tui-lipan's actual headless runtime.
 

@@ -1,5 +1,7 @@
 # Test runner comparison
 
+This is a historical benchmark record, not the current agent workflow. Use [the bounded just tasks](development.md) for normal validation. Reproducing the runner comparison is an explicit benchmarking task only: it intentionally invokes the old runner and should never be part of routine agent checks. Current local defaults use two test processes and reduced debug info; CI still uses all logical CPUs.
+
 ## Results
 
 Measured on 2026-10-05 in an isolated worktree based on `7f9afc1`, with unchanged test sources and dependencies:
@@ -21,7 +23,7 @@ This is a useful improvement, not a claim of 3× speedup for this project. Cargo
 - Intel Core i7-1185G7, 4 physical cores / 8 logical CPUs available.
 - `rustc 1.97.1 (8bab26f4f 2026-07-14)`; `cargo-nextest 0.9.146`.
 - Default debug/test build profile; same isolated worktree and local `target/` directory for both runners. No release-profile or dependency changes.
-- Both runners use their default concurrency (8 logical CPUs); nextest's configuration makes that default explicit.
+- Both runners used their then-default concurrency (8 logical CPUs); the nextest configuration at the measured revision made that default explicit.
 - Test binaries were built first with `cargo test --locked --all-targets --no-run`; an unmeasured nextest run warmed execution/discovery. The initial build took 122.93 s and is **excluded** from the comparison.
 - Three measured pairs, ordered Cargo → nextest, nextest → Cargo, Cargo → nextest. Commands ran sequentially, never concurrently with each other. Whole-command wall time was measured with Python's monotonic clock; stdout/stderr went to log files for both runners. Warm Cargo checks, discovery and runner startup are included.
 - This was a shared development host, not an exclusive benchmark machine. Other agent activity and short tooling checks can affect timings, especially the first pair. The broad range is why all samples are shown rather than just the fastest run. These are local measurements, **not GitHub Actions CI timings** or guaranteed speedups on other machines.
@@ -70,4 +72,4 @@ for run, order in enumerate(orders, 1):
             raise SystemExit(result.returncode)
 ```
 
-Keep the Rust toolchain, nextest version, test targets, build profile, CPU allocation and output capture consistent. Avoid `--no-capture`, which serializes nextest execution. CI's `--profile ci` differs only in disabling fail-fast, so it still reports every failure without retries.
+Keep the Rust toolchain, nextest version, test targets, build profile, CPU allocation and output capture consistent. Avoid `--no-capture`, which serializes nextest execution. At the measured revision, CI's `--profile ci` differed only in disabling fail-fast. Today it also restores full CPU concurrency compared with the bounded local default; it still reports every failure without retries.

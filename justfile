@@ -22,7 +22,8 @@ setup-ci group='checks': _setup-native _bootstrap-mise
     case "$1" in
         rust) tools=(rust) ;;
         checks) tools=(rust nextest) ;;
-        release) tools=(rust cross) ;;
+        # The Cargo backend also requires configured optional install dependencies.
+        release) tools=(rust sccache cross) ;;
         *) echo 'Expected setup-ci group: rust, checks or release.' >&2; exit 2 ;;
     esac
     just _setup-tools "${tools[@]}"
@@ -335,7 +336,7 @@ sync-preview:
 
 # Restore manifest-pinned cross (normally handled by setup).
 install-cross:
-    @just _setup-tools rust cross
+    @just _setup-tools rust sccache cross
 
 # Set the package version for a release tag and update only the workspace lock entry.
 release-version tag:

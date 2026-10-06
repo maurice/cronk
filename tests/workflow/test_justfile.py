@@ -78,10 +78,27 @@ class JustWorkflowTests(unittest.TestCase):
         self.mise.parent.mkdir(parents=True)
         self.mise.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, os, sys\n"
+            "import json, os, pathlib, re, sys\n"
             "args = sys.argv[1:]\n"
             "with open(os.environ['MISE_LOG'], 'a') as log:\n"
             "    log.write(json.dumps(args) + '\\n')\n"
+            # Model mise v2026.10.3 src/backend/cargo.rs dependencies: rust,
+            # plus cargo-binstall/sccache when configured. Do not trust PATH:
+            # the selected managed versions must be installed or in this batch.
+            "if args[0] == 'install':\n"
+            "    manifest = pathlib.Path('mise.toml').read_text()\n"
+            "    configured = set(re.findall(r'(?m)^([\\w-]+)\\s*=', manifest.split('[tools]')[1]))\n"
+            "    aliases = dict(re.findall(r'(?m)^([\\w-]+)\\s*=\\s*\"([^\"]+)\"', manifest.split('[tool_alias]')[1].split('[tools]')[0]))\n"
+            "    requested = set(arg for arg in args[1:] if not arg.startswith('-')) or configured\n"
+            "    state = pathlib.Path(os.environ['MISE_INSTALL_STATE'])\n"
+            "    installed = set(json.loads(state.read_text())) if state.exists() else set()\n"
+            "    for tool in requested:\n"
+            "        if aliases.get(tool, '').startswith('cargo:'):\n"
+            "            dependencies = {'rust', 'cargo-binstall', 'sccache'} & configured\n"
+            "            missing = dependencies - requested - installed\n"
+            "            if missing:\n"
+            "                sys.exit('requires configured install dependencies: ' + ', '.join(sorted(missing)))\n"
+            "    state.write_text(json.dumps(sorted(installed | requested)))\n"
             "if args[0] == 'exec':\n"
             "    os.environ['RUSTUP_TOOLCHAIN'] = '1.99.0'\n"
             "    command = args[args.index('--') + 1:]\n"
@@ -98,6 +115,7 @@ class JustWorkflowTests(unittest.TestCase):
         self.mise_log = self.root / "mise.jsonl"
         self.env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}",
                     "CALL_LOG": str(self.log), "MISE_LOG": str(self.mise_log),
+                    "MISE_INSTALL_STATE": str(self.root / "installed-tools.json"),
                     "XDG_DATA_HOME": str(self.data), "FAKE_APPLICATION": str(application)}
         for name in ("CARGO_BUILD_JOBS", "CRONK_BUILD_JOBS", "CI", "GITHUB_ENV", "GITHUB_PATH"):
             self.env.pop(name, None)
@@ -251,7 +269,7 @@ class JustWorkflowTests(unittest.TestCase):
         entries = [json.loads(line) for line in self.mise_log.read_text().splitlines()]
         self.assertIn(["install", "--locked"], entries)
         for group, tools in (("rust", ["rust"]), ("checks", ["rust", "nextest"]),
-                             ("release", ["rust", "cross"])):
+                             ("release", ["rust", "sccache", "cross"])):
             result = self.run_just("setup-ci", group, env={"CI": "true"})
             self.assertEqual(result.returncode, 0, result.stderr)
             entries = [json.loads(line) for line in self.mise_log.read_text().splitlines()]
@@ -261,6 +279,25 @@ class JustWorkflowTests(unittest.TestCase):
         result = self.run_just("setup-ci", "rust", env={"CI": "true", "GITHUB_ENV": str(github_env)})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(github_env.read_text(), "RUSTUP_TOOLCHAIN=1.99.0\n")
+
+    def test_cross_installers_include_dependencies_on_fresh_runner(self):
+        state = Path(self.env["MISE_INSTALL_STATE"])
+        for task, env in ((("setup-ci", "release"), {"CI": "true"}),
+                          (("install-cross",), {})):
+            with self.subTest(task=task):
+                state.unlink(missing_ok=True)
+                # All fake tools are on PATH, but no managed version is installed.
+                # The old subset must fail, independent of the argument assertion.
+                result = self.run_just("_setup-tools", "rust", "cross", env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires configured install dependencies: sccache", result.stderr)
+                self.assertFalse(state.exists())
+                result = self.run_just(*task, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(set(json.loads(state.read_text())), {"rust", "sccache", "cross"})
+                self.assertFalse((self.repo / ".cargo/config.toml").exists())
+                entries = [json.loads(line) for line in self.mise_log.read_text().splitlines()]
+                self.assertEqual(entries[-1], ["install", "--locked", "rust", "sccache", "cross"])
 
     def test_missing_managed_environment_reports_setup(self):
         self.mise.unlink()

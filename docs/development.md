@@ -83,11 +83,13 @@ GitHub Actions uses the same public tasks:
 | Release version + workspace lock update | `just release-version v0.1.0` |
 | Rust-only bootstrap (format/native build jobs) | `just setup-ci rust` |
 | Rust + nextest bootstrap (test/lint job) | `just setup-ci checks` |
-| Rust + cross bootstrap (release job) | `just setup-ci release` |
+| Rust + sccache + cross bootstrap (release job) | `just setup-ci release` |
 | Cross-target release build | `just release-build aarch64-unknown-linux-gnu` |
 | Embedded version verification via target runner | `just release-check aarch64-unknown-linux-gnu v0.1.0 "$GITHUB_SHA"` |
 
 Under GitHub Actions' `CI=true`, heavy recipes bypass the local advisory lock and two-job default so isolated runners retain their normal compiler budget. Local commands retain coordination. Never set `CI=true` just to evade the local resource budget. CI/release runners do **not** activate the ignored optional mold/sccache configuration. The CI jobs remain independently parallelized; full coverage, release version checks and cross-runner/emulation behavior are preserved.
+
+The release subset includes pinned sccache because mise's Cargo backend requires configured optional install dependencies when compiling the Git-source cross tool. It does not install nextest or mold, or enable the optional Cargo fast-build configuration for release binaries. `just install-cross` uses the same dependency-complete subset.
 
 The release-version task changes the manifest and workspace lockfile intentionally; do not run it as normal edit-loop validation. Setup uses strict locked tool installation; CI caches tools by the manifest/lockfile/bootstrap content and exposes the selected Rust version to the artifact-cache action. Separate nextest/cross installer steps are no longer necessary.
 

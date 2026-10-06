@@ -3,6 +3,9 @@ min_version = "2026.10.3"
 
 [settings]
 lockfile = true
+# Feedback commands must never implicitly download/build unrelated CLI tools.
+exec_auto_install = false
+not_found_auto_install = false
 
 [tool_alias]
 nextest = "github:nextest-rs/nextest"

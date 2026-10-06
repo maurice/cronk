@@ -243,6 +243,9 @@ class JustWorkflowTests(unittest.TestCase):
         self.assertFalse((self.repo / ".cargo/config.toml").exists())
 
     def test_setup_uses_locked_tools_and_ci_selects_only_required_subset(self):
+        manifest = (self.repo / "mise.toml").read_text()
+        self.assertRegex(manifest, r'(?m)^exec_auto_install = false$')
+        self.assertRegex(manifest, r'(?m)^not_found_auto_install = false$')
         result = self.run_just("setup")
         self.assertEqual(result.returncode, 0, result.stderr)
         entries = [json.loads(line) for line in self.mise_log.read_text().splitlines()]

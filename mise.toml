@@ -1,22 +1,11 @@
-# Development CLI versions live here, not in application dependencies.
-min_version = "2026.10.3"
-
-[settings]
-lockfile = true
-# Feedback commands must never implicitly download/build unrelated CLI tools.
-exec_auto_install = false
-not_found_auto_install = false
-
+# Pinned dev CLIs. Rust itself is pinned in rust-toolchain.toml.
 [tool_alias]
 nextest = "github:nextest-rs/nextest"
 sccache = "github:mozilla/sccache"
-mold = "github:rui314/mold"
-cross = "cargo:https://github.com/cross-rs/cross"
 
 [tools]
-rust = { version = "1.99.0", profile = "minimal", components = ["clippy", "rustfmt"] }
 nextest = { version = "0.9.146", version_prefix = "cargo-nextest-", matching_regex = "^cargo-nextest-.*unknown-linux-gnu\\.tar\\.gz$" }
 sccache = { version = "0.18.0", matching_regex = "^sccache-v.*unknown-linux-musl\\.tar\\.gz$" }
-mold = "3.0.0"
-# Preserve the release workflow's Git-source cross installation, now pinned.
-cross = { version = "rev:74e99b2223de06166f8cdcc1af7f1308ec52baf4", crate = "cross" }
+
+[settings]
+lockfile = true

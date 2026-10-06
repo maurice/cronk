@@ -3,12 +3,6 @@
 debug
 target
 
-# Local workflow regression tests
-__pycache__/
-
-# Optional machine/worktree-specific Cargo configuration (just fast-setup)
-.cargo/config.toml
-
 # Local framework reference and UI captures
 .reference/
 .snapshots/

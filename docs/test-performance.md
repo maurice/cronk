@@ -1,6 +1,6 @@
 # Test runner comparison
 
-This is a historical benchmark record, not the current agent workflow. Use [the bounded just tasks](development.md) for normal validation. Reproducing the runner comparison is an explicit benchmarking task only: it intentionally invokes the old runner and should never be part of routine agent checks. Current local defaults use two test processes and reduced debug info; CI still uses all logical CPUs.
+This is a historical benchmark record, not the current agent workflow. Use [the just tasks](development.md) for normal validation. Reproducing the runner comparison is an explicit benchmarking task only: it intentionally invokes the old runner and should never be part of routine agent checks.
 
 ## Results
 
@@ -37,10 +37,10 @@ For normal validation, use the [development tasks](development.md), not the old 
 ```sh
 just test-all
 just doc
-# Isolated CI uses this nextest profile to collect every failure:
+# CI collects every failure:
 just test-ci
 ```
 
 Reproducing the historical Cargo-versus-nextest comparison requires explicitly checking out the measured revision and following its recorded methodology on an idle host; it is not a supported routine agent task. The old raw-Cargo reproduction script has intentionally been removed from current instructions.
 
-Keep the Rust toolchain, nextest version, test targets, build profile, CPU allocation and output capture consistent when measuring current tasks. Avoid `--no-capture`, which serializes nextest execution. At the measured revision, CI differed only in disabling fail-fast; `just test-ci` now also restores full CPU concurrency compared with the bounded local default and still reports every failure without retries. See [the build-tool trial](build-performance.md) for separate mold/sccache observations.
+Keep the Rust toolchain, nextest version, test targets, build profile, CPU allocation and output capture consistent when measuring current tasks. Avoid `--no-capture`, which serializes nextest execution. At the measured revision, CI differed only in disabling fail-fast; `just test-ci` does the same via `--no-fail-fast`.

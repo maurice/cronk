@@ -31,12 +31,26 @@ class JustWorkflowTests(unittest.TestCase):
         cargo = self.bin / "cargo"
         cargo.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, os, sys, time\n"
+            "import json, os, pathlib, sys, time\n"
             "if sys.argv[1:] == ['nextest', '--version']:\n"
             "    sys.exit(int(os.environ.get('MISSING_NEXTEST', '0')))\n"
             "with open(os.environ['CALL_LOG'], 'a') as log:\n"
             "    log.write(json.dumps({'args': (['cross'] if os.path.basename(sys.argv[0]) == 'cross' else []) + sys.argv[1:], 'cwd': os.getcwd(), "
             "'jobs': os.environ.get('CARGO_BUILD_JOBS')}) + '\\n')\n"
+            # Release metadata resolution needs the registry index even with a lockfile.
+            # Model a genuinely absent index, not unconditional fake-Cargo success.
+            "if os.environ.get('RELEASE_METADATA_GUARD') == '1' and sys.argv[1] == 'update':\n"
+            "    metadata = pathlib.Path(os.environ['CARGO_HOME']) / 'registry/index/config.json'\n"
+            "    if '--offline' in sys.argv and not metadata.exists():\n"
+            "        print('no matching package named `anyhow` found: registry metadata absent in offline mode', file=sys.stderr)\n"
+            "        sys.exit(101)\n"
+            "    if sys.argv[1:] != ['update', '--workspace']:\n"
+            "        sys.exit('release update must be workspace-only and allow registry access')\n"
+            "    if os.environ.get('REGISTRY_NETWORK_FAILURE') == '1':\n"
+            "        print('failed to download registry config.json', file=sys.stderr)\n"
+            "        sys.exit(101)\n"
+            "    metadata.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    metadata.write_text('{}')\n"
             "if '--message-format=json-render-diagnostics' in sys.argv:\n"
             "    print(json.dumps({'reason': 'compiler-artifact', 'target': {'kind': ['bin']}, 'executable': os.environ['FAKE_APPLICATION']}))\n"
             "time.sleep(float(os.environ.get('CARGO_DELAY', '0')))\n"
@@ -352,14 +366,56 @@ class JustWorkflowTests(unittest.TestCase):
         self.run_just("check", env={"CI": "true", "CARGO_BUILD_JOBS": "6"})
         self.assertEqual(self.calls()[-1]["jobs"], "6")
 
-    def test_release_version_updates_manifest_and_workspace_lock(self):
+    def test_release_version_updates_manifest_and_requests_workspace_lock_update(self):
         self.change("Cargo.toml", '[package]\nname = "cronk"\nversion = "0.0.0"\n')
         result = self.run_just("release-version", "v1.2.3-beta.1+build")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('version = "1.2.3-beta.1+build"', (self.repo / "Cargo.toml").read_text())
-        self.assertEqual(self.calls()[-1]["args"], ["update", "--workspace", "--offline"])
+        self.assertEqual(self.calls()[-1]["args"], ["update", "--workspace"])
         self.assertNotEqual(self.run_just("release-version", "v1.2.4").returncode, 0)
         self.assertNotEqual(self.run_just("release-version", 'invalid"tag').returncode, 0)
+
+    def test_release_version_resolves_missing_registry_metadata_without_updating_dependencies(self):
+        home = self.root / "empty-cargo-home"
+        home.mkdir()
+        env = {"CARGO_HOME": str(home), "RELEASE_METADATA_GUARD": "1"}
+        self.assertEqual(list(home.iterdir()), [])
+        # Prove that this fake rejects the previously broken command on a cold runner.
+        result = self.run_just("_cargo", "update", "--workspace", "--offline", env=env)
+        self.assertEqual(result.returncode, 101, result.stderr)
+        self.assertIn("registry metadata absent in offline mode", result.stderr)
+        self.assertEqual(list(home.iterdir()), [])
+        # A broad dependency update must not satisfy the release-preparation guard.
+        result = self.run_just("_cargo", "update", env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release update must be workspace-only", result.stderr)
+        self.assertEqual(list(home.iterdir()), [])
+        self.change("Cargo.toml", '[package]\nname = "cronk"\nversion = "0.0.0"\n')
+        result = self.run_just("release-version", "v0.0.5", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('version = "0.0.5"', (self.repo / "Cargo.toml").read_text())
+        self.assertEqual(self.calls()[-1]["args"], ["update", "--workspace"])
+        self.assertEqual(self.calls()[-1]["jobs"], "2")
+        self.assertTrue((home / "registry/index/config.json").exists())
+
+    def test_release_version_registry_failure_propagates_and_leaves_manifest_changed(self):
+        home = self.root / "empty-cargo-home"
+        home.mkdir()
+        env = {"CARGO_HOME": str(home), "RELEASE_METADATA_GUARD": "1",
+               "REGISTRY_NETWORK_FAILURE": "1"}
+        self.change("Cargo.toml", '[package]\nname = "cronk"\nversion = "0.0.0"\n')
+        lock = 'version = 4\n[[package]]\nname = "cronk"\nversion = "0.0.0"\n'
+        self.change("Cargo.lock", lock)
+        result = self.run_just("release-version", "v0.0.5", env=env)
+        self.assertEqual(result.returncode, 101, result.stderr)
+        self.assertIn("failed to download registry config.json", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.calls()[-1]["args"], ["update", "--workspace"])
+        self.assertEqual(list(home.iterdir()), [])
+        self.assertIn('version = "0.0.5"', (self.repo / "Cargo.toml").read_text())
+        self.assertEqual((self.repo / "Cargo.lock").read_text(), lock)
+        # Failure must release the coordination lock, not block later feedback.
+        self.assertEqual(self.run_just("check").returncode, 0)
 
     def test_release_check_verifies_target_binary_output(self):
         sha = "0123456789abcdef"

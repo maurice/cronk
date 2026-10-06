@@ -91,7 +91,7 @@ Under GitHub Actions' `CI=true`, heavy recipes bypass the local advisory lock an
 
 The release subset includes pinned sccache because mise's Cargo backend requires configured optional install dependencies when compiling the Git-source cross tool. It does not install nextest or mold, or enable the optional Cargo fast-build configuration for release binaries. `just install-cross` uses the same dependency-complete subset.
 
-The release-version task changes the manifest and workspace lockfile intentionally; do not run it as normal edit-loop validation. Setup uses strict locked tool installation; CI caches tools by the manifest/lockfile/bootstrap content and exposes the selected Rust version to the artifact-cache action. Separate nextest/cross installer steps are no longer necessary.
+The release-version task changes the manifest and workspace lockfile intentionally; do not run it as normal edit-loop validation. Its workspace-only lock update allows registry metadata downloads so cold runners work without changing locked dependency versions. Release builds and version checks retain `--locked`. If metadata resolution fails, the task fails but leaves the manifest version changed; restore the original manifest before retrying locally (CI retries use a fresh checkout). Setup uses strict locked tool installation; CI caches tools by the manifest/lockfile/bootstrap content and exposes the selected Rust version to the artifact-cache action. Separate nextest/cross installer steps are no longer necessary.
 
 ## Affected-file selection
 

@@ -26,29 +26,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
-
-      - name: Cache pinned tooling
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.local/share/cronk/mise
-            ~/.local/share/mise/installs
-            ~/.rustup/toolchains
-          key: tooling-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('mise.toml', 'mise.lock', '.config/mise-bootstrap.json') }}
-          restore-keys: tooling-${{ runner.os }}-${{ runner.arch }}-rust-
-
-      - name: Set up pinned tooling
-        run: just setup-ci rust
+      - name: Set up toolchain
+        uses: ./.github/actions/setup
 
       - name: Check formatting
         run: just fmt
-
-      - name: Check local development workflow
-        run: just workflow-test
 
   release-build:
     name: Build release binary
@@ -58,23 +40,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
-
-      - name: Cache pinned tooling
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.local/share/cronk/mise
-            ~/.local/share/mise/installs
-            ~/.rustup/toolchains
-          key: tooling-${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('mise.toml', 'mise.lock', '.config/mise-bootstrap.json') }}
-          restore-keys: tooling-${{ runner.os }}-${{ runner.arch }}-rust-
-
-      - name: Set up pinned tooling
-        run: just setup-ci rust
+      - name: Set up toolchain
+        uses: ./.github/actions/setup
 
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -90,23 +57,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
-
-      - name: Cache pinned tooling
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.local/share/cronk/mise
-            ~/.local/share/mise/installs
-            ~/.rustup/toolchains
-          key: tooling-${{ runner.os }}-${{ runner.arch }}-checks-${{ hashFiles('mise.toml', 'mise.lock', '.config/mise-bootstrap.json') }}
-          restore-keys: tooling-${{ runner.os }}-${{ runner.arch }}-checks-
-
-      - name: Set up pinned tooling
-        run: just setup-ci checks
+      - name: Set up toolchain
+        uses: ./.github/actions/setup
 
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2

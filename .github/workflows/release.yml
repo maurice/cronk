@@ -67,23 +67,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
-
-      - name: Cache pinned tooling
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.local/share/cronk/mise
-            ~/.local/share/mise/installs
-            ~/.rustup/toolchains
-          key: tooling-${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('mise.toml', 'mise.lock', '.config/mise-bootstrap.json') }}
-          restore-keys: tooling-${{ runner.os }}-${{ runner.arch }}-release-
-
-      - name: Set up pinned release tooling
-        run: just setup-ci release
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
 
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -93,19 +78,39 @@ jobs:
       - name: Set Cargo package version from release tag
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
-        run: just release-version "$TAG"
+        run: |
+          set -euo pipefail
+
+          if [[ "$(grep -c '^version = "0.0.0"$' Cargo.toml)" != 1 ]]; then
+            echo "Cargo.toml package version placeholder is missing or ambiguous" >&2
+            exit 1
+          fi
+          sed -i "s/^version = \"0.0.0\"$/version = \"${TAG#v}\"/" Cargo.toml
+          cargo update --workspace --offline
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 74e99b2223de06166f8cdcc1af7f1308ec52baf4 --locked
 
       - name: Build release binary
         env:
           GITHUB_SHA: ${{ github.sha }}
-        run: just release-build "${{ matrix.target }}"
+        run: cross build --locked --release --target ${{ matrix.target }} --bin $BINARY_NAME
 
       - name: Verify embedded release version
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
           GITHUB_SHA: ${{ github.sha }}
           TARGET: ${{ matrix.target }}
-        run: just release-check "$TARGET" "$TAG" "$GITHUB_SHA"
+        run: |
+          set -euo pipefail
+
+          expected="${BINARY_NAME} ${TAG}@${GITHUB_SHA:0:12}"
+          actual="$(cross run --locked --release --target "$TARGET" --bin "$BINARY_NAME" -- --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Release version mismatch: expected '$expected', got '$actual'" >&2
+            exit 1
+          fi
+          echo "$actual"
 
       - name: Package release archive
         env:

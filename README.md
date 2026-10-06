@@ -241,35 +241,21 @@ No background service, telemetry, third-party data service, or agent invocation 
 
 ## Development
 
-Install [just](https://just.systems/man/en/installation.html) 1.16 or newer, then run `just setup`. That is the onboarding path for Linux/WSL and Linux devcontainers—no separate nextest, sccache, mold or mise installation, and no shell activation needed.
-
-Tool versions live in `mise.toml`, artifact resolutions/checksums in `mise.lock`, and the verified mise bootstrap pin in `.config/mise-bootstrap.json`. Setup installs pinned Rust with rustfmt/Clippy, nextest, sccache, mold and cross; configures Git hooks; and enables the local mold/sccache configuration on x86-64. Most CLIs use upstream pre-built artifacts; cross preserves the release workflow's Git-source build, now at a pinned revision. Missing native compiler prerequisites are installed through APT on Debian/Ubuntu (setup may request sudo). Other Linux hosts need those native prerequisites available first.
-
-See [development setup](docs/development.md) for tool updates, container use and configuration safety. No dependency-update bot is configured.
+Install [just](https://just.systems/man/en/installation.html), [mise](https://mise.jdx.dev/getting-started.html) and [rustup](https://rustup.rs), plus a C compiler (`build-essential` on Debian/Ubuntu), then run `just setup`. It installs the Rust toolchain pinned in `rust-toolchain.toml`, nextest and sccache pinned in `mise.toml`/`mise.lock`, and activates the checked-in git hook.
 
 ```sh
-just setup                   # install pinned tooling, hooks and local fast config
-just                         # discover tasks
-just check --lib             # compile/type feedback without linking
-just test-affected           # tests selected from changes vs origin/main
-just validate                # fmt, lint, full nextest suite, doctests
+just                         # list tasks
+just check --lib             # type feedback without linking
+just test --lib -E 'test(name)'
+just test --test ui          # one integration binary
+just validate                # fmt, lint, all nextest targets, doctests
 just demo --snapshot dashboard.png
 just gallery
-just tools                   # inspect managed tooling versions
-just cache-stats
 ```
 
-CI uses `just fmt`, `just lint`, `just test-ci`, `just doc` and `just build-release`; isolated runners retain full compiler/test parallelism. CI bootstraps only each job's required tool subset through `just setup-ci`; releases use `just release-version`, `just release-build` and `just release-check`. `Cross.toml` forwards `GITHUB_SHA` into the build container. The package version is set from the requested `v`-prefixed tag, and each target binary's `--version` is checked (using cross's runner/emulation where needed) against the tag and source commit before packaging.
-
-Use the `justfile` tasks for local Rust commands. Heavy tasks queue across this repository's worktrees and default to two compiler jobs. Nextest defaults to two concurrent tests; CI explicitly uses all logical CPUs and collects every failure without retries. Development/test builds retain line-number debug information rather than full variable/type information. `just setup` enables mold and sccache in this worktree without changing global Cargo settings (`just fast-disable` removes the generated configuration); see [the measured trial](docs/build-performance.md) and [setup details](docs/development.md#optional-mold-and-sccache).
-
-Unit/integration tests require nextest: there is no `cargo test` fallback. Nextest does not run doctests, so `just doc` is the only Cargo test runner exception. If nextest is missing, run `just setup` rather than changing runners.
-
-For a focused iteration, use `just test-lib -E 'test(filter)'` or `just test-integration ui -E 'test(tab_switches)'`. `just test-affected [base-ref]` includes committed branch changes and local edits: integration-test-only changes select those binaries; shared source/dependency/build changes conservatively run all targets. Documentation-only changes skip Rust tests (run `just doc` for doctests). This is not a semantic dependency analysis. Avoid `--no-capture`: nextest runs tests serially in that mode. See [development feedback](docs/development.md) for task details, the resource budget and further optimization options, and [the historical runner comparison](docs/test-performance.md) for measured timings.
+Use `just` rather than raw Cargo: unit/integration tests run under nextest (`just doc` is the only `cargo test`, because nextest cannot run doctests). CI runs the same tasks. Releases use `cross` directly; `Cross.toml` forwards `GITHUB_SHA` into the build container, the package version is set from the requested `v`-prefixed tag, and each target binary's `--version` is checked against the tag and source commit before packaging. See [development notes](docs/development.md).
 
 The [large-list performance investigation](docs/large-list-performance.md) documents list windowing, SQLite access, a reproducible 3,000-MR workload, and follow-up profiling priorities.
-
-The pre-commit hook runs `just fmt` and `just lint` with warnings denied. Run `just setup` to use the checked-in hook directly; this also picks up hook updates without rebuilding `cargo-husky`. It refuses to overwrite a custom hooks path. The hooks path setting is shared by linked worktrees, which each use their own checked-in hook version.
 
 `gallery` writes six deterministic PNG/Markdown captures to `.snapshots/` without touching your workspace or opening a terminal. Small-viewport and keyboard/mouse integration tests run through tui-lipan's actual headless runtime.
 

@@ -2,29 +2,6 @@
 
 lockfile_version = 3
 
-[[tools.cross]]
-version = "rev:74e99b2223de06166f8cdcc1af7f1308ec52baf4"
-backend = "cargo:https://github.com/cross-rs/cross"
-specifiers = ["rev:74e99b2223de06166f8cdcc1af7f1308ec52baf4"]
-
-[tools.cross.options]
-crate = "cross"
-
-[[tools.mold]]
-version = "3.0.0"
-backend = "github:rui314/mold"
-specifiers = ["3.0.0"]
-
-[tools.mold."platforms.linux-arm64"]
-checksum = "sha256:52c759d3689babaea4c42af2f31062a74ab83e17ffb5a8090232534c67b70577"
-url = "https://github.com/rui314/mold/releases/download/v3.0.0/mold-3.0.0-aarch64-linux.tar.gz"
-url_api = "https://api.github.com/repos/rui314/mold/releases/assets/612121952"
-
-[tools.mold."platforms.linux-x64"]
-checksum = "sha256:6c90d4a474c7c0409dfb575be03a5345878ac14fdba18de8b40fa58c60121189"
-url = "https://github.com/rui314/mold/releases/download/v3.0.0/mold-3.0.0-x86_64-linux.tar.gz"
-url_api = "https://api.github.com/repos/rui314/mold/releases/assets/612122001"
-
 [[tools.nextest]]
 version = "0.9.146"
 backend = "github:nextest-rs/nextest"
@@ -45,15 +22,6 @@ checksum = "sha256:682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146/cargo-nextest-0.9.146-x86_64-unknown-linux-gnu.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/579609342"
 provenance = "github-attestations"
-
-[[tools.rust]]
-version = "1.99.0"
-backend = "core:rust"
-specifiers = ["1.99.0"]
-
-[tools.rust.options]
-components = "clippy,rustfmt"
-profile = "minimal"
 
 [[tools.sccache]]
 version = "0.18.0"

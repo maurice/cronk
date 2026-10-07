@@ -155,6 +155,7 @@ impl Colors {
         match status {
             "opened" | "success" | "passed" | "resolved" => ('●', self.green),
             "running" => ('◐', self.blue),
+            STATUS_FAILED_ALLOWED => ('●', self.yellow),
             "failed" | "error" | "unresolved" => ('●', self.red),
             "merged" => ('●', self.purple),
             "pending" | "created" | "waiting_for_resource" | "preparing" => ('○', self.pending),
@@ -248,6 +249,7 @@ fn status_help(subject: &str, status: &str) -> String {
         "success" | "passed" => "Completed successfully",
         "running" => "Currently running",
         "failed" | "error" => "Finished with an error",
+        STATUS_FAILED_ALLOWED => "Failed, but the job is allowed to fail",
         "pending" => "Waiting for an available runner",
         "created" => "Created, not yet queued for execution",
         "waiting_for_resource" => "Waiting for a required resource",
@@ -2178,15 +2180,12 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Deta
 }
 
 fn job_header(job: &Job, expanded: bool, colors: Colors) -> Vec<Span> {
-    let mut spans = vec![
+    let spans = vec![
         Span::new(if expanded { "− " } else { "+ " }).fg(colors.muted),
         Span::new(job.name.clone()).bold(),
         Span::new(format!("  {}  #{}  ", job.stage, job.id)).fg(colors.muted),
-        Span::new(job.status.clone()).fg(colors.status(&job.status).1),
+        Span::new(job.status.clone()).fg(colors.status(job.display_status()).1),
     ];
-    if job.allow_failure {
-        spans.push(Span::new("  ·  allowed failure").fg(colors.yellow));
-    }
     spans
 }
 
@@ -2443,15 +2442,7 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRo
                     Msg::ToggleJob(id)
                 },
             )
-            .with_status(
-                format!("job-{id}-status"),
-                if job.allow_failure {
-                    "Job (failure is allowed)"
-                } else {
-                    "Job"
-                },
-                &job.status,
-            ),
+            .with_status(format!("job-{id}-status"), "Job", job.display_status()),
         );
         if expanded {
             let mut row = DetailRow::keyed(
@@ -3561,6 +3552,20 @@ mod tests {
     }
 
     #[test]
+    fn allowed_failures_are_yellow_and_plain_failures_red() {
+        let colors = Colors::new(&Config::default());
+        let job = |allow_failure| Job {
+            status: "failed".into(),
+            allow_failure,
+            ..Job::default()
+        };
+        assert_eq!(colors.status(job(true).display_status()).1, colors.yellow);
+        assert_eq!(colors.status(job(false).display_status()).1, colors.red);
+        let spans = job_header(&job(true), false, colors);
+        assert!(spans.iter().all(|s| !format!("{s:?}").contains("allowed")));
+    }
+
+    #[test]
     fn status_tooltips_explain_known_states_and_preserve_unknown_values() {
         for status in [
             "opened",
@@ -3571,6 +3576,7 @@ mod tests {
             "passed",
             "running",
             "failed",
+            "failed (allowed)",
             "error",
             "pending",
             "created",

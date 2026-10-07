@@ -494,6 +494,26 @@ impl Job {
     pub fn retryable(&self) -> bool {
         matches!(self.status.as_str(), "failed" | "canceled" | "success")
     }
+    /// Failed in a way that fails the pipeline (not an allowed failure).
+    pub fn failed_hard(&self) -> bool {
+        self.status == "failed" && !self.allow_failure
+    }
+    /// Status used for colouring: allowed failures are a warning, not an error.
+    pub fn display_status(&self) -> &str {
+        if self.status == "failed" && self.allow_failure {
+            STATUS_FAILED_ALLOWED
+        } else {
+            &self.status
+        }
+    }
+}
+
+/// Pseudo-statuses only used for colouring and tooltips. The text before ` (` is the label to show.
+pub const STATUS_FAILED_ALLOWED: &str = "failed (allowed)";
+
+/// The text to display for a (pseudo-)status.
+pub fn status_label(status: &str) -> &str {
+    status.split(" (").next().unwrap_or(status)
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -1214,8 +1214,9 @@ fn markdown(value: &str, colors: Colors) -> DocumentView {
     .markdown_compact(true)
     .render_diagrams(false)
     .style(colors.base())
-    // Passive document text is selectable, but is not a clickable control surface.
+    // Keep prose selectable without treating the whole document as a control.
     .hover_style(Style::new())
+    .on_click(tui_lipan::callbacks::open_document_link())
     .border(false)
     .padding(0)
     .line_numbers(false)
@@ -1527,8 +1528,56 @@ fn field_row_element(
         .into()
 }
 
+/// Use the library's document links rather than its single-line Hyperlink widget:
+/// Web URLs must remain selectable and wrap inside narrow detail panes.
+fn web_link(value: &str, colors: Colors) -> Element {
+    let url = reqwest::Url::parse(value).ok().filter(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && !value.chars().any(char::is_control)
+    });
+    if let Some(url) = url {
+        let destination: std::sync::Arc<str> = url.as_str().into();
+        let open = tui_lipan::callbacks::open_document_link();
+        markdown(&format!("<{url}>"), colors)
+            // tui-lipan 0.18.2 drops link ranges on wrapped document lines.
+            // This document contains only the URL, so bind its known destination
+            // explicitly while retaining native wrapping and text selection.
+            .on_click(Callback::new(move |mut event: DocumentClickEvent| {
+                event.link = Some(destination.clone());
+                open.emit(event);
+            }))
+            .width(Length::Flex(1))
+            .height(Length::Auto)
+            .scrollbar(false)
+            .scroll_wheel(false)
+            .into()
+    } else {
+        Text::new(if value.is_empty() { "—" } else { value }.to_owned())
+            .width(Length::Flex(1))
+            .height(Length::Auto)
+            .overflow(Overflow::Wrap)
+            .style(colors.base())
+            .into()
+    }
+}
+
 fn metadata(label: &str, value: impl Into<String>, colors: Colors) -> Element {
     let value = value.into();
+    let value_element = if label == "Web URL" {
+        web_link(&value, colors)
+    } else {
+        Text::new(if value.is_empty() {
+            "—".to_owned()
+        } else {
+            value
+        })
+        .width(Length::Flex(1))
+        .height(Length::Auto)
+        .overflow(Overflow::Wrap)
+        .style(Style::new().fg(colors.foreground))
+        .into()
+    };
     HStack::new()
         .style(colors.base())
         .height(Length::Auto)
@@ -1538,17 +1587,7 @@ fn metadata(label: &str, value: impl Into<String>, colors: Colors) -> Element {
                 .width(Length::Px(14))
                 .style(Style::new().fg(colors.muted)),
         )
-        .child(
-            Text::new(if value.is_empty() {
-                "—".to_owned()
-            } else {
-                value
-            })
-            .width(Length::Flex(1))
-            .height(Length::Auto)
-            .overflow(Overflow::Wrap)
-            .style(Style::new().fg(colors.foreground)),
-        )
+        .child(value_element)
         .into()
 }
 
@@ -2015,7 +2054,18 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
         content.push(blank().into());
     }
     for (label, value) in readonly {
-        if label == "Author" {
+        if label == "Web URL" {
+            content.push(
+                field_row_element(
+                    label,
+                    label_width,
+                    web_link(&value, colors),
+                    colors.muted,
+                    colors.base(),
+                )
+                .into(),
+            );
+        } else if label == "Author" {
             content.push(
                 field_row_element(
                     label,

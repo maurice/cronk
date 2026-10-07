@@ -61,7 +61,8 @@ fn mount(theme: &str) -> Ui {
             name: "compile".into(),
             stage: "build".into(),
             status: "failed".into(),
-            allow_failure: false,
+            // Allowed failures start collapsed; hard failures auto-expand (see below).
+            allow_failure: true,
             web_url: String::new(),
         },
         Job {
@@ -714,4 +715,35 @@ fn empty_and_error_traces_keep_fullscreen_status_visible_and_hide_the_scrollbar(
         assert!(text(&ui).lines().last().unwrap().contains("Loading trace"));
         assert!(ui.state().log_zoom);
     }
+}
+
+#[test]
+fn jobs_that_failed_without_being_allowed_to_start_expanded() {
+    let mut ui = mount("midnight");
+    let state = ui.state_mut();
+    state.expanded.clear();
+    state.collapsed.clear();
+    let jobs = &mut state.details.as_mut().unwrap().jobs;
+    jobs[0].allow_failure = false;
+    jobs[1].status = "failed".into();
+    jobs[1].allow_failure = true;
+    let (hard, soft) = (jobs[0].clone(), jobs[1].clone());
+    assert!(ui.state().job_expanded(&hard));
+    assert!(!ui.state().job_expanded(&soft));
+    // Its trace is fetched until finished, unless the user collapsed it.
+    ui.state_mut().traces.clear();
+    assert!(ui.state().trace_wanted(&hard));
+    assert!(!ui.state().trace_wanted(&soft));
+    ui.state_mut().collapsed.insert(hard.id);
+    assert!(!ui.state().job_expanded(&hard));
+    assert!(!ui.state().trace_wanted(&hard));
+    ui.state_mut().collapsed.clear();
+    ui.state_mut().traces.insert(
+        hard.id,
+        Trace {
+            finished: true,
+            ..Trace::default()
+        },
+    );
+    assert!(!ui.state().trace_wanted(&hard));
 }

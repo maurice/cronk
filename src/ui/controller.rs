@@ -1831,15 +1831,8 @@ impl Cronk {
             .jobs
             .iter()
             .filter(|job| {
-                (job.running()
-                    || ctx.state.expanded.contains(&job.id)
-                    || ctx.state.traces.contains_key(&job.id))
+                ctx.state.trace_wanted(job)
                     && !ctx.state.trace_pending.iter().any(|(_, id)| *id == job.id)
-                    && !ctx
-                        .state
-                        .traces
-                        .get(&job.id)
-                        .is_some_and(|t| t.finished && !job.running())
             })
             .map(|j| {
                 (

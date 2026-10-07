@@ -408,7 +408,7 @@ fn local_options(state: &State, c: &Completion) -> Vec<LookupOption> {
                     label: label.clone(),
                     value: label.clone(),
                     api_value: id.to_string(),
-                    description: format!("Demo · ID {id}"),
+                    description: "Demo".into(),
                     color: String::new(),
                     text_color: String::new(),
                 })

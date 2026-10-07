@@ -264,7 +264,11 @@ fn iteration_label(
     due: Option<&str>,
     current: bool,
 ) -> String {
-    let dates = crate::dates::format_range(start, due);
+    let dates = if start.is_none() && due.is_none() {
+        "Undated".to_owned()
+    } else {
+        crate::dates::format_range(start, due)
+    };
     let mut label = match title.map(str::trim).filter(|title| !title.is_empty()) {
         Some(title) => format!("{title} ({dates})"),
         None => dates,
@@ -294,13 +298,43 @@ impl IterationMatch {
         )
     }
 
-    /// Full path of the owning group, from `…/groups/<path>/-/iterations/<iid>`.
+    /// Full path of the owning group or project, from `…/groups/<path>/-/…` or `…/<path>/-/…`.
     fn group_path(&self) -> Option<String> {
         let url = Url::parse(self.web_url.as_deref()?).ok()?;
         let segments: Vec<_> = url.path_segments()?.collect();
-        let start = segments.iter().position(|s| *s == "groups")? + 1;
         let end = segments.iter().position(|s| *s == "-")?;
+        let start = if segments.first() == Some(&"groups") {
+            1
+        } else {
+            0
+        };
         (start < end).then(|| segments[start..end].join("/"))
+    }
+
+    /// Milestones are plain titles: no iteration-style date label or "Current" marker.
+    fn milestone_option(&self) -> LookupOption {
+        let title = self
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map_or_else(|| format!("Milestone {}", self.id), str::to_owned);
+        let dates = (self.start_date.is_some() || self.due_date.is_some()).then(|| {
+            crate::dates::format_range(self.start_date.as_deref(), self.due_date.as_deref())
+        });
+        LookupOption {
+            id: self.id,
+            value: title.clone(),
+            label: title,
+            api_value: self.id.to_string(),
+            description: [self.group_path(), dates]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · "),
+            color: String::new(),
+            text_color: String::new(),
+        }
     }
 
     /// Second line of a suggestion: owning group and, unless running, the state.
@@ -522,8 +556,14 @@ impl GitLab {
                 url.query_pairs_mut()
                     .append_pair("include_ancestors", "true");
                 if kind == LookupKind::Iterations {
+                    // With nothing typed, offer what can still be chosen: current and upcoming.
+                    let state = if query.trim().is_empty() {
+                        "opened"
+                    } else {
+                        "all"
+                    };
                     url.query_pairs_mut()
-                        .append_pair("state", "all")
+                        .append_pair("state", state)
                         .append_pair("in[]", "title")
                         .append_pair("in[]", "cadence_title");
                 }
@@ -531,7 +571,16 @@ impl GitLab {
                 let mut options: Vec<_> = entries
                     .iter()
                     .take(20)
-                    .map(|entry| (entry, entry.lookup_option()))
+                    .map(|entry| {
+                        (
+                            entry,
+                            if kind == LookupKind::Iterations {
+                                entry.lookup_option()
+                            } else {
+                                entry.milestone_option()
+                            },
+                        )
+                    })
                     .collect();
                 // The label is the identity the user picks by, so it must be unique.
                 let labels: Vec<_> = options.iter().map(|(_, o)| o.value.clone()).collect();
@@ -2702,6 +2751,25 @@ mod tests {
         assert!(item.iteration.contains("2026"), "{}", item.iteration);
         assert!(item.iteration.ends_with(" (Current)"), "{}", item.iteration);
         assert_eq!(item.iteration_id, Some(84001));
+    }
+
+    #[test]
+    fn milestones_keep_plain_titles_and_empty_iteration_search_lists_open_ones() {
+        let mock = Mock::new(|request| {
+            let params: HashMap<_, _> = request.url().query_pairs().into_owned().collect();
+            if request.url().path().ends_with("/iterations") {
+                assert_eq!(params["state"], "opened");
+            }
+            Reply::json(json!([
+                {"id":5,"title":"v1","state":"active","web_url":"https://gl/acme/app/-/milestones/2"}
+            ]))
+        });
+        let milestones = mock.client().lookup(7, LookupKind::Milestones, "").unwrap();
+        assert_eq!(milestones[0].value, "v1");
+        assert_eq!(milestones[0].description, "acme/app");
+        mock.client()
+            .lookup(7, LookupKind::Iterations, " ")
+            .unwrap();
     }
 
     #[test]

@@ -15,6 +15,10 @@ env:
   BINARY_NAME: cronk
   CARGO_TERM_COLOR: always
   GITHUB_TOKEN: ${{ github.token }}
+  # Silences git's "initial branch name" hint printed by actions/checkout.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
 
 jobs:
   prepare:
@@ -68,7 +72,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install pinned Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: rustup toolchain install
 
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -90,6 +94,11 @@ jobs:
           cargo update --workspace
 
       - name: Install cross
+        # Run outside the checkout so rustup's toolchain-file override warning
+        # does not fire, and cap lints so cross's own rustc warnings stay quiet.
+        working-directory: ${{ runner.temp }}
+        env:
+          RUSTFLAGS: --cap-lints allow
         run: cargo install cross --git https://github.com/cross-rs/cross --rev 74e99b2223de06166f8cdcc1af7f1308ec52baf4 --locked
 
       - name: Build release binary
@@ -176,6 +185,9 @@ jobs:
 
       - name: Create draft release
         uses: softprops/action-gh-release@v3
+        env:
+          # Upstream's bundled Node code triggers DEP0005 (Buffer()).
+          NODE_OPTIONS: --no-deprecation
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: ${{ needs.prepare.outputs.tag }}

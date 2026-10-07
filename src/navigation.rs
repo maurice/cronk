@@ -45,7 +45,10 @@ struct SavedTab {
 }
 
 fn hash(value: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(value))
+    Sha256::digest(value)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn identity(config: &Config, index: usize) -> String {

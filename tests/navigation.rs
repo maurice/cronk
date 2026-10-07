@@ -47,12 +47,15 @@ fn mount(config: Config, path: Option<&Path>, demo: bool) -> Box<Ui> {
 }
 
 fn dbpath(path: &Path, config: &Config, demo: bool) -> PathBuf {
-    let namespace = Sha256::digest(format!(
+    let namespace: String = Sha256::digest(format!(
         "{}\0{demo}",
         config.gitlab_url.trim_end_matches('/')
-    ));
+    ))
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect();
     path.with_extension("state")
-        .join(format!("{namespace:x}.sqlite3"))
+        .join(format!("{namespace}.sqlite3"))
 }
 
 fn selected(ui: &Ui) -> ItemKey {

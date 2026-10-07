@@ -229,7 +229,14 @@ fn detail_padding_and_status_slots_align_with_lists_in_every_theme() {
             if kind == ItemKind::MergeRequest {
                 assert_eq!(rect(&ui, "detail-pipeline-status").x, 2);
                 assert_tooltip(&mut ui, "detail-pipeline-status", "Pipeline:");
+                let jobs = ui.state().details.as_ref().unwrap().jobs.clone();
                 for status in ["running", "pending", "success", "failed"] {
+                    // Empty groups are not shown.
+                    if !jobs.iter().any(|j| {
+                        j.status == status || (status == "pending" && j.status == "created")
+                    }) {
+                        continue;
+                    }
                     assert_tooltip(
                         &mut ui,
                         &format!("pipeline-summary-{status}-status"),

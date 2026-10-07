@@ -2170,6 +2170,9 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Deta
         ("success", "success", "passed", count("success")),
         ("failed", failed_status, "failed", count("failed")),
     ] {
+        if count == 0 {
+            continue;
+        }
         summary = summary
             .child(status_dot(
                 ctx,

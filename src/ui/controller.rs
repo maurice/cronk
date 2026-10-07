@@ -854,8 +854,11 @@ impl Component for Cronk {
                         ctx.link().send(Msg::Refresh);
                     }
                     Err(error) => {
+                        // The dialog keeps the full explanation (request and GitLab's response)
+                        // until the user dismisses it; the status line gets the summary only.
                         self.dialog_error(ctx, &error);
-                        self.network_error(ctx, error);
+                        let summary = error.lines().next().unwrap_or_default().to_owned();
+                        self.network_error(ctx, summary);
                     }
                 }
             }

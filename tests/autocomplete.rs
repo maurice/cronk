@@ -332,9 +332,27 @@ fn iteration_lookup_offers_symbolic_current_and_resolves_it_case_insensitively()
     let mut ui = mount(ItemKind::Issue, 5);
     replace(&mut ui, "current");
     wait(&mut ui);
-    assert_eq!(completion(&ui).options[0].value, "Current");
+    let first = completion(&ui).options[0].clone();
+    assert_eq!(first.id, 1200);
+    assert_eq!(first.description, "Current iteration · demo");
+    assert!(
+        !first.description.contains("1200"),
+        "no raw IDs in suggestions"
+    );
+    assert_eq!(
+        completion(&ui)
+            .options
+            .iter()
+            .filter(|o| o.id == 1200)
+            .count(),
+        1
+    );
     key(&mut ui, KeyCode::Enter);
-    assert_eq!(value(&ui), "Current");
+    assert_eq!(value(&ui), first.value);
+    assert_eq!(ids(&ui), "1200");
+    // Typing the symbolic name without choosing a suggestion still resolves.
+    replace(&mut ui, "CURRENT");
+    key(&mut ui, KeyCode::Enter);
     assert_eq!(ids(&ui), "1200");
 }
 

@@ -124,8 +124,8 @@ correctness, and lock-wait profiling remains a follow-up.
   per version/workload preceded the three measured pairs. No compilation or
   other validation ran concurrently with measurements.
 - Pair order: before → after, after → before, before → after. List and cache
-  commands ran sequentially through the repository's `just` lock, with one
-  nextest test process and captured successful-test output. Each command ran
+  commands ran sequentially through a `just` lock that has since been removed (see
+  [development.md](development.md#concurrency-deliberately-no-locking)), with one nextest test process and captured successful-test output. Each command ran
   only the relevant workload. Reported values are its internal monotonic
   timers, not whole-command wall time or test-runner startup.
 - During the runs, `vmstat` recorded at least **3.45 GiB free guest RAM**, no
@@ -138,8 +138,9 @@ correctness, and lock-wait profiling remains a follow-up.
   and disk configurations can change the numbers.
 
 This establishes a substantial improvement in the reproducible **debug headless
-workload**, not a production FPS claim. Release-mode and real-workspace latency
-remain worth measuring. The earlier contention-heavy observations (including
+workload**, not a production FPS claim. Release-mode latency has since been measured
+with the [latency harness](#release-latency-harness) (headless: no real terminal
+output); real-terminal and real-workspace latency remain unmeasured. The earlier contention-heavy observations (including
 the 665.806 s baseline) are superseded by these paired results and should not be
 used to calculate a speedup; they also used an older base/toolchain/profile.
 
@@ -166,6 +167,24 @@ after testing without indicating a leak. Check `MemAvailable`, process memory,
 and live paging rather than treating all cache or historically occupied swap
 as current pressure. Restarting unrelated services or WSL was unnecessary.
 
+## Release latency harness
+
+`tests/latency_harness.rs` records per-gesture `dispatch` / `render` / `pump` / total
+samples (median, p95, max, plus every raw sample) for 3,000 description-heavy MRs
+across empty-query, text, `@me` and dashboard scenarios, with and without a
+workspace path, and a 30-page progressive-sync scenario. It makes no timing
+assertions. Run it in release mode (a task-specific exception to AGENTS.md):
+
+```sh
+just test --release --test latency_harness --no-run   # prebuild first
+just test --release --test latency_harness -E 'test(latency_harness_release)' \
+    --run-ignored only --test-threads=1 --success-output immediate
+```
+
+Results, method and limitations are in
+[optimisation-next-steps.md](optimisation-next-steps.md#pr-1-results-3000-mrs-release).
+`latency_harness_smoke` runs a tiny plan in the normal debug suite.
+
 ## Reproduce
 
 ```sh
@@ -190,14 +209,14 @@ track/drag, wheel, keyboard, filtering and resize behaviour.
 
 ## Next profiling priorities
 
-1. **Workspace persistence on the UI thread.** `Cronk::persist` calls
-   `Config::save` during navigation/scrolling. Saving serialises TOML, atomically
-   replaces the file and syncs the file and parent directory. This is separate
-   from SQLite and can cause frame stalls, especially on WSL/network/slow disks.
-   Measure a path-backed workload against the no-path benchmark; consider
-   coalescing navigation saves or a single ordered background writer with a
-   shutdown flush and visible error reporting. Configuration mutations should
-   not lose their persistence guarantees.
+1. **Workspace persistence on the UI thread: stale.** Navigation (selection,
+   scrolling, tab and route changes) is persisted by a bounded, coalescing SQLite
+   writer, see [navigation-state.md](navigation-state.md). `Cronk::persist` calls
+   `Config::save` (TOML serialisation, atomic replace, file and directory syncs) only
+   when *portable* configuration changed (`portable_eq`), e.g. a filter edit, so it is
+   not on the scrolling path. The release harness (below) measures it: `Move`/`Select`
+   are indistinguishable from a no-path run, and a text-query edit costs about 2–4 ms
+   more with a path (inferred from the difference, not timed directly).
 2. **Derived-view work.** Measure query parsing/filtering, sorting and dashboard
    attention-rank comparisons separately. Cache a view by revisions rather than
    rebuilding it for ticks/hover; precompute ranks when sorting dashboard items.

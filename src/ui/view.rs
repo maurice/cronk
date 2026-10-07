@@ -464,8 +464,15 @@ impl TextAreaColorStrategy for LabelColorStrategy {
 pub(super) fn view(ctx: &Context<Cronk>) -> Element {
     let state = &ctx.state;
     let colors = Colors::new(&state.config);
+    // Filter and sort the list once per frame; the item count in the context
+    // line and the rows share this view.
+    let list_items = if state.scope == Scope::List && state.config.active_tab != 1 {
+        state.visible_items()
+    } else {
+        Vec::new()
+    };
     let content = match state.scope {
-        Scope::List => main_list(ctx, colors),
+        Scope::List => main_list(ctx, &list_items, colors),
         Scope::Details | Scope::Section if state.log_zoom => {
             if let Some(job) = state.selected_job() {
                 job_panel(ctx, job, state.log_height(ctx.viewport().h, job.id), colors)
@@ -497,9 +504,10 @@ pub(super) fn view(ctx: &Context<Cronk>) -> Element {
     let shell = if state.log_zoom && state.selected_job().is_some() {
         // Fullscreen logs keep only the contextual shortcut header and log
         // status, reclaiming the normal tabs/breadcrumb/footer chrome.
-        let mut shell = VStack::new()
-            .style(colors.base())
-            .child(context_line(state, colors));
+        let mut shell =
+            VStack::new()
+                .style(colors.base())
+                .child(context_line(state, list_items.len(), colors));
         if state.log_search.is_some() {
             shell = shell.child(search_row);
         }
@@ -511,7 +519,7 @@ pub(super) fn view(ctx: &Context<Cronk>) -> Element {
             .child(brand(state, colors))
             .child(tab_bar(ctx, colors))
             .child(breadcrumb(ctx, colors))
-            .child(context_line(state, colors))
+            .child(context_line(state, list_items.len(), colors))
             .child(search_row)
             .child(content)
             .child(footer(ctx, colors))
@@ -740,7 +748,7 @@ fn breadcrumb(ctx: &Context<Cronk>, colors: Colors) -> Element {
     row.child(rich(spans, colors.base())).into()
 }
 
-fn context_line(state: &State, colors: Colors) -> Element {
+fn context_line(state: &State, item_count: usize, colors: Colors) -> Element {
     let (heading, hint) =
         if let Some(job) = state.selected_job().filter(|_| state.log_focus.is_some()) {
             (
@@ -769,7 +777,7 @@ fn context_line(state: &State, colors: Colors) -> Element {
                 Scope::List => {
                     let query = state.query_text();
                     (
-                        format!("{} ITEMS", state.visible_item_count()),
+                        format!("{item_count} ITEMS"),
                         if !query.is_empty() {
                             format!("Filter: {query}")
                         } else if state.config.active_tab == 0 {
@@ -813,14 +821,9 @@ fn section_hint(section: &str) -> &'static str {
     }
 }
 
-fn main_list(ctx: &Context<Cronk>, colors: Colors) -> Element {
+fn main_list(ctx: &Context<Cronk>, items: &[&WorkItem], colors: Colors) -> Element {
     let state = &ctx.state;
     let projects = state.config.active_tab == 1;
-    let items = if projects {
-        Vec::new()
-    } else {
-        state.visible_items()
-    };
     let len = if projects {
         state.config.projects.len()
     } else {

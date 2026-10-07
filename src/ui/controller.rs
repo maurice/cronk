@@ -1726,8 +1726,7 @@ impl Cronk {
         }
         let selected = ctx
             .state
-            .visible_items()
-            .get(ctx.state.scroll.selected)
+            .visible_item_at(ctx.state.scroll.selected)
             .map(|i| i.key.clone());
         let mut merged: HashMap<_, _> = std::mem::take(&mut ctx.state.items)
             .into_iter()
@@ -1738,7 +1737,7 @@ impl Cronk {
         }
         ctx.state.items = merged.into_values().collect();
         if let Some(key) = selected
-            && let Some(index) = ctx.state.visible_items().iter().position(|i| i.key == key)
+            && let Some(index) = ctx.state.visible_position(&key)
         {
             ctx.state.scroll.selected = index;
         }

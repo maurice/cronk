@@ -1772,12 +1772,20 @@ impl GitLab {
         };
         let mut errors = messages(reply.get("errors"));
         errors.extend(messages(reply.pointer("/data/issueSetIteration/errors")));
+        if errors.is_empty()
+            && !reply
+                .pointer("/data/issueSetIteration")
+                .is_some_and(Value::is_object)
+        {
+            errors.push("GraphQL returned no issueSetIteration result".into());
+        }
         if !errors.is_empty() {
-            let detail = errors.join("; ");
             bail!(
-                "{}: GraphQL issueSetIteration failed\nResponse: {}",
+                "{}: GraphQL issueSetIteration failed\nRequest: POST {}\nBody: {}\nResponse: {}",
                 self.context(&Method::POST, &url),
-                self.redacted(&detail)
+                self.redacted(url.path()),
+                self.redacted(&body.to_string()),
+                self.redacted(&errors.join("; "))
             );
         }
         self.written()
@@ -2270,12 +2278,9 @@ impl ApiItem {
                             current,
                         )
                     } else {
-                        i.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
-                            i.iid
-                                .or(i.id)
-                                .map(|id| format!("Iteration #{id}"))
-                                .unwrap_or_default()
-                        })
+                        i.title
+                            .filter(|t| !t.trim().is_empty())
+                            .unwrap_or_else(|| "Undated".to_owned())
                     }
                 })
                 .unwrap_or_default(),
@@ -2812,6 +2817,29 @@ mod tests {
             assert_eq!(input["iterationId"], expected);
             assert!(requests.iter().all(|r| r.method != "PUT"));
         }
+    }
+
+    #[test]
+    fn graphql_reply_without_a_result_is_not_a_success() {
+        let mock = Mock::new(|request| {
+            if request.url().path() == "/api/graphql" {
+                Reply::json(json!({"data":null}))
+            } else {
+                Reply::json(json!({"path_with_namespace":"acme/platform"}))
+            }
+        });
+        let error = mock
+            .client()
+            .mutate(Mutation::Edit {
+                key: key(ItemKind::Issue),
+                field: "iteration_id".into(),
+                value: "5".into(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no issueSetIteration result"), "{error}");
+        assert!(error.contains("Request: POST /api/graphql"), "{error}");
+        assert!(error.contains("gid://gitlab/Iteration/5"), "{error}");
     }
 
     #[test]

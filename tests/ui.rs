@@ -1360,9 +1360,16 @@ fn palette_arrow_navigation_keeps_query_focus_and_runs_the_filtered_selection() 
         0,
         "editing the query resets the option cursor"
     );
-    assert_eq!(ui.state().command_options().len(), 0);
-    replace_input(&mut ui, "Add existing");
+    assert_eq!(
+        ui.state().command_options().len(),
+        1,
+        "words match in any order"
+    );
+    replace_input(&mut ui, "add p");
     assert_eq!(ui.state().command_options().len(), 1);
+    replace_input(&mut ui, "project add zzz");
+    assert_eq!(ui.state().command_options().len(), 0);
+    replace_input(&mut ui, "add p");
     key(&mut ui, KeyCode::Enter);
     assert!(matches!(dialog(&ui).kind, DialogKind::AddProject));
     focused_field(&ui, 0);

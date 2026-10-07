@@ -291,7 +291,7 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("Save filter as a new tab", Action::SaveView),
     ("Rename saved tab", Action::RenameView),
     ("Delete saved tab", Action::DeleteView),
-    ("Add existing GitLab project", Action::AddProject),
+    ("Add project", Action::AddProject),
     ("Create issue", Action::NewIssue),
     ("Create merge request", Action::NewMergeRequest),
     ("Add comment", Action::Comment),
@@ -905,14 +905,37 @@ impl State {
             .dialog
             .as_ref()
             .and_then(|d| d.fields.first())
-            .map_or("", FormField::value)
-            .to_lowercase();
-        COMMANDS
+            .map_or("", FormField::value);
+        let mut matches: Vec<_> = COMMANDS
             .iter()
             .copied()
-            .filter(|(label, _)| label.to_lowercase().contains(&q))
-            .collect()
+            .filter_map(|c| command_match(c.0, q).map(|in_order| (!in_order, c)))
+            .collect();
+        // Stable: label-order matches first, otherwise declaration order.
+        matches.sort_by_key(|(out_of_order, _)| *out_of_order);
+        matches.into_iter().map(|(_, c)| c).collect()
     }
+}
+
+/// Order-independent word-prefix match: every whitespace-separated query token
+/// must be a prefix of a distinct word in `label` (case-insensitive). Returns
+/// `Some(true)` when the tokens also match words in label order.
+fn command_match(label: &str, query: &str) -> Option<bool> {
+    let label = label.to_lowercase();
+    let words: Vec<&str> = label
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let query = query.to_lowercase();
+    let mut used = vec![false; words.len()];
+    let (mut in_order, mut last) = (true, 0);
+    for token in query.split_whitespace() {
+        let i = (0..words.len()).find(|&i| !used[i] && words[i].starts_with(token))?;
+        used[i] = true;
+        in_order &= i >= last;
+        last = i;
+    }
+    Some(in_order)
 }
 
 /// Dashboard rows have a fourth spacer row; other list rows occupy three rows.
@@ -928,4 +951,26 @@ pub fn list_height_for_tab(viewport_height: u16, active_tab: usize) -> usize {
 /// Visible list items for the standard three-row list layout.
 pub fn list_height(viewport_height: u16) -> usize {
     list_height_for_tab(viewport_height, 1)
+}
+
+#[cfg(test)]
+mod command_match_tests {
+    use super::command_match;
+
+    #[test]
+    fn matches_word_prefixes_in_any_order() {
+        for q in ["foo b", "foo baz", "baz f", "baz foo", "FOO", "", "  b  f "] {
+            assert!(command_match("foo bar baz", q).is_some(), "{q:?}");
+        }
+        for q in ["foo foo", "bar bar", "oo", "foo x", "foobar"] {
+            assert!(command_match("foo bar baz", q).is_none(), "{q:?}");
+        }
+    }
+
+    #[test]
+    fn reports_label_order_and_splits_on_punctuation() {
+        assert_eq!(command_match("foo bar baz", "foo b"), Some(true));
+        assert_eq!(command_match("foo bar baz", "baz f"), Some(false));
+        assert!(command_match("Resolve / reopen · x", "reo res").is_some());
+    }
 }

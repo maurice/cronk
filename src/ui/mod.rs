@@ -18,6 +18,7 @@ use crate::{
 };
 use std::result::Result;
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     time::Duration,
@@ -444,9 +445,7 @@ impl State {
     ) -> Option<usize> {
         use crate::navigation::Selection;
         match selection {
-            Selection::Item(selected) => {
-                self.visible_items().iter().position(|i| &i.key == selected)
-            }
+            Selection::Item(selected) => self.visible_position(selected),
             Selection::Project(id) => self.config.projects.iter().position(|p| &p.id == id),
             Selection::Legacy(index) => Some(*index),
         }
@@ -494,8 +493,7 @@ impl State {
                 .get(self.scroll.selected)
                 .map(|p| Selection::Project(p.id))
         } else {
-            self.visible_items()
-                .get(self.scroll.selected)
+            self.visible_item_at(self.scroll.selected)
                 .map(|i| Selection::Item(i.key.clone()))
         };
         if let Some(selected) = selected {
@@ -596,7 +594,7 @@ impl State {
                 .config
                 .route
                 .as_ref()
-                .is_some_and(|route| !self.visible_items().iter().any(|i| &i.key == route))
+                .is_some_and(|route| self.visible_position(route).is_none())
         {
             self.config.route = None;
             self.config.section = None;
@@ -724,24 +722,58 @@ impl State {
         })
     }
 
+    /// Total order of the list: dashboard urgency, or newest first elsewhere.
+    fn visible_order(&self, a: &WorkItem, b: &WorkItem) -> Ordering {
+        if self.config.active_tab == 0 {
+            a.attention_rank(self.user.id)
+                .cmp(&b.attention_rank(self.user.id))
+                .then(b.updated_at.cmp(&a.updated_at))
+                .then(a.key.iid.cmp(&b.key.iid))
+        } else {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(a.key.project.cmp(&b.key.project))
+                .then(a.key.iid.cmp(&b.key.iid))
+        }
+    }
+
     pub fn visible_items(&self) -> Vec<&WorkItem> {
         let mut items: Vec<_> = self.matching_items().collect();
-        if self.config.active_tab == 0 {
-            items.sort_by(|a, b| {
-                a.attention_rank(self.user.id)
-                    .cmp(&b.attention_rank(self.user.id))
-                    .then(b.updated_at.cmp(&a.updated_at))
-                    .then(a.key.iid.cmp(&b.key.iid))
-            });
-        } else {
-            items.sort_by(|a, b| {
-                b.updated_at
-                    .cmp(&a.updated_at)
-                    .then(a.key.project.cmp(&b.key.project))
-                    .then(a.key.iid.cmp(&b.key.iid))
-            });
-        }
+        items.sort_by(|a, b| self.visible_order(a, b));
         items
+    }
+
+    /// `visible_items()[index]` with one filter pass and no sort. Ties in
+    /// `visible_order` fall back to filter order, as the stable sort does.
+    pub fn visible_item_at(&self, index: usize) -> Option<&WorkItem> {
+        let mut items: Vec<_> = self.matching_items().enumerate().collect();
+        if index >= items.len() {
+            return None;
+        }
+        let (_, (_, item), _) = items.select_nth_unstable_by(index, |(a_at, a), (b_at, b)| {
+            self.visible_order(a, b).then(a_at.cmp(b_at))
+        });
+        Some(item)
+    }
+
+    /// `visible_items().position(|item| item.key == *key)` with one filter
+    /// pass and no sort: the rank of the first matching item is the number of
+    /// items that sort before it.
+    pub fn visible_position(&self, key: &ItemKey) -> Option<usize> {
+        let items: Vec<_> = self.matching_items().enumerate().collect();
+        let order = |(a_at, a): &(usize, &WorkItem), (b_at, b): &(usize, &WorkItem)| {
+            self.visible_order(a, b).then(a_at.cmp(b_at))
+        };
+        let first = items
+            .iter()
+            .filter(|(_, item)| item.key == *key)
+            .min_by(|a, b| order(a, b))?;
+        Some(
+            items
+                .iter()
+                .filter(|other| order(other, first).is_lt())
+                .count(),
+        )
     }
     pub fn project_details(&self) -> bool {
         self.config.active_tab == 1 && self.config.project_route.is_some()

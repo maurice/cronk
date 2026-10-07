@@ -120,17 +120,24 @@ fn local_tab_identity(config: &Config, index: usize) -> String {
     }
     let view = &config.views[index - 4];
     let body = serde_json::to_vec(&(view.name.as_str(), view.kind, view.query.as_str())).unwrap();
-    format!("view:{:x}", Sha256::digest(body))
+    let hash: String = Sha256::digest(body)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("view:{hash}")
 }
 
 fn local_database(path: &Path, config: &Config, demo: bool) -> std::path::PathBuf {
     use sha2::{Digest, Sha256};
-    let namespace = Sha256::digest(format!(
+    let namespace: String = Sha256::digest(format!(
         "{}\0{demo}",
         config.gitlab_url.trim_end_matches('/')
-    ));
+    ))
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect();
     path.with_extension("state")
-        .join(format!("{namespace:x}.sqlite3"))
+        .join(format!("{namespace}.sqlite3"))
 }
 
 fn persisted(ui: &Ui, path: &Path) -> Config {

@@ -32,7 +32,10 @@ impl ContentCache {
     pub fn open(workspace: &Path, installation: &str, token: &str) -> Result<Self> {
         // A credential fingerprint also isolates different scopes for the same user.
         // Changing tokens intentionally creates a cold cache. Never persist the token.
-        let fingerprint = format!("{:x}", Sha256::digest(format!("{installation}\0{token}")));
+        let fingerprint: String = Sha256::digest(format!("{installation}\0{token}"))
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let directory = workspace.with_extension("cache");
         if fs::symlink_metadata(&directory).is_ok_and(|m| m.file_type().is_symlink()) {
             bail!("Cache directory must not be a symlink");
@@ -319,6 +322,20 @@ impl ContentCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_fingerprint_preserves_existing_cache_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace.toml");
+        let _cache = ContentCache::open(&workspace, "https://example.test", "secret").unwrap();
+        assert!(
+            workspace
+                .with_extension("cache")
+                .join("67034df2a0443843676e092f86f89219c2ffc1ff8014f6af6a6c22641702e2ed.sqlite3")
+                .is_file()
+        );
+    }
+
     fn item(iid: u64) -> WorkItem {
         WorkItem {
             key: ItemKey {

@@ -21,8 +21,12 @@ updates:
 
   # GitHub Actions updates are also kept narrow, with only the matching
   # upload/download artifact pair grouped into the same PR.
+  # The local composite action under .github/actions is not scanned from "/",
+  # so list it explicitly.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/setup"
     schedule:
       interval: "weekly"
       day: "monday"

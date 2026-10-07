@@ -682,8 +682,22 @@ impl State {
             _ => None,
         }
     }
+    pub fn is_current_user(&self, id: u64) -> bool {
+        self.user.id != 0 && self.user.id == id
+    }
     pub fn render_user(&self, user: &User) -> String {
-        self.user_formatter.render(user)
+        if self.is_current_user(user.id) {
+            "You".into()
+        } else {
+            self.user_formatter.render(user)
+        }
+    }
+    pub fn render_user_lookup(&self, option: &LookupOption) -> String {
+        if self.is_current_user(option.id) {
+            "You".into()
+        } else {
+            self.user_formatter.render_lookup(option)
+        }
     }
     pub fn project(&self, id: u64) -> Option<&Project> {
         self.config.projects.iter().find(|p| p.id == id)

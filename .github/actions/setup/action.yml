@@ -8,11 +8,11 @@ runs:
       with:
         tool: just
 
-    - uses: jdx/mise-action@v2
+    - uses: jdx/mise-action@v5
       with:
         install: true
         cache: true
 
     - name: Install pinned Rust toolchain
       shell: bash
-      run: rustup show active-toolchain || rustup toolchain install
+      run: rustup toolchain install

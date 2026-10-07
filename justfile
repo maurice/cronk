@@ -12,7 +12,7 @@ default:
 
 # One-time setup: pinned Rust + CLIs and the git hooks.
 setup:
-    rustup show active-toolchain || rustup toolchain install
+    rustup toolchain install
     mise trust --quiet
     mise install
     git config --local core.hooksPath .cargo-husky/hooks

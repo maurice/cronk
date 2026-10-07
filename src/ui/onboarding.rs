@@ -264,6 +264,8 @@ impl Cronk {
         ctx.state.list_epoch += 1;
         ctx.state.list_pending.clear();
         ctx.state.user = validation.user;
+        ctx.state.user_epoch += 1;
+        ctx.state.user_pending = false;
         ctx.state.remember_selection();
         ctx.state
             .navigation_restoring
@@ -460,6 +462,103 @@ mod tests {
             ui.state().current_iterations.is_empty(),
             "live mode must await fresh hydration, not inject fictional iterations"
         );
+    }
+
+    /// A live UI that has finished setup as user 42 while a `LoadUser` issued
+    /// before setup (epoch 0) may still be in flight.
+    fn live_ui_after_setup() -> tui_lipan::TestBackend<Cronk> {
+        let config = Config {
+            onboarding: false,
+            gitlab_url: "https://gitlab.invalid".into(),
+            projects: demo::projects(),
+            ..Config::default()
+        };
+        let mut ui = tui_lipan::TestBackend::new(Cronk {
+            config,
+            path: None,
+            api: None,
+            demo: false,
+        });
+        ui.state_mut().user_pending = true;
+        ui.dispatch(Msg::Action(Action::Onboarding)).unwrap();
+        // Suppress the post-setup refresh so no network requests are made.
+        ui.state_mut().blocked_until = Duration::MAX;
+        let config = ui.state().config.clone();
+        let validation = Validation {
+            api: Some(GitLab::new(&config.gitlab_url, "fake-new-token").unwrap()),
+            config,
+            user: User {
+                id: 42,
+                username: "new-user".into(),
+                ..User::default()
+            },
+            feedback: Vec::new(),
+            valid: true,
+        };
+        ui.dispatch(Msg::SetupValidated(
+            ui.state().onboarding.epoch,
+            Box::new(validation),
+        ))
+        .unwrap();
+        ui.dispatch(Msg::Submit).unwrap();
+        assert_eq!(ui.state().user.id, 42);
+        assert!(!ui.state().user_pending);
+        ui
+    }
+
+    #[test]
+    fn stale_user_result_after_setup_does_not_replace_the_validated_user() {
+        let mut ui = live_ui_after_setup();
+        ui.state_mut().user_pending = true; // the new client's own request
+        ui.dispatch(Msg::UserLoaded(
+            0,
+            Ok(User {
+                id: 7,
+                username: "old-user".into(),
+                ..User::default()
+            }),
+        ))
+        .unwrap();
+        assert_eq!(ui.state().user.id, 42);
+        assert!(ui.state().user_pending);
+    }
+
+    #[test]
+    fn stale_user_error_after_setup_does_not_back_off_the_new_client() {
+        let mut ui = live_ui_after_setup();
+        ui.state_mut().user_pending = true;
+        let blocked_until = ui.state().blocked_until;
+        let failures = ui.state().failures;
+        let error = ui.state().error.clone();
+        ui.dispatch(Msg::UserLoaded(0, Err("401 unauthorized".into())))
+            .unwrap();
+        assert_eq!(ui.state().blocked_until, blocked_until);
+        assert_eq!(ui.state().failures, failures);
+        assert_eq!(ui.state().error, error);
+        assert!(ui.state().user_pending);
+    }
+
+    #[test]
+    fn current_user_result_after_setup_is_applied() {
+        let mut ui = live_ui_after_setup();
+        let epoch = ui.state().user_epoch;
+        assert_eq!(epoch, 1);
+        ui.state_mut().user_pending = true;
+        ui.dispatch(Msg::UserLoaded(
+            epoch,
+            Ok(User {
+                id: 43,
+                username: "refreshed".into(),
+                ..User::default()
+            }),
+        ))
+        .unwrap();
+        assert_eq!(ui.state().user.id, 43);
+        assert!(!ui.state().user_pending);
+        ui.dispatch(Msg::UserLoaded(epoch, Err("boom".into())))
+            .unwrap();
+        assert_eq!(ui.state().failures, 1);
+        assert_eq!(ui.state().error.as_deref(), Some("boom"));
     }
 
     #[test]

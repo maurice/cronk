@@ -178,6 +178,7 @@ impl Component for Cronk {
             trace_pending: HashSet::new(),
             mutation_pending: false,
             user_pending: false,
+            user_epoch: 0,
             list_epoch: 0,
             detail_epoch: 0,
             next_lists: Duration::ZERO,
@@ -522,22 +523,17 @@ impl Component for Cronk {
                     return Update::none();
                 };
                 ctx.state.user_pending = true;
+                let epoch = ctx.state.user_epoch;
                 return Update::with_command(ctx.link().command(move |link| {
                     link.send(Msg::UserLoaded(
+                        epoch,
                         api.current_user().map_err(|e| e.to_string()),
                     ));
                 }));
             }
-            Msg::UserLoaded(result) => {
-                ctx.state.user_pending = false;
-                match result {
-                    Ok(user) => {
-                        ctx.state.user = user;
-                        ctx.state
-                            .restore_selection(ctx.state.navigation_hydration_complete());
-                        self.persist(ctx);
-                    }
-                    Err(error) => self.network_error(ctx, error),
+            Msg::UserLoaded(epoch, result) => {
+                if epoch == ctx.state.user_epoch {
+                    self.apply_user(ctx, result);
                 }
             }
             Msg::ProjectLoaded(id, epoch, result) => {
@@ -1797,6 +1793,19 @@ impl Cronk {
         };
         for id in ids {
             ctx.link().send(Msg::LoadProject(id, epoch));
+        }
+    }
+
+    fn apply_user(&self, ctx: &mut Context<Self>, result: Result<User, String>) {
+        ctx.state.user_pending = false;
+        match result {
+            Ok(user) => {
+                ctx.state.user = user;
+                ctx.state
+                    .restore_selection(ctx.state.navigation_hydration_complete());
+                self.persist(ctx);
+            }
+            Err(error) => self.network_error(ctx, error),
         }
     }
 

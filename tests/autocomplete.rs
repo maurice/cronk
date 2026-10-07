@@ -155,6 +155,32 @@ fn assert_suggestion_selection(field: usize) {
 }
 
 #[test]
+fn current_user_suggestion_is_yellow_but_accepts_the_original_login_and_id() {
+    let mut ui = mount(ItemKind::Issue, 3);
+    replace(&mut ui, "Arin");
+    wait(&mut ui);
+    let current = ui.state().user.clone();
+    let rect = ui
+        .rect_of_key(&format!("lookup-0-{}", current.id).into())
+        .unwrap();
+    let frame = ui.capture_frame();
+    let line = &frame.to_lines()[rect.y as usize];
+    let x = line
+        .find("You")
+        .expect("current user suggestion should say You");
+    let column = line[..x].chars().count();
+    for offset in 0..3 {
+        assert_eq!(
+            frame.cell((column + offset) as u16, rect.y as u16).fg,
+            Color::hex_u24(0xf0c674)
+        );
+    }
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(value(&ui), format!("@{}", current.username));
+    assert_eq!(ids(&ui), current.id.to_string());
+}
+
+#[test]
 fn people_complete_trimmed_comma_tokens_without_submitting_or_losing_previous_values() {
     let mut ui = mount(ItemKind::Issue, 3);
     assert_eq!(value(&ui), "@demo-arin");

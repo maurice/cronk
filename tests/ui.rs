@@ -3224,14 +3224,112 @@ fn configured_user_name_pattern_is_used_in_the_interface() {
         name: "Doe John 12345678".into(),
         ..User::default()
     };
-    ui.state_mut().user = user.clone();
-    ui.state_mut().items[0].author = user;
+    let key = ui.state().visible_items()[0].key.clone();
+    ui.state_mut()
+        .items
+        .iter_mut()
+        .find(|item| item.key == key)
+        .unwrap()
+        .author = user;
     ui.render();
 
     let text = ui.capture_frame().plain_text();
     assert!(text.contains("John"), "{text}");
     assert!(!text.contains("@jdoe"), "{text}");
     assert!(!text.contains("Doe John 12345678"), "{text}");
+}
+
+#[test]
+fn current_user_overrides_every_display_mode_without_changing_other_users() {
+    for display in [UserDisplay::Username, UserDisplay::Name, UserDisplay::Id] {
+        let mut ui = mount(
+            Config {
+                user_display: display,
+                user_name_pattern: Some(r"^(?P<first>\S+).*".into()),
+                user_name_format: Some("$first".into()),
+                ..config()
+            },
+            None,
+        );
+        let current = ui.state().user.clone();
+        // Identity is matched by the API's user ID, not by a display name or login.
+        let mut other = current.clone();
+        other.id += 1;
+        assert_eq!(ui.state().render_user(&current), "You");
+        let expected = match display {
+            UserDisplay::Username => format!("@{}", other.username),
+            UserDisplay::Name => "Arin".into(),
+            UserDisplay::Id => other.id.to_string(),
+        };
+        assert_eq!(ui.state().render_user(&other), expected);
+        let option = cronk::model::LookupOption::user(&current);
+        assert_eq!(ui.state().render_user_lookup(&option), "You");
+        ui.state_mut().user = User::default();
+        assert!(!ui.state().is_current_user(0));
+        assert_ne!(ui.state().render_user(&User::default()), "You");
+        assert_ne!(ui.state().render_user(&current), "You");
+        assert_ne!(ui.state().render_user_lookup(&option), "You");
+        ui.state_mut().user = other;
+        assert_ne!(ui.state().render_user(&current), "You");
+    }
+}
+
+#[test]
+fn current_user_labels_are_yellow_in_list_and_detail_views() {
+    let themes = [
+        ("midnight", 0xf0c674),
+        ("dracula", 0xf1fa8c),
+        ("light", 0x946200),
+        ("blade-runner", 0xffe34d),
+        ("tokyo-night", 0xe0af68),
+        ("gruvbox-dark", 0xfabd2f),
+        ("nord", 0xebcb8b),
+        ("solarized-dark", 0xe0b030),
+        ("solarized-light", 0x805c00),
+        ("sepia-dark", 0xebc66f),
+        ("sepia-light", 0x745400),
+    ];
+    for (theme, yellow, display) in themes.into_iter().flat_map(|(theme, yellow)| {
+        [UserDisplay::Username, UserDisplay::Name, UserDisplay::Id]
+            .map(|display| (theme, yellow, display))
+    }) {
+        let mut ui = mount(
+            Config {
+                user_display: display,
+                theme: theme.into(),
+                active_tab: 3,
+                ..config()
+            },
+            None,
+        );
+        // The selected merge request's author, assignee, and notes include the current user.
+        for details in [false, true] {
+            if details {
+                key(&mut ui, KeyCode::Enter);
+            }
+            ui.render();
+            let frame = ui.capture_frame();
+            let mut labels = 0;
+            for (y, line) in frame.to_lines().iter().enumerate() {
+                for (x, _) in line.match_indices("You") {
+                    if line[x..].starts_with("You:") {
+                        continue;
+                    }
+                    let column = line[..x].chars().count();
+                    for offset in 0..3 {
+                        assert_eq!(
+                            frame.cell((column + offset) as u16, y as u16).fg,
+                            Color::hex_u24(yellow),
+                            "{}",
+                            frame.plain_text()
+                        );
+                    }
+                    labels += 1;
+                }
+            }
+            assert!(labels >= 2, "{}", frame.plain_text());
+        }
+    }
 }
 
 #[test]
@@ -3280,7 +3378,7 @@ fn small_project_viewport_snapshot() {
     let tag = build_info::display_version()
         .split_once('@')
         .map_or(build_info::display_version(), |(tag, _)| tag.to_owned());
-    assert!(lines[0].contains("@demo-arin  ·  midnight"), "{}", lines[0]);
+    assert!(lines[0].contains("You  ·  midnight"), "{}", lines[0]);
     assert!(lines[0].contains(&format!("{tag}@")), "{}", lines[0]);
     assert_eq!(
         &lines[1..],
@@ -3323,7 +3421,7 @@ fn small_empty_filter_viewport_snapshot() {
     let tag = build_info::display_version()
         .split_once('@')
         .map_or(build_info::display_version(), |(tag, _)| tag.to_owned());
-    assert!(lines[0].contains("@demo-arin  ·  midnight"), "{}", lines[0]);
+    assert!(lines[0].contains("You  ·  midnight"), "{}", lines[0]);
     assert!(lines[0].contains(&format!("{tag}@")), "{}", lines[0]);
     assert_eq!(
         &lines[1..],

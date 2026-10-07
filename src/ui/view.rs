@@ -115,6 +115,14 @@ impl Colors {
         Style::new().fg(self.foreground).bg(self.selection)
     }
 
+    fn user_style(self, state: &State, id: u64, style: Style) -> Style {
+        if state.is_current_user(id) {
+            style.fg(self.yellow)
+        } else {
+            style
+        }
+    }
+
     fn theme(self) -> Theme {
         let mut theme = ThemePalette::new(self.foreground, self.background, self.accent)
             .muted(self.muted)
@@ -674,12 +682,22 @@ fn brand(state: &State, colors: Colors) -> Element {
     } else {
         "GitLab workspace"
     };
-    let identity =
-        if state.user.id == 0 && state.user.username.is_empty() && state.user.name.is_empty() {
-            None
-        } else {
-            Some(state.render_user(&state.user))
-        };
+    let mut identity = Vec::new();
+    if state.user.id != 0 || !state.user.username.is_empty() || !state.user.name.is_empty() {
+        identity.push(
+            Span::new(state.render_user(&state.user)).style(colors.user_style(
+                state,
+                state.user.id,
+                Style::new().fg(colors.muted),
+            )),
+        );
+        identity.push(Span::new("  ·  "));
+    }
+    identity.push(Span::new(format!(
+        "{}  ·  {}",
+        state.config.theme,
+        build_info::display_version()
+    )));
     HStack::new()
         .height(Length::Px(1))
         .padding((0, 2))
@@ -692,21 +710,9 @@ fn brand(state: &State, colors: Colors) -> Element {
             Style::new(),
         ))
         .child(
-            Text::new(if let Some(identity) = identity {
-                format!(
-                    "{identity}  ·  {}  ·  {}",
-                    state.config.theme,
-                    build_info::display_version()
-                )
-            } else {
-                format!(
-                    "{}  ·  {}",
-                    state.config.theme,
-                    build_info::display_version()
-                )
-            })
-            .style(Style::new().fg(colors.muted))
-            .height(Length::Px(1)),
+            Text::from_spans(identity)
+                .style(Style::new().fg(colors.muted))
+                .height(Length::Px(1)),
         )
         .into()
 }
@@ -1004,7 +1010,7 @@ fn work_row(
             .width(Length::Flex(1))
             .height(Length::Px(1))
             .overflow(Overflow::Ellipsis)
-            .style(style.fg(colors.muted)),
+            .style(colors.user_style(state, item.author.id, style.fg(colors.muted))),
     ));
     let mut attention = Vec::new();
     if state.config.active_tab == 0 {
@@ -1972,7 +1978,8 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
                         ctx,
                         format!("item-{}-{label}-{user_index}", item_key(&item.key)),
                         user,
-                        Text::new(ctx.state.render_user(user)).style(style),
+                        Text::new(ctx.state.render_user(user))
+                            .style(colors.user_style(state, user.id, style)),
                     ));
                 }
                 list.into()
@@ -2013,7 +2020,7 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
                             .width(Length::Flex(1))
                             .height(Length::Auto)
                             .overflow(Overflow::Wrap)
-                            .style(colors.base()),
+                            .style(colors.user_style(state, item.author.id, colors.base())),
                     ),
                     colors.muted,
                     colors.base(),
@@ -2065,8 +2072,11 @@ fn note_view(ctx: &Context<Cronk>, note: &Note, colors: Colors) -> DetailRow {
             ctx,
             format!("note-{}-author", note.id),
             &note.author,
-            Text::new(ctx.state.render_user(&note.author))
-                .style(colors.base().fg(colors.blue).bold()),
+            Text::new(ctx.state.render_user(&note.author)).style(colors.user_style(
+                &ctx.state,
+                note.author.id,
+                colors.base().fg(colors.blue).bold(),
+            )),
         ))
         .child(Text::new(format!("   {}", note.created_at)).style(colors.base().fg(colors.muted)));
     if note.system {
@@ -2495,7 +2505,11 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<D
                             ctx,
                             format!("discussion-{}-author", discussion.id),
                             author,
-                            Text::new(ctx.state.render_user(author)).style(style.fg(colors.blue)),
+                            Text::new(ctx.state.render_user(author)).style(colors.user_style(
+                                &ctx.state,
+                                author.id,
+                                style.fg(colors.blue),
+                            )),
                         )
                     } else {
                         Text::new("unknown").style(style.fg(colors.blue)).into()
@@ -3254,11 +3268,15 @@ fn completion_row(
     } else {
         spans.push(
             Span::new(if c.kind == LookupKind::Users {
-                ctx.state.user_formatter.render_lookup(option)
+                ctx.state.render_user_lookup(option)
             } else {
                 option.label.clone()
             })
-            .style(style),
+            .style(if c.kind == LookupKind::Users {
+                colors.user_style(&ctx.state, option.id, style)
+            } else {
+                style
+            }),
         );
     }
     let header = selection_line(

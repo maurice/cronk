@@ -140,6 +140,7 @@ pub struct State {
     pub trace_pending: HashSet<(u64, u64)>,
     pub mutation_pending: bool,
     pub user_pending: bool,
+    pub user_epoch: u64,
     pub list_epoch: u64,
     pub detail_epoch: u64,
     pub next_lists: Duration,
@@ -320,7 +321,7 @@ pub enum Msg {
     LoadDetails,
     LoadTraces,
     LoadUser,
-    UserLoaded(Result<User, String>),
+    UserLoaded(u64, Result<User, String>),
     ProjectLoaded(
         u64,
         u64,

@@ -101,7 +101,8 @@ fn start_hydration(ui: &mut Ui) {
         .map(|p| p.id)
         .collect();
     ui.state_mut().list_pending.extend(ids);
-    ui.dispatch(Msg::UserLoaded(Ok(demo::user()))).unwrap();
+    ui.dispatch(Msg::UserLoaded(ui.state().user_epoch, Ok(demo::user())))
+        .unwrap();
 }
 
 fn finish_project(ui: &mut Ui, project: u64, items: Vec<WorkItem>) {
@@ -221,7 +222,8 @@ fn owning_project_success_rejects_deleted_or_filtered_identity_despite_unrelated
                     .list_pending
                     .extend([9001, 9002, 9003, 9004, 9005]);
                 if !late_user {
-                    ui.dispatch(Msg::UserLoaded(Ok(demo::user()))).unwrap();
+                    ui.dispatch(Msg::UserLoaded(ui.state().user_epoch, Ok(demo::user())))
+                        .unwrap();
                 }
                 if failed_first {
                     ui.dispatch(Msg::ProjectLoaded(
@@ -255,7 +257,8 @@ fn owning_project_success_rejects_deleted_or_filtered_identity_despite_unrelated
                         Some(&target),
                         "authentication still guards predicate evaluation"
                     );
-                    ui.dispatch(Msg::UserLoaded(Ok(demo::user()))).unwrap();
+                    ui.dispatch(Msg::UserLoaded(ui.state().user_epoch, Ok(demo::user())))
+                        .unwrap();
                 }
                 assert!(
                     !ui.state().list_pending.is_empty(),
@@ -407,7 +410,8 @@ fn detail_refresh_reordering_persists_open_identity_and_modern_restart_restores_
 #[test]
 fn live_detail_update_reordering_returns_back_to_the_open_item() {
     let mut ui = mount(config(), None, false);
-    ui.dispatch(Msg::UserLoaded(Ok(demo::user()))).unwrap();
+    ui.dispatch(Msg::UserLoaded(ui.state().user_epoch, Ok(demo::user())))
+        .unwrap();
     for project in [9001, 9002, 9003, 9004, 9005] {
         finish_project(
             &mut ui,
@@ -499,7 +503,8 @@ fn late_authentication_after_failed_project_sync_preserves_pending_identity_and_
                 .collect(),
         );
     }
-    ui.dispatch(Msg::UserLoaded(Ok(demo::user()))).unwrap();
+    ui.dispatch(Msg::UserLoaded(ui.state().user_epoch, Ok(demo::user())))
+        .unwrap();
     assert_eq!(ui.state().config.route.as_ref(), Some(&target));
     ui.state().flush_navigation().unwrap();
     drop(ui);

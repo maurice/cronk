@@ -3109,7 +3109,8 @@ fn http_date_retry_after_is_honored_and_a_later_short_error_cannot_shorten_it() 
     let date = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(3600));
     let error =
         format!("HTTP 503 unavailable; Retry-After: {date} (retry later; no automatic retry)");
-    ui.dispatch(Msg::UserLoaded(Err(error.clone()))).unwrap();
+    ui.dispatch(Msg::UserLoaded(ui.state().user_epoch, Err(error.clone())))
+        .unwrap();
     assert_eq!(ui.state().error.as_deref(), Some(error.as_str()));
     assert_eq!(ui.state().failures, 1);
     let deadline = ui.state().blocked_until;

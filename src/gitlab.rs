@@ -210,62 +210,133 @@ impl Cache {
 #[derive(Deserialize)]
 struct IterationMatch {
     id: u64,
+    #[serde(default)]
+    iid: Option<u64>,
     title: Option<String>,
     start_date: Option<String>,
     due_date: Option<String>,
     #[serde(default)]
-    group_id: Option<u64>,
+    state: Option<Value>,
     #[serde(default)]
-    project_id: Option<u64>,
+    web_url: Option<String>,
+}
+
+/// GitLab reports iteration state as 1/2/3 (older) or upcoming/current/closed (newer).
+fn iteration_state(state: Option<&Value>) -> Option<&'static str> {
+    match state? {
+        Value::Number(n) => match n.as_u64()? {
+            1 => Some("upcoming"),
+            2 => Some("current"),
+            3 => Some("closed"),
+            _ => None,
+        },
+        Value::String(s) => match s.to_ascii_lowercase().as_str() {
+            "upcoming" => Some("upcoming"),
+            "current" => Some("current"),
+            "closed" => Some("closed"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Use the reported state; when absent, fall back to whether today is inside the date range.
+fn iteration_is_current(
+    state: Option<&Value>,
+    start: Option<&str>,
+    due: Option<&str>,
+    today: chrono::NaiveDate,
+) -> bool {
+    if let Some(state) = iteration_state(state) {
+        return state == "current";
+    }
+    let parse = |value: Option<&str>| {
+        value.and_then(|v| chrono::NaiveDate::parse_from_str(v.trim(), "%Y-%m-%d").ok())
+    };
+    matches!((parse(start), parse(due)), (Some(s), Some(d)) if s <= today && today <= d)
+}
+
+/// "28 Sep 2026 - 11 Oct 2026", prefixed by the title when there is one, and
+/// followed by "(Current)" for the running iteration.
+fn iteration_label(
+    title: Option<&str>,
+    start: Option<&str>,
+    due: Option<&str>,
+    current: bool,
+) -> String {
+    let dates = crate::dates::format_range(start, due);
+    let mut label = match title.map(str::trim).filter(|title| !title.is_empty()) {
+        Some(title) => format!("{title} ({dates})"),
+        None => dates,
+    };
+    if current {
+        label.push_str(" (Current)");
+    }
+    label
 }
 
 impl IterationMatch {
-    fn dates(&self) -> String {
-        format!(
-            "{} – {}",
-            self.start_date.as_deref().unwrap_or("?"),
-            self.due_date.as_deref().unwrap_or("?")
+    fn is_current(&self) -> bool {
+        iteration_is_current(
+            self.state.as_ref(),
+            self.start_date.as_deref(),
+            self.due_date.as_deref(),
+            chrono::Local::now().date_naive(),
         )
     }
 
-    fn title(&self) -> String {
-        self.title
-            .as_ref()
-            .filter(|title| !title.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| format!("Iteration {}", self.dates()))
+    fn label(&self, current: bool) -> String {
+        iteration_label(
+            self.title.as_deref(),
+            self.start_date.as_deref(),
+            self.due_date.as_deref(),
+            current,
+        )
     }
 
-    fn scope(&self) -> String {
-        self.group_id
-            .map(|id| format!("group {id}"))
-            .or_else(|| self.project_id.map(|id| format!("project {id}")))
-            .unwrap_or_default()
+    /// Full path of the owning group, from `…/groups/<path>/-/iterations/<iid>`.
+    fn group_path(&self) -> Option<String> {
+        let url = Url::parse(self.web_url.as_deref()?).ok()?;
+        let segments: Vec<_> = url.path_segments()?.collect();
+        let start = segments.iter().position(|s| *s == "groups")? + 1;
+        let end = segments.iter().position(|s| *s == "-")?;
+        (start < end).then(|| segments[start..end].join("/"))
     }
 
-    fn description(&self) -> String {
-        format!("{} · {} · ID {}", self.dates(), self.scope(), self.id)
+    /// Second line of a suggestion: owning group and, unless running, the state.
+    fn description(&self, current: bool) -> String {
+        let state = match iteration_state(self.state.as_ref()) {
+            _ if current => Some("Current iteration"),
+            Some("upcoming") => Some("Upcoming"),
+            Some("closed") => Some("Closed"),
+            _ => None,
+        };
+        [state.map(str::to_owned), self.group_path()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     fn lookup_option(&self) -> LookupOption {
-        let title = self.title();
+        let current = self.is_current();
+        let label = self.label(current);
         LookupOption {
             id: self.id,
-            value: title.clone(),
-            label: title,
+            value: label.clone(),
+            label,
             api_value: self.id.to_string(),
-            description: self.description(),
+            description: self.description(current),
             color: String::new(),
             text_color: String::new(),
         }
     }
 
     fn current_iteration(&self) -> CurrentIteration {
-        let title = self.title();
         CurrentIteration {
             id: self.id,
-            description: format!("{title} · {}", self.description()),
-            title,
+            title: self.label(true),
+            description: self.description(true),
         }
     }
 }
@@ -457,11 +528,29 @@ impl GitLab {
                         .append_pair("in[]", "cadence_title");
                 }
                 let entries: Vec<IterationMatch> = self.get(&url)?;
-                Ok(entries
-                    .into_iter()
+                let mut options: Vec<_> = entries
+                    .iter()
                     .take(20)
-                    .map(|entry| entry.lookup_option())
-                    .collect())
+                    .map(|entry| (entry, entry.lookup_option()))
+                    .collect();
+                // The label is the identity the user picks by, so it must be unique.
+                let labels: Vec<_> = options.iter().map(|(_, o)| o.value.clone()).collect();
+                for (entry, option) in &mut options {
+                    if labels
+                        .iter()
+                        .filter(|label| **label == option.value)
+                        .count()
+                        > 1
+                    {
+                        let suffix = entry
+                            .group_path()
+                            .or_else(|| entry.iid.map(|iid| format!("#{iid}")))
+                            .unwrap_or_else(|| format!("#{}", entry.id));
+                        option.value = format!("{} · {suffix}", option.value);
+                        option.label = option.value.clone();
+                    }
+                }
+                Ok(options.into_iter().map(|(_, option)| option).collect())
             }
             LookupKind::Epics => {
                 url.query_pairs_mut()
@@ -1449,6 +1538,12 @@ impl GitLab {
     /// for issues. Values are text except comma-separated assignee/reviewer IDs, numeric
     /// single IDs (empty clears), and true/false booleans. Unknown fields are rejected.
     pub fn mutate(&self, mutation: Mutation) -> Result<()> {
+        if let Mutation::Edit { key, field, value } = &mutation
+            && field == "iteration_id"
+        {
+            let id = edit_value(key, field, value)?;
+            return self.set_iteration(key, id.as_u64().filter(|id| *id > 0));
+        }
         let (method, url, body) = match mutation {
             Mutation::Edit { key, field, value } => {
                 let value = edit_value(&key, &field, &value)?;
@@ -1522,14 +1617,121 @@ impl GitLab {
         };
         let response = self.send(method.clone(), &url, HeaderMap::new(), Some(&body))?;
         if !response.status().is_success() {
-            return Err(self.status_error(&method, &url, &response));
+            return Err(self.mutation_failure(&method, &url, &body, response));
         }
+        self.written()
+    }
+
+    /// Drop cached reads after a successful write.
+    fn written(&self) -> Result<()> {
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         guard.invalidate();
         if let Some(cache) = &self.persistent {
             cache.invalidate_details().map_err(|error| anyhow!("GitLab write succeeded, but local cache invalidation failed: {error:#}. Do not repeat the write; clear the local cache."))?;
         }
         Ok(())
+    }
+
+    /// A failed write explained in full: status, what was sent, and GitLab's own words.
+    /// The first line stays the compact summary; the rest is shown in the error dialog.
+    fn mutation_failure(
+        &self,
+        method: &Method,
+        url: &Url,
+        body: &Value,
+        response: Response,
+    ) -> anyhow::Error {
+        let summary = self.status_error(method, url, &response);
+        let status = response.status();
+        let mut bytes = Vec::new();
+        let _ = response.take(4096).read_to_end(&mut bytes);
+        let text = String::from_utf8_lossy(&bytes);
+        let text: String = text
+            .chars()
+            .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+            .collect();
+        let sent = body.to_string();
+        let sent: String = if sent.chars().count() > 300 {
+            sent.chars().take(300).chain("…".chars()).collect()
+        } else {
+            sent
+        };
+        let detail = format!(
+            "{summary}\nRequest: {method} {}\nBody: {}\nResponse: {}",
+            self.redacted(url.path()),
+            self.redacted(&sent),
+            if text.trim().is_empty() {
+                "(empty)".to_owned()
+            } else {
+                self.redacted(text.trim())
+            }
+        );
+        HttpFailure {
+            status,
+            message: detail,
+        }
+        .into()
+    }
+
+    /// The REST issue-update endpoint has no `iteration_id` parameter (it is only a list
+    /// filter), so a lone `iteration_id` is rejected as "no valid parameter" with HTTP 400.
+    /// Iterations are assigned with the GraphQL `issueSetIteration` mutation instead.
+    fn set_iteration(&self, key: &ItemKey, iteration: Option<u64>) -> Result<()> {
+        #[derive(Deserialize)]
+        struct ProjectPath {
+            path_with_namespace: String,
+        }
+        let project: ProjectPath = self.get(&self.url(&["projects", &key.project.to_string()]))?;
+        let mut url = self.api.clone();
+        url.path_segments_mut()
+            .map_err(|_| anyhow!("Invalid GitLab URL path"))?
+            .pop_if_empty()
+            .pop()
+            .push("graphql");
+        let body = json!({
+            "query": "mutation($input: IssueSetIterationInput!) { issueSetIteration(input: $input) { errors } }",
+            "variables": {"input": {
+                "projectPath": project.path_with_namespace,
+                "iid": key.iid.to_string(),
+                "iterationId": iteration.map(|id| format!("gid://gitlab/Iteration/{id}")),
+            }},
+        });
+        let response = self.send(Method::POST, &url, HeaderMap::new(), Some(&body))?;
+        if !response.status().is_success() {
+            return Err(self.mutation_failure(&Method::POST, &url, &body, response));
+        }
+        let mut bytes = Vec::new();
+        response
+            .take(JSON_LIMIT as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| anyhow!("Could not read the GraphQL response"))?;
+        let reply: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow!("GraphQL returned a response that is not JSON"))?;
+        let messages = |value: Option<&Value>| -> Vec<String> {
+            value
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|error| {
+                    error
+                        .get("message")
+                        .unwrap_or(error)
+                        .as_str()
+                        .map_or_else(|| error.to_string(), str::to_owned)
+                })
+                .collect()
+        };
+        let mut errors = messages(reply.get("errors"));
+        errors.extend(messages(reply.pointer("/data/issueSetIteration/errors")));
+        if !errors.is_empty() {
+            let detail = errors.join("; ");
+            bail!(
+                "{}: GraphQL issueSetIteration failed\nResponse: {}",
+                self.context(&Method::POST, &url),
+                self.redacted(&detail)
+            );
+        }
+        self.written()
     }
 
     pub fn trace(&self, project: u64, job: u64, offset: u64) -> Result<TraceChunk> {
@@ -1892,6 +2094,12 @@ struct Title {
     title: Option<String>,
     #[serde(default)]
     iid: Option<u64>,
+    #[serde(default)]
+    start_date: Option<String>,
+    #[serde(default)]
+    due_date: Option<String>,
+    #[serde(default)]
+    state: Option<Value>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1999,12 +2207,27 @@ impl ApiItem {
             iteration: self
                 .iteration
                 .map(|i| {
-                    i.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
-                        i.iid
-                            .or(i.id)
-                            .map(|id| format!("Iteration #{id}"))
-                            .unwrap_or_default()
-                    })
+                    if i.start_date.is_some() || i.due_date.is_some() {
+                        let current = iteration_is_current(
+                            i.state.as_ref(),
+                            i.start_date.as_deref(),
+                            i.due_date.as_deref(),
+                            chrono::Local::now().date_naive(),
+                        );
+                        iteration_label(
+                            i.title.as_deref(),
+                            i.start_date.as_deref(),
+                            i.due_date.as_deref(),
+                            current,
+                        )
+                    } else {
+                        i.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+                            i.iid
+                                .or(i.id)
+                                .map(|id| format!("Iteration #{id}"))
+                                .unwrap_or_default()
+                        })
+                    }
                 })
                 .unwrap_or_default(),
             source_branch: self.source_branch.unwrap_or_default(),
@@ -2313,8 +2536,8 @@ mod tests {
         assert_ne!(users[0].value, users[1].value);
         assert_eq!(users[0].label, users[1].label);
         let iterations = mock.client().lookup(7, LookupKind::Iterations, "").unwrap();
-        assert!(iterations[0].label.contains("2026-10-01"));
-        assert!(iterations[0].description.contains("group 6"));
+        assert!(iterations[0].label.contains("2026"));
+        assert!(!iterations[0].label.contains("Iteration #"));
         let labels = mock.client().lookup(7, LookupKind::Labels, "bug").unwrap();
         assert_eq!(labels[0].value, "bug");
         assert_eq!(labels[0].api_value, "bug");
@@ -2436,14 +2659,143 @@ mod tests {
             assert_eq!(params["include_ancestors"], "true");
             assert_eq!(params["state"], "current");
             Reply::json(json!([
-                {"id":42,"title":"Sprint","start_date":"2026-10-01","due_date":"2026-10-14","group_id":6}
+                {"id":42,"title":"Sprint","start_date":"2026-10-01","due_date":"2026-10-14","group_id":6,
+                 "web_url":"https://gl.example/groups/acme/platform/-/iterations/3"}
             ]))
         });
         let current = mock.client().current_iteration(7).unwrap().unwrap();
         assert_eq!(current.id, 42);
-        assert_eq!(current.title, "Sprint");
-        assert!(current.description.contains("2026-10-01"));
-        assert!(current.description.contains("group 6"));
+        assert!(current.title.starts_with("Sprint ("), "{}", current.title);
+        assert!(current.title.contains("2026"), "{}", current.title);
+        assert!(current.title.ends_with("(Current)"), "{}", current.title);
+        assert_eq!(current.description, "Current iteration · acme/platform");
+    }
+
+    #[test]
+    fn iteration_labels_show_dates_group_and_state_without_ids() {
+        let entries: Vec<IterationMatch> = serde_json::from_value(json!([
+            {"id":84001,"iid":84,"title":null,"start_date":"2026-09-28","due_date":"2026-10-11","state":2,
+             "web_url":"https://gl.example/groups/acme/platform/-/iterations/84"},
+            {"id":84002,"iid":85,"title":null,"start_date":"2026-10-12","due_date":"2026-10-25","state":"upcoming",
+             "web_url":"https://gl.example/groups/acme/-/iterations/85"}
+        ]))
+        .unwrap();
+        let current = entries[0].lookup_option();
+        assert!(current.label.ends_with(" (Current)"), "{}", current.label);
+        assert!(!current.label.contains("Iteration #"));
+        assert_eq!(current.description, "Current iteration · acme/platform");
+        assert_eq!(current.api_value, "84001");
+        let upcoming = entries[1].lookup_option();
+        assert!(!upcoming.label.contains("Current"));
+        assert_eq!(upcoming.description, "Upcoming · acme");
+        assert!(!upcoming.description.contains("8400"));
+    }
+
+    #[test]
+    fn issue_iteration_shows_dates_instead_of_a_bare_number() {
+        let mut value = raw_item(1, "opened");
+        value["iteration"] = json!({"id":84001,"iid":84,"title":null,"state":2,
+            "start_date":"2026-09-28","due_date":"2026-10-11"});
+        let item = serde_json::from_value::<ApiItem>(value)
+            .unwrap()
+            .into_item(7, ItemKind::Issue);
+        assert!(item.iteration.contains("2026"), "{}", item.iteration);
+        assert!(item.iteration.ends_with(" (Current)"), "{}", item.iteration);
+        assert_eq!(item.iteration_id, Some(84001));
+    }
+
+    #[test]
+    fn identical_iteration_labels_are_made_unique() {
+        let mock = Mock::new(|_| {
+            Reply::json(json!([
+                {"id":1,"iid":1,"start_date":"2026-10-01","due_date":"2026-10-14","web_url":"https://gl/groups/a/-/iterations/1"},
+                {"id":2,"iid":1,"start_date":"2026-10-01","due_date":"2026-10-14","web_url":"https://gl/groups/b/-/iterations/1"}
+            ]))
+        });
+        let options = mock.client().lookup(7, LookupKind::Iterations, "").unwrap();
+        assert_ne!(options[0].value, options[1].value);
+    }
+
+    #[test]
+    fn issue_iteration_is_assigned_with_graphql_not_the_rest_update() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7" => Reply::json(json!({"path_with_namespace":"acme/platform"})),
+            "/api/graphql" => Reply::json(json!({"data":{"issueSetIteration":{"errors":[]}}})),
+            other => panic!("unexpected {other}"),
+        });
+        let client = mock.client();
+        for (value, expected) in [
+            ("84001", json!("gid://gitlab/Iteration/84001")),
+            ("", Value::Null),
+        ] {
+            client
+                .mutate(Mutation::Edit {
+                    key: key(ItemKind::Issue),
+                    field: "iteration_id".into(),
+                    value: value.into(),
+                })
+                .unwrap();
+            let requests = mock.requests.lock().unwrap();
+            let post = requests.iter().rev().find(|r| r.method == "POST").unwrap();
+            assert_eq!(post.url().path(), "/api/graphql");
+            let input = &post.json()["variables"]["input"];
+            assert_eq!(input["projectPath"], "acme/platform");
+            assert_eq!(input["iid"], "1");
+            assert_eq!(input["iterationId"], expected);
+            assert!(requests.iter().all(|r| r.method != "PUT"));
+        }
+    }
+
+    #[test]
+    fn graphql_iteration_errors_are_reported() {
+        let mock = Mock::new(|request| {
+            if request.url().path() == "/api/graphql" {
+                Reply::json(
+                    json!({"data":{"issueSetIteration":{"errors":["Iteration not found"]}}}),
+                )
+            } else {
+                Reply::json(json!({"path_with_namespace":"acme/platform"}))
+            }
+        });
+        let error = mock
+            .client()
+            .mutate(Mutation::Edit {
+                key: key(ItemKind::Issue),
+                field: "iteration_id".into(),
+                value: "5".into(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Iteration not found"), "{error}");
+    }
+
+    #[test]
+    fn failed_writes_report_request_and_response_without_secrets() {
+        let mock = Mock::new(|_| {
+            Reply::bytes(
+                400,
+                br#"{"message":"400 Bad request - at least one param test-private-secret"}"#
+                    .to_vec(),
+            )
+        });
+        let error = mock
+            .client()
+            .mutate(Mutation::Edit {
+                key: key(ItemKind::Issue),
+                field: "confidential".into(),
+                value: "true".into(),
+            })
+            .unwrap_err()
+            .to_string();
+        let first = error.lines().next().unwrap();
+        assert!(first.contains("HTTP 400"), "{error}");
+        assert!(
+            error.contains("Request: PUT /api/v4/projects/7/issues/1"),
+            "{error}"
+        );
+        assert!(error.contains(r#"{"confidential":true}"#), "{error}");
+        assert!(error.contains("at least one param"), "{error}");
+        assert!(!error.contains("test-private-secret"), "{error}");
     }
 
     #[test]

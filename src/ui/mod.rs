@@ -420,7 +420,7 @@ impl State {
                             Some(CurrentIteration {
                                 id,
                                 title: item.iteration.clone(),
-                                description: format!("{} · Demo · ID {id}", item.iteration),
+                                description: "Current iteration · demo".into(),
                             })
                         });
                 }

@@ -161,6 +161,21 @@ impl Completion {
         self.error = None;
     }
 
+    /// `raw` plus the symbolic Current iteration first, replacing GitLab's own entry for it.
+    fn with_current(&self, raw: &[LookupOption], query: &str) -> Vec<LookupOption> {
+        let mut options = raw.to_vec();
+        if let Some(current) = self.current_option().filter(|option| {
+            option.label.to_lowercase().contains(query)
+                || option.value.to_lowercase().contains(query)
+                || option.description.to_lowercase().contains(query)
+        }) {
+            options.retain(|option| option.id != current.id);
+            options.insert(0, current);
+        }
+        options.truncate(20);
+        options
+    }
+
     fn current_option(&self) -> Option<LookupOption> {
         self.current_iteration
             .as_ref()
@@ -306,18 +321,13 @@ impl Cronk {
             match result {
                 Ok(options) => {
                     let query = c.query.clone().unwrap_or_default().to_lowercase();
-                    let mut options: Vec<_> = options
+                    // Cache what GitLab returned; the synthetic Current entry is added per
+                    // display, otherwise every cache hit would stack another copy.
+                    let raw: Vec<_> = options
                         .into_iter()
                         .filter(|option| option.id > 0 && !option.value.trim().is_empty())
                         .collect();
-                    if let Some(current) = c.current_option().filter(|option| {
-                        option.label.to_lowercase().contains(&query)
-                            || option.value.to_lowercase().contains(&query)
-                            || option.description.to_lowercase().contains(&query)
-                    }) {
-                        options.insert(0, current);
-                    }
-                    c.options = options.into_iter().take(20).collect();
+                    c.options = c.with_current(&raw, &query);
                     for option in &c.options {
                         if !option.color.is_empty() {
                             c.swatches.insert(
@@ -334,8 +344,7 @@ impl Cronk {
                     if c.cache.len() >= 32 {
                         c.cache.clear();
                     }
-                    c.cache
-                        .insert(c.query.clone().unwrap_or_default(), c.options.clone());
+                    c.cache.insert(c.query.clone().unwrap_or_default(), raw);
                 }
                 Err(error) => {
                     c.error = Some(error);
@@ -478,6 +487,37 @@ mod tests {
         assert_eq!(c.api_value("Release, two").unwrap(), "12");
         c.resolved.insert("2026".into(), "50".into());
         assert_eq!(c.api_value("2026").unwrap(), "50");
+    }
+
+    #[test]
+    fn current_iteration_is_listed_once_however_often_results_are_shown() {
+        let option = |id, label: &str| LookupOption {
+            id,
+            label: label.into(),
+            value: label.into(),
+            api_value: id.to_string(),
+            description: String::new(),
+            color: String::new(),
+            text_color: String::new(),
+        };
+        let mut c = Completion::new(LookupKind::Iterations, 1, false);
+        c.current_iteration = Some(CurrentIteration {
+            id: 2,
+            title: "28 Sep 2026 - 11 Oct 2026 (Current)".into(),
+            description: "Current iteration · acme".into(),
+        });
+        let raw = vec![
+            option(1, "14 Sep 2026 - 27 Sep 2026"),
+            option(2, "28 Sep 2026 - 11 Oct 2026 (Current)"),
+        ];
+        // Each cache hit re-decorates the same cached list.
+        for _ in 0..3 {
+            let shown = c.with_current(&raw, "current");
+            assert_eq!(shown.iter().filter(|o| o.id == 2).count(), 1);
+            assert_eq!(shown[0].id, 2);
+            assert_eq!(shown[0].description, "Current iteration · acme");
+        }
+        assert_eq!(c.with_current(&raw, "").len(), 2);
     }
 
     #[test]

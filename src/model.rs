@@ -143,10 +143,10 @@ impl LookupOption {
     pub fn current_iteration(iteration: &CurrentIteration) -> Self {
         Self {
             id: iteration.id,
-            label: CURRENT_ITERATION_NAME.into(),
-            value: CURRENT_ITERATION_NAME.into(),
+            label: iteration.title.clone(),
+            value: iteration.title.clone(),
             api_value: iteration.id.to_string(),
-            description: format!("Resolves to {}", iteration.description),
+            description: iteration.description.clone(),
             color: String::new(),
             text_color: String::new(),
         }

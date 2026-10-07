@@ -64,6 +64,7 @@ fn mount(theme: &str) -> Ui {
             // Allowed failures start collapsed; hard failures auto-expand (see below).
             allow_failure: true,
             web_url: String::new(),
+            started_at: None,
         },
         Job {
             id: JOB + 1,
@@ -72,6 +73,7 @@ fn mount(theme: &str) -> Ui {
             status: "success".into(),
             allow_failure: false,
             web_url: String::new(),
+            started_at: None,
         },
     ];
     ui.state_mut().traces.clear();

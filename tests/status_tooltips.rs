@@ -345,7 +345,17 @@ fn tooltips_explain_live_logs_sync_and_diff_warnings_and_do_not_block_job_clicks
     ui.state_mut().details.as_mut().unwrap().diffs[0].collapsed = true;
     ui.render();
     assert_tooltip(&mut ui, "diff-0-warning-status", "Diff warning: warning");
-    let job = ui.state().details.as_ref().unwrap().jobs[0].id;
+    // Running and hard-failed jobs start expanded; click one that does not.
+    let job = ui
+        .state()
+        .details
+        .as_ref()
+        .unwrap()
+        .jobs
+        .iter()
+        .find(|j| !ui.state().job_expanded(j))
+        .unwrap()
+        .id;
     let dot = rect(&ui, &format!("job-{job}-status"));
     assert!(!ui.state().expanded.contains(&job));
     for kind in [

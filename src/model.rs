@@ -485,6 +485,7 @@ pub struct Job {
     pub status: String,
     pub allow_failure: bool,
     pub web_url: String,
+    pub started_at: Option<String>,
 }
 
 impl Job {
@@ -506,6 +507,29 @@ impl Job {
             &self.status
         }
     }
+}
+
+/// Orders jobs for display: jobs that have started come first, most recently
+/// started on top (so current and last jobs are easy to reach); jobs yet to
+/// start follow, ordered by stage (earliest-created stage first) and then name.
+pub fn sort_jobs(jobs: &mut [Job]) {
+    let mut stage_rank: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for job in jobs.iter() {
+        let rank = stage_rank.entry(job.stage.clone()).or_insert(job.id);
+        *rank = (*rank).min(job.id);
+    }
+    jobs.sort_by(|a, b| {
+        let key = |j: &Job| (j.started_at.is_none(), stage_rank[&j.stage]);
+        match (&a.started_at, &b.started_at) {
+            (Some(x), Some(y)) => y.cmp(x).then(b.id.cmp(&a.id)),
+            (None, None) => key(a)
+                .cmp(&key(b))
+                .then_with(|| a.name.cmp(&b.name))
+                .then(a.id.cmp(&b.id)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+        }
+    });
 }
 
 /// Pseudo-statuses only used for colouring and tooltips. The text before ` (` is the label to show.
@@ -633,4 +657,37 @@ pub enum Mutation {
         target: String,
         description: String,
     },
+}
+
+#[cfg(test)]
+mod job_order_tests {
+    use super::*;
+
+    fn job(id: u64, name: &str, stage: &str, started: Option<&str>) -> Job {
+        Job {
+            id,
+            name: name.into(),
+            stage: stage.into(),
+            started_at: started.map(Into::into),
+            ..Job::default()
+        }
+    }
+
+    #[test]
+    fn started_jobs_newest_first_then_unstarted_by_stage_and_name() {
+        let mut jobs = vec![
+            job(1, "lint", "check", Some("2025-01-01T10:00:00Z")),
+            job(2, "unit-2", "test", Some("2025-01-01T10:05:00Z")),
+            job(3, "unit-1", "test", Some("2025-01-01T10:06:00Z")),
+            job(9, "deploy", "deploy", None),
+            job(5, "e2e-b", "e2e", None),
+            job(4, "e2e-a", "e2e", None),
+        ];
+        sort_jobs(&mut jobs);
+        let names: Vec<_> = jobs.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["unit-1", "unit-2", "lint", "e2e-a", "e2e-b", "deploy"]
+        );
+    }
 }

@@ -23,7 +23,7 @@ env:
 jobs:
   prepare:
     name: Validate release request
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     outputs:
@@ -55,7 +55,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     strategy:
@@ -150,7 +150,7 @@ jobs:
     needs:
       - prepare
       - build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
 

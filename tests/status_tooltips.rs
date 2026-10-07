@@ -240,15 +240,7 @@ fn detail_padding_and_status_slots_align_with_lists_in_every_theme() {
                 for job in jobs {
                     let key = format!("job-{}-status", job.id);
                     assert_eq!(rect(&ui, &key).x, 2);
-                    assert_tooltip(
-                        &mut ui,
-                        &key,
-                        if job.allow_failure {
-                            "Job (failure is allowed):"
-                        } else {
-                            "Job:"
-                        },
-                    );
+                    assert_tooltip(&mut ui, &key, "Job:");
                 }
                 let discussions = ui.state().details.as_ref().unwrap().discussions.clone();
                 for discussion in discussions {

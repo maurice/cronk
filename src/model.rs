@@ -510,6 +510,43 @@ impl Job {
 
 /// Pseudo-statuses only used for colouring and tooltips. The text before ` (` is the label to show.
 pub const STATUS_FAILED_ALLOWED: &str = "failed (allowed)";
+pub const STATUS_SUCCESS_WARNING: &str = "success (allowed failures)";
+pub const STATUS_RUNNING_FAILING: &str = "running (failing)";
+pub const STATUS_RUNNING_WARNING: &str = "running (allowed failures)";
+
+/// Aggregate pipeline status derived from its jobs; `reported` is GitLab's own status.
+pub fn pipeline_status(jobs: &[Job], reported: &str) -> String {
+    if jobs.is_empty() {
+        return reported.to_owned();
+    }
+    // GitLab may know about failures we cannot see (e.g. downstream trigger jobs).
+    let hard = reported == "failed" || jobs.iter().any(Job::failed_hard);
+    let soft = jobs.iter().any(|j| j.status == "failed" && j.allow_failure);
+    let active = jobs.iter().any(|j| {
+        matches!(
+            j.status.as_str(),
+            "running" | "pending" | "preparing" | "waiting_for_resource"
+        )
+    }) || reported == "running";
+    if active {
+        return if hard {
+            STATUS_RUNNING_FAILING
+        } else if soft {
+            STATUS_RUNNING_WARNING
+        } else {
+            "running"
+        }
+        .to_owned();
+    }
+    if jobs.iter().any(Job::failed_hard) {
+        return "failed".to_owned();
+    }
+    match reported {
+        "success" | "" if soft => STATUS_SUCCESS_WARNING.to_owned(),
+        "" => "success".to_owned(),
+        other => other.to_owned(),
+    }
+}
 
 /// The text to display for a (pseudo-)status.
 pub fn status_label(status: &str) -> &str {

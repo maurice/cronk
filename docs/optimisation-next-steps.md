@@ -379,6 +379,23 @@ matching. The remaining lever for text queries is doing fewer filter passes per
 event (the view now filters once per frame and selection lookups no longer sort);
 beyond that it is a derived-view cache.
 
+## Measured: one list view per frame and sort-free selection lookups
+
+The view now computes the filtered/sorted list once per frame, and selection
+lookups (`visible_item_at`, `visible_position`) filter without sorting. Release
+latency harness, 3,000 MRs, median per gesture, before → after:
+
+| Gesture | Before | After |
+| --- | ---: | ---: |
+| Text-filter drag | 33.9 ms | 21.9 ms |
+| Wheel | 35.9 ms | 32.0 ms |
+| Edit | 14.1 ms | 11.1 ms |
+| Dashboard dispatch | 1.1 ms | 0.6 ms |
+| Text-filter `Move` | unchanged | unchanged |
+
+**Limitations:** headless (no real terminal output) on a noisy shared host, so
+treat the figures as indicative; the wheel gain in particular is within noise.
+Text `Move` is dominated by the filter pass itself and did not change.
 
 ## Delivery constraints
 

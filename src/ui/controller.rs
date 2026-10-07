@@ -550,8 +550,7 @@ impl Component for Cronk {
                 }
                 let selected = ctx
                     .state
-                    .visible_items()
-                    .get(ctx.state.scroll.selected)
+                    .visible_item_at(ctx.state.scroll.selected)
                     .map(|i| i.key.clone());
                 match result {
                     Ok((items, current_iteration)) => {
@@ -560,8 +559,7 @@ impl Component for Cronk {
                         ctx.state.items.extend(items);
                         ctx.state.current_iterations.insert(id, current_iteration);
                         if let Some(key) = selected
-                            && let Some(index) =
-                                ctx.state.visible_items().iter().position(|i| i.key == key)
+                            && let Some(index) = ctx.state.visible_position(&key)
                         {
                             ctx.state.scroll.selected = index;
                         }
@@ -915,8 +913,7 @@ impl Component for Cronk {
                         } else {
                             let key = ctx
                                 .state
-                                .visible_items()
-                                .get(ctx.state.scroll.selected)
+                                .visible_item_at(ctx.state.scroll.selected)
                                 .map(|i| i.key.clone());
                             if let Some(key) = key {
                                 self.open_item(ctx, key);
@@ -2488,7 +2485,7 @@ impl Cronk {
             }
             Action::NewIssue | Action::NewMergeRequest => {
                 let project = ctx.state.config.route.as_ref().map(|k| k.project)
-                    .or_else(|| if ctx.state.config.active_tab == 1 { ctx.state.config.projects.get(ctx.state.scroll.selected).map(|p| p.id) } else { ctx.state.visible_items().get(ctx.state.scroll.selected).map(|i| i.key.project) })
+                    .or_else(|| if ctx.state.config.active_tab == 1 { ctx.state.config.projects.get(ctx.state.scroll.selected).map(|p| p.id) } else { ctx.state.visible_item_at(ctx.state.scroll.selected).map(|i| i.key.project) })
                     .or_else(|| ctx.state.config.projects.iter().find(|p| p.visible).map(|p| p.id));
                 let Some(project) = project else { self.dialog_error(ctx, "Add a project first"); return Update::full(); };
                 let project = ctx.state.project(project).map(|p| p.path.clone()).unwrap_or_else(|| project.to_string());

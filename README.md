@@ -58,7 +58,7 @@ just run
 
 Create a personal access token with `read_api` for browsing, or `api` for editing, posting, creating issues/MRs, and retrying jobs. Your account must also have the required project permissions. Do not put the token in a command argument or the TOML file. `token_env` can name a different environment variable.
 
-Open **Ctrl+P → Add existing GitLab project**. Search by project name, choose a suggestion, and optionally set a short alias. A numeric ID or full `group/subgroup/project` path also works. This registers an existing project locally; it does not create a project on GitLab. Use separate `--config path/to/workspace.toml` files for different hosts. `--host` / `GITLAB_URL` cannot silently repoint a populated workspace to another host.
+Open **Ctrl+P → Add project**. Search by project name, choose a suggestion, and optionally set a short alias. A numeric ID or full `group/subgroup/project` path also works. This registers an existing project locally; it does not create a project on GitLab. Use separate `--config path/to/workspace.toml` files for different hosts. `--host` / `GITLAB_URL` cannot silently repoint a populated workspace to another host.
 
 Enterprise URL prefixes such as `https://host.example/gitlab` are supported. HTTPS and native system certificate roots are used. Install your company CA into the system trust store, or set `NODE_EXTRA_CA_CERTS` to a PEM file containing one or more additional trusted CA certificates:
 
@@ -142,7 +142,7 @@ For assignees and reviewers, separate people with commas: `@alex, Sam`. Each loo
 
 Searches are debounced for **300 ms**, with at most one lookup request in flight; obsolete responses cannot replace newer results. Each request fetches at most the first **20 matches**, and up to 32 queries are cached per field for the lifetime of the dialog. Refine your search to find more specific matches. Project members are searched by name/username; milestone and iteration lookups include ancestor groups. Untitled, automatically scheduled iterations show their date range and can be searched by cadence title where supported by GitLab. Lookup errors and rate limits retain your draft.
 
-New issue/MR forms suggest projects from your workspace by alias or path. **Add existing project** searches your GitLab memberships. Demo mode uses local fictional matches and makes no lookup requests.
+New issue/MR forms suggest projects from your workspace by alias or path. **Add project** searches your GitLab memberships. Demo mode uses local fictional matches and makes no lookup requests.
 
 ## Pipelines without tab switching
 

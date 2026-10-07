@@ -229,7 +229,14 @@ fn detail_padding_and_status_slots_align_with_lists_in_every_theme() {
             if kind == ItemKind::MergeRequest {
                 assert_eq!(rect(&ui, "detail-pipeline-status").x, 2);
                 assert_tooltip(&mut ui, "detail-pipeline-status", "Pipeline:");
+                let jobs = ui.state().details.as_ref().unwrap().jobs.clone();
                 for status in ["running", "pending", "success", "failed"] {
+                    // Empty groups are not shown.
+                    if !jobs.iter().any(|j| {
+                        j.status == status || (status == "pending" && j.status == "created")
+                    }) {
+                        continue;
+                    }
                     assert_tooltip(
                         &mut ui,
                         &format!("pipeline-summary-{status}-status"),
@@ -240,15 +247,7 @@ fn detail_padding_and_status_slots_align_with_lists_in_every_theme() {
                 for job in jobs {
                     let key = format!("job-{}-status", job.id);
                     assert_eq!(rect(&ui, &key).x, 2);
-                    assert_tooltip(
-                        &mut ui,
-                        &key,
-                        if job.allow_failure {
-                            "Job (failure is allowed):"
-                        } else {
-                            "Job:"
-                        },
-                    );
+                    assert_tooltip(&mut ui, &key, "Job:");
                 }
                 let discussions = ui.state().details.as_ref().unwrap().discussions.clone();
                 for discussion in discussions {
@@ -346,7 +345,17 @@ fn tooltips_explain_live_logs_sync_and_diff_warnings_and_do_not_block_job_clicks
     ui.state_mut().details.as_mut().unwrap().diffs[0].collapsed = true;
     ui.render();
     assert_tooltip(&mut ui, "diff-0-warning-status", "Diff warning: warning");
-    let job = ui.state().details.as_ref().unwrap().jobs[0].id;
+    // Running and hard-failed jobs start expanded; click one that does not.
+    let job = ui
+        .state()
+        .details
+        .as_ref()
+        .unwrap()
+        .jobs
+        .iter()
+        .find(|j| !ui.state().job_expanded(j))
+        .unwrap()
+        .id;
     let dot = rect(&ui, &format!("job-{job}-status"));
     assert!(!ui.state().expanded.contains(&job));
     for kind in [

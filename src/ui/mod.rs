@@ -620,7 +620,18 @@ impl State {
     }
 
     pub fn job_expanded(&self, job: &Job) -> bool {
-        !self.collapsed.contains(&job.id) && (job.running() || self.expanded.contains(&job.id))
+        !self.collapsed.contains(&job.id)
+            && (job.running() || job.failed_hard() || self.expanded.contains(&job.id))
+    }
+
+    /// Whether this job's trace should currently be fetched or polled.
+    pub fn trace_wanted(&self, job: &Job) -> bool {
+        let loaded = self.traces.get(&job.id);
+        (job.running()
+            || (job.failed_hard() && !self.collapsed.contains(&job.id))
+            || self.expanded.contains(&job.id)
+            || loaded.is_some())
+            && !loaded.is_some_and(|t| t.finished && !job.running())
     }
 
     pub fn log_height(&self, viewport_height: u16, id: u64) -> usize {

@@ -155,6 +155,10 @@ impl Colors {
         match status {
             "opened" | "success" | "passed" | "resolved" => ('●', self.green),
             "running" => ('◐', self.blue),
+            STATUS_RUNNING_FAILING => ('◐', self.red),
+            STATUS_RUNNING_WARNING => ('◐', self.yellow),
+            STATUS_SUCCESS_WARNING => ('●', self.yellow),
+            STATUS_FAILED_ALLOWED => ('●', self.yellow),
             "failed" | "error" | "unresolved" => ('●', self.red),
             "merged" => ('●', self.purple),
             "pending" | "created" | "waiting_for_resource" | "preparing" => ('○', self.pending),
@@ -248,6 +252,10 @@ fn status_help(subject: &str, status: &str) -> String {
         "success" | "passed" => "Completed successfully",
         "running" => "Currently running",
         "failed" | "error" => "Finished with an error",
+        STATUS_SUCCESS_WARNING => "Passed; some jobs failed but were allowed to fail",
+        STATUS_RUNNING_FAILING => "Running; a job has failed",
+        STATUS_RUNNING_WARNING => "Running; some jobs failed but were allowed to fail",
+        STATUS_FAILED_ALLOWED => "Failed, but the job is allowed to fail",
         "pending" => "Waiting for an available runner",
         "created" => "Created, not yet queued for execution",
         "waiting_for_resource" => "Waiting for a required resource",
@@ -264,7 +272,7 @@ fn status_help(subject: &str, status: &str) -> String {
         "hidden" => "Excluded from work lists until shown again",
         _ => "Status reported by GitLab",
     };
-    format!("{subject}: {status} — {explanation}")
+    format!("{subject}: {} — {explanation}", status_label(status))
 }
 
 /// Only the single glyph is the trigger: adjacent padding/text never opens the tip.
@@ -2122,15 +2130,16 @@ fn note_view(ctx: &Context<Cronk>, note: &Note, colors: Colors) -> DetailRow {
 fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
     let mut content = Vec::new();
     if let Some(pipeline) = &details.item.pipeline {
+        let status = pipeline_status(&details.jobs, &pipeline.status);
         content.push(
             DetailRow::from(rich(
                 vec![
                     Span::new(format!("Pipeline #{}   ", pipeline.id)).bold(),
-                    Span::new(pipeline.status.clone()).fg(colors.status(&pipeline.status).1),
+                    Span::new(status_label(&status).to_owned()).fg(colors.status(&status).1),
                 ],
                 colors.base(),
             ))
-            .with_status("detail-pipeline-status", "Pipeline", &pipeline.status),
+            .with_status("detail-pipeline-status", "Pipeline", &status),
         );
         content.push(metadata("Web URL", pipeline.web_url.clone(), colors).into());
     } else {
@@ -2143,17 +2152,31 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Deta
         );
     }
     let count = |status: &str| details.jobs.iter().filter(|j| j.status == status).count();
+    let failed_status = if details.jobs.iter().any(Job::failed_hard) {
+        "failed"
+    } else {
+        STATUS_FAILED_ALLOWED
+    };
     let mut summary = HStack::new().height(Length::Px(1)).style(colors.base());
-    for (status, label, count) in [
-        ("running", "running", count("running")),
-        ("pending", "pending", count("pending") + count("created")),
-        ("success", "passed", count("success")),
-        ("failed", "failed", count("failed")),
+    // Only list states that have jobs: a "0 failed" entry reads as a problem when scanning.
+    for (key, status, label, count) in [
+        ("running", "running", "running", count("running")),
+        (
+            "pending",
+            "pending",
+            "pending",
+            count("pending") + count("created"),
+        ),
+        ("success", "success", "passed", count("success")),
+        ("failed", failed_status, "failed", count("failed")),
     ] {
+        if count == 0 {
+            continue;
+        }
         summary = summary
             .child(status_dot(
                 ctx,
-                format!("pipeline-summary-{status}-status"),
+                format!("pipeline-summary-{key}-status"),
                 "Jobs",
                 status,
                 colors.base(),
@@ -2178,15 +2201,12 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Deta
 }
 
 fn job_header(job: &Job, expanded: bool, colors: Colors) -> Vec<Span> {
-    let mut spans = vec![
+    let spans = vec![
         Span::new(if expanded { "− " } else { "+ " }).fg(colors.muted),
         Span::new(job.name.clone()).bold(),
         Span::new(format!("  {}  #{}  ", job.stage, job.id)).fg(colors.muted),
-        Span::new(job.status.clone()).fg(colors.status(&job.status).1),
+        Span::new(job.status.clone()).fg(colors.status(job.display_status()).1),
     ];
-    if job.allow_failure {
-        spans.push(Span::new("  ·  allowed failure").fg(colors.yellow));
-    }
     spans
 }
 
@@ -2443,15 +2463,7 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRo
                     Msg::ToggleJob(id)
                 },
             )
-            .with_status(
-                format!("job-{id}-status"),
-                if job.allow_failure {
-                    "Job (failure is allowed)"
-                } else {
-                    "Job"
-                },
-                &job.status,
-            ),
+            .with_status(format!("job-{id}-status"), "Job", job.display_status()),
         );
         if expanded {
             let mut row = DetailRow::keyed(
@@ -3561,6 +3573,70 @@ mod tests {
     }
 
     #[test]
+    fn allowed_failures_are_yellow_and_plain_failures_red() {
+        let colors = Colors::new(&Config::default());
+        let job = |allow_failure| Job {
+            status: "failed".into(),
+            allow_failure,
+            ..Job::default()
+        };
+        assert_eq!(colors.status(job(true).display_status()).1, colors.yellow);
+        assert_eq!(colors.status(job(false).display_status()).1, colors.red);
+        let spans = job_header(&job(true), false, colors);
+        assert!(spans.iter().all(|s| !format!("{s:?}").contains("allowed")));
+    }
+
+    #[test]
+    fn pipeline_status_aggregates_jobs() {
+        let job = |status: &str, allow_failure| Job {
+            status: status.into(),
+            allow_failure,
+            ..Job::default()
+        };
+        let agg = |jobs: &[Job]| pipeline_status(jobs, "success");
+        assert_eq!(agg(&[job("success", false)]), "success");
+        assert_eq!(
+            agg(&[job("success", false), job("failed", true)]),
+            STATUS_SUCCESS_WARNING
+        );
+        assert_eq!(agg(&[job("failed", true), job("failed", false)]), "failed");
+        assert_eq!(
+            agg(&[job("running", false), job("success", false)]),
+            "running"
+        );
+        assert_eq!(
+            agg(&[job("running", false), job("failed", true)]),
+            STATUS_RUNNING_WARNING
+        );
+        assert_eq!(
+            agg(&[
+                job("running", false),
+                job("failed", true),
+                job("failed", false)
+            ]),
+            STATUS_RUNNING_FAILING
+        );
+        let with = |jobs: &[Job], reported: &str| pipeline_status(jobs, reported);
+        let ok = [job("success", false)];
+        assert_eq!(with(&[], "pending"), "pending");
+        assert_eq!(with(&ok, "failed"), "failed");
+        assert_eq!(with(&ok, "canceled"), "canceled");
+        assert_eq!(with(&ok, "manual"), "manual");
+        assert_eq!(with(&[job("created", false)], "created"), "created");
+        assert_eq!(with(&ok, "running"), "running");
+        assert_eq!(
+            with(&[job("pending", false), job("failed", false)], "running"),
+            STATUS_RUNNING_FAILING
+        );
+        assert_eq!(with(&ok, "success"), "success");
+        let colors = Colors::new(&Config::default());
+        assert_eq!(colors.status(STATUS_SUCCESS_WARNING), ('●', colors.yellow));
+        assert_eq!(colors.status(STATUS_RUNNING_FAILING), ('◐', colors.red));
+        assert_eq!(colors.status(STATUS_RUNNING_WARNING), ('◐', colors.yellow));
+        assert_eq!(status_label(STATUS_SUCCESS_WARNING), "success");
+    }
+
+    #[test]
     fn status_tooltips_explain_known_states_and_preserve_unknown_values() {
         for status in [
             "opened",
@@ -3571,6 +3647,10 @@ mod tests {
             "passed",
             "running",
             "failed",
+            "failed (allowed)",
+            "success (allowed failures)",
+            "running (failing)",
+            "running (allowed failures)",
             "error",
             "pending",
             "created",
@@ -3587,7 +3667,7 @@ mod tests {
             "warning",
         ] {
             let help = status_help("Status", status);
-            assert!(help.starts_with(&format!("Status: {status} — ")));
+            assert!(help.starts_with(&format!("Status: {} — ", status_label(status))));
             assert!(
                 !help.ends_with("Status reported by GitLab"),
                 "missing explanation: {status}"

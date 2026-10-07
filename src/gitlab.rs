@@ -37,7 +37,7 @@
 
 use crate::model::{
     CurrentIteration, DetailPart, Details, Diff, Discussion, ItemKey, ItemKind, Label, LookupKind,
-    LookupOption, Mutation, Pipeline, Project, TraceChunk, User, WorkItem,
+    LookupOption, Mutation, Pipeline, Project, TraceChunk, User, WorkItem, sort_jobs,
 };
 use anyhow::{Result, anyhow, bail};
 use reqwest::{
@@ -1408,6 +1408,7 @@ impl GitLab {
                     details.jobs = self
                         .optional(jobs, "Pipeline jobs", &mut details.warnings)
                         .0;
+                    sort_jobs(&mut details.jobs);
                     details.item.pipeline = Some(pipeline.pipeline);
                 }
             }

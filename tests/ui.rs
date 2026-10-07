@@ -1589,7 +1589,16 @@ fn deleting_a_saved_view_reindexes_navigation_and_caches_without_overwriting_its
     let first_selected = ui.state().scroll.selected;
     key(&mut ui, KeyCode::Char('3'));
     key(&mut ui, KeyCode::Enter);
-    cache_finished_job(&mut ui, "Last view cached detail");
+    let cached = cache_finished_job(&mut ui, "Last view cached detail");
+    let cached_index = ui
+        .state()
+        .details
+        .as_ref()
+        .unwrap()
+        .jobs
+        .iter()
+        .position(|j| j.id == cached)
+        .unwrap();
     key(&mut ui, KeyCode::Down);
     ui.dispatch(Msg::ContentScroll(4)).unwrap();
     settle_layout(&mut ui);
@@ -1602,7 +1611,7 @@ fn deleting_a_saved_view_reindexes_navigation_and_caches_without_overwriting_its
     let last_selected = ui.state().scroll.selected;
     let last_traces = traces(ui.state());
     assert!(last.list_offset > 0);
-    assert_eq!(last.field, 1);
+    assert_eq!(last.field, cached_index + 1);
     persisted_tab(&ui, &path);
 
     key(&mut ui, KeyCode::Char('2'));

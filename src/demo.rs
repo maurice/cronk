@@ -335,7 +335,7 @@ fn jobs(item: &WorkItem) -> Vec<Job> {
         ("package", "package"),
         ("publish:preview", "deploy"),
     ];
-    entries
+    let mut jobs: Vec<Job> = entries
         .into_iter()
         .enumerate()
         .map(|(index, (name, stage))| {
@@ -357,6 +357,8 @@ fn jobs(item: &WorkItem) -> Vec<Job> {
                 stage: stage.into(),
                 status: status.into(),
                 allow_failure: index == 5,
+                started_at: matches!(status, "running" | "success" | "failed" | "canceled")
+                    .then(|| format!("2025-01-01T10:{index:02}:00Z")),
                 web_url: format!(
                     "{}/-/jobs/{id}",
                     item.web_url
@@ -366,7 +368,9 @@ fn jobs(item: &WorkItem) -> Vec<Job> {
                 ),
             }
         })
-        .collect()
+        .collect();
+    crate::model::sort_jobs(&mut jobs);
+    jobs
 }
 
 pub fn details(key: &ItemKey) -> Details {

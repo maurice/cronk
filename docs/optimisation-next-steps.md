@@ -351,6 +351,35 @@ rows, metadata-only list models or DB-backed paging.
   tests cannot measure it).
 - CI/runner/Node-20 housekeeping (already handled; separate from this work).
 
+## Measured: an ASCII fast path for text matching does not help
+
+Priority 2 suspected that `to_lowercase()` allocation in `filter.rs` was the
+hotspot. An allocation-free ASCII path (`text.is_ascii() && value.is_ascii()`,
+then per-byte `to_ascii_lowercase` comparison, Unicode fallback otherwise) was
+implemented with differential tests and measured: it made things **worse and was
+dropped**. In the release latency harness (3,000 MRs, text term `handoff`, `Move`
+total median over three alternating runs) it went from 16.5 / 22.2 / 19.7 ms to
+36.9 / 45.0 / 50.5 ms.
+
+A standalone microbench of one filter pass (3,000 × ~2 KB ASCII descriptions,
+best of 20, release) explains it:
+
+| Strategy | needle `handoff` | needle `zzzz` (miss) |
+| --- | ---: | ---: |
+| current `to_lowercase().contains()` | 0.7 ms | 1.4–2.9 ms |
+| `windows` + `to_ascii_lowercase` | 4.4–7.1 ms | 4.6–7.4 ms |
+| first-byte scan + verify | 3.5–5.1 ms | 3.6–5.0 ms |
+| `memchr2` first byte + verify (new dependency) | 2.3 ms | 2.1 ms |
+| reused thread-local lowercase buffer + `contains` | 0.6–1.1 ms | 1.8–2.6 ms |
+
+std's ASCII `to_lowercase` is already vectorised and the allocation is cheap; the
+cost is the substring search itself, which `str::contains` does faster than any
+byte loop without a SIMD case-insensitive matcher. Do not revisit allocation-free
+matching. The remaining lever for text queries is doing fewer filter passes per
+event (the view now filters once per frame and selection lookups no longer sort);
+beyond that it is a derived-view cache.
+
+
 ## Delivery constraints
 
 Start each PR from freshly fetched `origin/main` and read current `AGENTS.md`.

@@ -1,0 +1,7 @@
+# Debug-build tests render full detail documents through tui-lipan's recursive
+# layout; a merge request detail needs ~2.1 MiB of stack, just above libtest's
+# 2 MiB default thread stack, so headroom is required rather than luck.
+# Applies to test binaries run by cargo and cargo-nextest; the real binary runs
+# on the main thread with the OS default (8 MiB on Linux).
+[env]
+RUST_MIN_STACK = "8388608"

@@ -4,7 +4,7 @@ use cronk::{
     config::Config,
     demo,
     model::{ItemKind, Job, TraceChunk},
-    ui::{Cronk, Msg, Scope, Trace},
+    ui::{Cronk, JobSource, Msg, Scope, Trace},
 };
 use tui_lipan::{
     TestBackend,
@@ -144,7 +144,7 @@ fn append(ui: &mut Ui, value: &str, reset: bool) {
         ui.state().traces[&JOB].offset + value.len() as u64
     };
     ui.dispatch(Msg::TraceLoaded(
-        route,
+        JobSource::Item(route),
         ui.state().detail_epoch,
         JOB,
         false,
@@ -699,7 +699,7 @@ fn empty_and_error_traces_keep_fullscreen_status_visible_and_hide_the_scrollbar(
         assert!(text(&ui).contains("Waiting for log output"));
         let route = ui.state().config.route.clone().unwrap();
         ui.dispatch(Msg::TraceLoaded(
-            route,
+            JobSource::Item(route),
             ui.state().detail_epoch,
             JOB,
             false,

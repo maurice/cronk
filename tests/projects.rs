@@ -515,9 +515,12 @@ fn project_fields_are_left_aligned_editable_first_and_match_shared_label_width()
         .count();
     assert_eq!(value_x - column.unwrap(), "Merge requests".len() + 2);
     assert!(text.find("Pipelines").unwrap() > text.find("Open work").unwrap());
-    assert!(text.find("Forget this project").unwrap() > text.find("Pipelines").unwrap());
-    let placeholder = ui.rect_of_key(&"detail-section-1-row-0".into()).unwrap();
-    assert_eq!(placeholder.h, 7);
+    assert!(
+        text.contains("also syncs pipelines"),
+        "MR visibility annotates pipeline sync: {text}"
+    );
+    // Pipelines now fill the section, pushing the destructive button below the fold.
+    assert!(ui.rect_of_key(&"pipeline-60999".into()).is_some(), "{text}");
 }
 
 #[test]
@@ -525,6 +528,10 @@ fn forget_button_is_three_rows_centered_contrasting_and_accessible_on_small_scre
     for theme in THEMES {
         let mut ui = mount(demo::projects().remove(0), 40);
         ui.state_mut().config.theme = theme.into();
+        ui.dispatch(Msg::Enter).unwrap();
+        settle(&mut ui);
+        // Pipelines fill the document: focus the last section to reveal the button.
+        ui.dispatch(Msg::Move(2)).unwrap();
         ui.dispatch(Msg::Enter).unwrap();
         settle(&mut ui);
         let rect = ui.rect_of_key(&"project-remove".into()).unwrap();

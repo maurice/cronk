@@ -114,7 +114,7 @@ impl Component for Cronk {
             .map_or(config.section.unwrap_or(0), |tab| tab.section_cursor)
             .min(section_last);
         let mut state = State {
-            saved_config: config.clone(),
+            saved_config: Box::new(config.clone()),
             navigation_writer,
             navigation_snapshot,
             navigation_selections,
@@ -163,6 +163,17 @@ impl Component for Cronk {
                 .map_or_else(HashSet::new, |tab| tab.expanded.iter().copied().collect()),
             collapsed: saved.map_or_else(HashSet::new, |tab| tab.collapsed.into_iter().collect()),
             log_views: HashMap::new(),
+            project_pipelines: HashMap::new(),
+            latest_pipeline: HashMap::new(),
+            pipeline_expanded: HashSet::new(),
+            pipeline_collapsed: HashSet::new(),
+            drilled: None,
+            pipeline_epoch: 0,
+            pipelines_pending: HashSet::new(),
+            pipeline_detail_pending: HashSet::new(),
+            probe_pending: HashSet::new(),
+            next_pipelines: Duration::ZERO,
+            next_probe: Duration::ZERO,
             log_focus: None,
             log_zoom: false,
             log_zoom_from_focus: false,
@@ -333,8 +344,14 @@ impl Component for Cronk {
                     if ctx.state.config.route.is_some() && now >= ctx.state.next_details {
                         ctx.link().send(Msg::LoadDetails);
                     }
-                    if ctx.state.config.route.is_some() && now >= ctx.state.next_traces {
+                    if ctx.state.job_source().is_some() && now >= ctx.state.next_traces {
                         ctx.link().send(Msg::LoadTraces);
+                    }
+                    if ctx.state.pipelines_section_present() && now >= ctx.state.next_pipelines {
+                        ctx.link().send(Msg::LoadPipelines);
+                    }
+                    if now >= ctx.state.next_probe {
+                        ctx.link().send(Msg::LoadProbes);
                     }
                 }
                 return Update::with_command(Command::after(
@@ -849,9 +866,10 @@ impl Component for Cronk {
                 }
             }
             Msg::LoadTraces => return self.load_traces(ctx),
-            Msg::TraceLoaded(key, epoch, id, finished, result) => {
+            Msg::TraceLoaded(source, epoch, id, finished, result) => {
                 ctx.state.trace_pending.remove(&(epoch, id));
-                if ctx.state.config.route.as_ref() != Some(&key) || ctx.state.detail_epoch != epoch
+                if ctx.state.job_source().as_ref() != Some(&source)
+                    || ctx.state.detail_epoch != epoch
                 {
                     return Update::none();
                 }
@@ -886,6 +904,21 @@ impl Component for Cronk {
                     }
                 }
             }
+            Msg::LoadPipelines => return self.load_pipelines(ctx, false),
+            Msg::LoadOlderPipelines => return self.load_pipelines(ctx, true),
+            Msg::PipelinesLoaded(project, epoch, page, result) => {
+                return self.pipelines_loaded(ctx, project, epoch, page, result);
+            }
+            Msg::PipelineLoaded(project, pipeline, epoch, result) => {
+                return self.pipeline_loaded(ctx, project, pipeline, epoch, result);
+            }
+            Msg::TogglePipeline(id) => return self.toggle_pipeline(ctx, id),
+            Msg::ClickPipeline(id) => return self.click_pipeline(ctx, id),
+            Msg::DrillPipeline(id) => return self.drill_pipeline(ctx, id),
+            Msg::ProbeLoaded(project, epoch, result) => {
+                return self.probe_loaded(ctx, project, epoch, result);
+            }
+            Msg::LoadProbes => return self.load_probes(ctx),
             Msg::SetupValidate(epoch) => return self.validate_setup(ctx, epoch),
             Msg::SetupValidated(epoch, validation) => {
                 if epoch == ctx.state.onboarding.epoch
@@ -1063,6 +1096,22 @@ impl Component for Cronk {
                             return self.activate_project_field(ctx);
                         }
                         "Forget this project" => return self.action(ctx, Action::RemoveProject),
+                        "Pipelines" => {
+                            if let Some(job) = ctx.state.selected_job() {
+                                let id = job.id;
+                                return self.update(Msg::FocusLog(id), ctx);
+                            }
+                            let Some(window) = ctx.state.open_project_pipelines() else {
+                                return Update::none();
+                            };
+                            if let Some(pipeline) = window.pipelines.get(ctx.state.config.field) {
+                                let id = pipeline.id;
+                                return self.update(Msg::DrillPipeline(id), ctx);
+                            }
+                            if window.can_load_more() {
+                                return self.update(Msg::LoadOlderPipelines, ctx);
+                            }
+                        }
                         "Fields" => self.edit_field(ctx),
                         "Description" => {
                             if let Some(d) = &ctx.state.details {
@@ -1106,6 +1155,17 @@ impl Component for Cronk {
                     }
                 } else if ctx.state.log_focus.take().is_some() {
                     // Return to job navigation without changing section or viewport.
+                } else if ctx.state.scope == Scope::Section
+                    && ctx.state.section_name() == "Pipelines"
+                    && let Some(id) = ctx.state.drilled.take()
+                {
+                    // Back to the pipeline row, which stays expanded.
+                    ctx.state.config.field = ctx
+                        .state
+                        .open_project_pipelines()
+                        .and_then(|w| w.position(id))
+                        .unwrap_or(0);
+                    ctx.state.reveal_content = true;
                 } else {
                     match ctx.state.scope {
                         Scope::Section => {
@@ -1128,6 +1188,7 @@ impl Component for Cronk {
                             ctx.state.expanded.clear();
                             ctx.state.collapsed.clear();
                             ctx.state.log_views.clear();
+                            ctx.state.drilled = None;
                             ctx.state.content_offset = 0;
                             ctx.state.restore_selection(false);
                             self.normalize(ctx);
@@ -1190,7 +1251,7 @@ impl Component for Cronk {
                     self.edit_field(ctx);
                 }
             }
-            Msg::ProjectDetailViewport(id, epoch, event) => {
+            Msg::ProjectDetailViewport(id, epoch, target, event) => {
                 if !ctx.state.project_details()
                     || ctx.state.config.project_route != Some(id)
                     || ctx.state.detail_epoch != epoch
@@ -1198,6 +1259,15 @@ impl Component for Cronk {
                     return Update::none();
                 }
                 ctx.state.content_max_offset = event.metrics.max_offset;
+                // A viewport measured for a superseded reveal (rapid navigation) must not
+                // cancel the pending one; pipelines make the document long enough to matter.
+                if ctx.state.reveal_content
+                    && target
+                        .as_ref()
+                        .is_some_and(|key| *key != ctx.state.detail_target_key())
+                {
+                    return Update::none();
+                }
                 ctx.state.content_offset = event.offset;
                 ctx.state.reveal_content = false;
             }
@@ -1317,6 +1387,16 @@ impl Component for Cronk {
                             project.merge_requests_visible = !project.merge_requests_visible
                         }
                     }
+                    // The Pipelines section follows MR visibility; keep the cursor valid.
+                    let last = ctx.state.sections().len() - 1;
+                    ctx.state.section_cursor = ctx.state.section_cursor.min(last);
+                    ctx.state.config.section = ctx.state.config.section.map(|s| s.min(last));
+                    if !ctx.state.pipelines_section_present() {
+                        ctx.state.drilled = None;
+                    }
+                    ctx.state.pipeline_epoch += 1;
+                    ctx.state.next_pipelines = Duration::ZERO;
+                    ctx.state.next_probe = Duration::ZERO;
                     self.persist(ctx);
                     self.normalize(ctx);
                     self.restart_project_sync(ctx);
@@ -1325,9 +1405,8 @@ impl Component for Cronk {
             Msg::ToggleJob(id) => {
                 let Some(job) = ctx
                     .state
-                    .details
-                    .as_ref()
-                    .and_then(|d| d.jobs.iter().find(|j| j.id == id))
+                    .current_jobs()
+                    .and_then(|(_, jobs)| jobs.iter().find(|j| j.id == id))
                 else {
                     return Update::none();
                 };
@@ -1347,9 +1426,8 @@ impl Component for Cronk {
             Msg::FocusLog(id) => {
                 let Some(index) = ctx
                     .state
-                    .details
-                    .as_ref()
-                    .and_then(|d| d.jobs.iter().position(|j| j.id == id))
+                    .current_jobs()
+                    .and_then(|(_, jobs)| jobs.iter().position(|j| j.id == id))
                 else {
                     return Update::none();
                 };
@@ -1781,13 +1859,11 @@ impl Component for Cronk {
                     },
                 )),
                 KeyCode::Char('c') => Some(Msg::Action(Action::Comment)),
-                KeyCode::Char('r') => Some(Msg::Action(
-                    if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Pipeline" {
-                        Action::RetryJob
-                    } else {
-                        Action::Refresh
-                    },
-                )),
+                KeyCode::Char('r') => Some(Msg::Action(if ctx.state.in_jobs() {
+                    Action::RetryJob
+                } else {
+                    Action::Refresh
+                })),
                 KeyCode::Char('R') => Some(Msg::Action(Action::Reply)),
                 KeyCode::Char('x') => Some(Msg::Action(Action::Resolve)),
                 KeyCode::Char('?') => Some(Msg::Action(Action::Help)),
@@ -1891,7 +1967,7 @@ impl Cronk {
                 ctx.state.error = Some(format!("Workspace not saved: {error:#}"));
                 return false;
             }
-            ctx.state.saved_config = ctx.state.config.clone();
+            *ctx.state.saved_config = ctx.state.config.clone();
             if installation_changed {
                 // Only discard old installation UI state after config save
                 // succeeds. The same background writer opens the new namespace.
@@ -2083,6 +2159,13 @@ impl Cronk {
         }
     }
 
+    /// Back off like `network_error` without replacing the visible error banner.
+    fn quiet_network_error(&self, ctx: &mut Context<Self>, error: &str) {
+        let visible = ctx.state.error.take();
+        self.network_error(ctx, error.to_owned());
+        ctx.state.error = visible;
+    }
+
     pub(super) fn network_error(&self, ctx: &mut Context<Self>, error: String) {
         // A bad resource schema is not a server outage or a rate limit. Blocking
         // unrelated list/detail/trace requests cannot make that response valid.
@@ -2102,17 +2185,18 @@ impl Cronk {
 
     fn load_traces(&self, ctx: &mut Context<Self>) -> Update {
         ctx.state.next_traces = ctx.elapsed() + Duration::from_secs(2);
-        let Some(details) = &ctx.state.details else {
+        let Some(source) = ctx.state.job_source() else {
+            return Update::none();
+        };
+        let Some((project, jobs)) = ctx.state.current_jobs() else {
             return Update::none();
         };
         if ctx.elapsed() < ctx.state.blocked_until {
             return Update::none();
         }
-        let key = details.item.key.clone();
-        let project = details.jobs_project.unwrap_or(key.project);
+        let key = source;
         let epoch = ctx.state.detail_epoch;
-        let requests: Vec<_> = details
-            .jobs
+        let requests: Vec<_> = jobs
             .iter()
             .filter(|job| {
                 ctx.state.trace_wanted(job)
@@ -2164,6 +2248,374 @@ impl Cronk {
             }
             Update::full()
         }
+    }
+
+    /// Kept out of `update` so its stack frame stays small in debug builds.
+    #[inline(never)]
+    fn pipelines_loaded(
+        &mut self,
+        ctx: &mut Context<Self>,
+        project: u64,
+        epoch: u64,
+        page: usize,
+        result: Result<Vec<Pipeline>, String>,
+    ) -> Update {
+        ctx.state.pipelines_pending.remove(&(project, page));
+        if epoch != ctx.state.pipeline_epoch {
+            return Update::none();
+        }
+        // Keep the selected row identity while the window shifts.
+        let selected = (ctx.state.config.project_route == Some(project)
+            && ctx.state.scope == Scope::Section
+            && ctx.state.section_name() == "Pipelines"
+            && ctx.state.drilled.is_none())
+        .then(|| {
+            ctx.state
+                .open_project_pipelines()
+                .and_then(|w| w.pipelines.get(ctx.state.config.field))
+                .map(|p| p.id)
+        })
+        .flatten();
+        let window = ctx.state.project_pipelines.entry(project).or_default();
+        match result {
+            Ok(pipelines) => {
+                if page == 1
+                    && let Some(newest) = pipelines.first()
+                {
+                    ctx.state.latest_pipeline.insert(project, newest.clone());
+                }
+                window.merge(page, pipelines);
+                if let Some(id) = selected
+                    && let Some(index) = window.position(id)
+                {
+                    ctx.state.config.field = index;
+                }
+                if ctx.state.config.project_route == Some(project) {
+                    ctx.state.status = "Pipelines updated".into();
+                }
+                return Update::with_command(self.load_pipeline_details(ctx, project));
+            }
+            Err(error) => {
+                window.error = Some(error.clone());
+                self.network_error(ctx, error);
+            }
+        }
+        Update::full()
+    }
+
+    /// Kept out of `update` so its stack frame stays small in debug builds.
+    #[inline(never)]
+    fn pipeline_loaded(
+        &mut self,
+        ctx: &mut Context<Self>,
+        project: u64,
+        pipeline: u64,
+        epoch: u64,
+        result: Result<Box<(Pipeline, Vec<Job>)>, String>,
+    ) -> Update {
+        ctx.state.pipeline_detail_pending.remove(&pipeline);
+        if epoch != ctx.state.pipeline_epoch {
+            return Update::none();
+        }
+        let Some(window) = ctx.state.project_pipelines.get_mut(&project) else {
+            return Update::none();
+        };
+        match result {
+            Ok(loaded) => {
+                let (full, jobs) = *loaded;
+                let job_id = ctx
+                    .state
+                    .selected_job()
+                    .filter(|_| ctx.state.drilled == Some(pipeline))
+                    .map(|j| j.id);
+                let window = ctx.state.project_pipelines.get_mut(&project).unwrap();
+                if let Some(existing) = window.pipelines.iter_mut().find(|p| p.id == pipeline) {
+                    *existing = full;
+                }
+                if ctx.state.config.project_route == Some(project)
+                    && ctx.state.drilled == Some(pipeline)
+                {
+                    if let Some(index) = jobs.iter().position(|j| Some(j.id) == job_id) {
+                        ctx.state.config.field = index;
+                    } else {
+                        ctx.state.config.field =
+                            ctx.state.config.field.min(jobs.len().saturating_sub(1));
+                    }
+                    if ctx
+                        .state
+                        .log_focus
+                        .is_some_and(|id| !jobs.iter().any(|j| j.id == id))
+                    {
+                        self.close_log_mode(ctx);
+                    }
+                }
+                let window = ctx.state.project_pipelines.get_mut(&project).unwrap();
+                window.jobs.insert(pipeline, jobs);
+                if ctx.state.drilled == Some(pipeline) {
+                    ctx.link().send(Msg::LoadTraces);
+                }
+            }
+            Err(error) => {
+                window.error = Some(error.clone());
+                self.network_error(ctx, error);
+            }
+        }
+        Update::full()
+    }
+
+    /// Kept out of `update` so its stack frame stays small in debug builds.
+    #[inline(never)]
+    fn toggle_pipeline(&mut self, ctx: &mut Context<Self>, id: u64) -> Update {
+        let Some(project) = ctx.state.config.project_route else {
+            return Update::none();
+        };
+        if ctx.state.pipeline_expanded(project, id) {
+            ctx.state.pipeline_expanded.remove(&id);
+            ctx.state.pipeline_collapsed.insert(id);
+            if ctx.state.drilled == Some(id) {
+                ctx.state.drilled = None;
+                ctx.state.config.field = ctx
+                    .state
+                    .open_project_pipelines()
+                    .and_then(|w| w.position(id))
+                    .unwrap_or(0);
+                self.close_log_mode(ctx);
+            }
+        } else {
+            ctx.state.pipeline_collapsed.remove(&id);
+            ctx.state.pipeline_expanded.insert(id);
+            return Update::with_command(self.load_pipeline_details(ctx, project));
+        }
+        Update::full()
+    }
+
+    /// Kept out of `update` so its stack frame stays small in debug builds.
+    #[inline(never)]
+    fn click_pipeline(&mut self, ctx: &mut Context<Self>, id: u64) -> Update {
+        self.close_log_mode(ctx);
+        let Some(index) = ctx
+            .state
+            .open_project_pipelines()
+            .and_then(|w| w.position(id))
+        else {
+            return Update::none();
+        };
+        if let Some(section) = ctx.state.section_index("Pipelines") {
+            ctx.state.section_cursor = section;
+            ctx.state.config.section = Some(section);
+        }
+        ctx.state.scope = Scope::Section;
+        ctx.state.drilled = None;
+        ctx.state.config.field = index;
+        ctx.state.reveal_content = false;
+        self.persist(ctx);
+        self.update(Msg::TogglePipeline(id), ctx)
+    }
+
+    /// Kept out of `update` so its stack frame stays small in debug builds.
+    #[inline(never)]
+    fn drill_pipeline(&mut self, ctx: &mut Context<Self>, id: u64) -> Update {
+        let Some(project) = ctx.state.config.project_route else {
+            return Update::none();
+        };
+        if ctx
+            .state
+            .open_project_pipelines()
+            .and_then(|w| w.get(id))
+            .is_none()
+        {
+            return Update::none();
+        }
+        if let Some(section) = ctx.state.section_index("Pipelines") {
+            ctx.state.section_cursor = section;
+            ctx.state.config.section = Some(section);
+        }
+        ctx.state.scope = Scope::Section;
+        ctx.state.pipeline_collapsed.remove(&id);
+        ctx.state.pipeline_expanded.insert(id);
+        ctx.state.drilled = Some(id);
+        ctx.state.config.field = 0;
+        ctx.state.reveal_content = true;
+        ctx.link().send(Msg::LoadTraces);
+        self.persist(ctx);
+        Update::with_command(self.load_pipeline_details(ctx, project))
+    }
+
+    /// Kept out of `update` so its stack frame stays small in debug builds.
+    #[inline(never)]
+    fn probe_loaded(
+        &mut self,
+        ctx: &mut Context<Self>,
+        project: u64,
+        epoch: u64,
+        result: Result<Option<Box<Pipeline>>, String>,
+    ) -> Update {
+        ctx.state.probe_pending.remove(&project);
+        if epoch != ctx.state.pipeline_epoch {
+            return Update::none();
+        }
+        match result {
+            Ok(Some(pipeline)) => {
+                ctx.state.latest_pipeline.insert(project, *pipeline);
+            }
+            Ok(None) => {
+                ctx.state.latest_pipeline.remove(&project);
+            }
+            // A flaky CI endpoint must not nag on every tab: back off quietly.
+            Err(error) => self.quiet_network_error(ctx, &error),
+        }
+        Update::full()
+    }
+
+    /// Page 1 (or the next older page) of the open project's pipelines, then the
+    /// detail + jobs of expanded pipelines. Memory-only; nothing is cached on disk.
+    fn load_pipelines(&self, ctx: &mut Context<Self>, older: bool) -> Update {
+        ctx.state.next_pipelines =
+            ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs);
+        if !ctx.state.pipelines_section_present() {
+            return Update::none();
+        }
+        let Some(project) = ctx.state.config.project_route else {
+            return Update::none();
+        };
+        let page = if older {
+            let Some(window) = ctx.state.project_pipelines.get(&project) else {
+                return Update::none();
+            };
+            if !window.can_load_more() {
+                return Update::none();
+            }
+            window.pages_loaded + 1
+        } else {
+            1
+        };
+        if ctx.state.pipelines_pending.contains(&(project, page))
+            || ctx.elapsed() < ctx.state.blocked_until
+        {
+            return Update::none();
+        }
+        let epoch = ctx.state.pipeline_epoch;
+        let Some(api) = self.api.clone() else {
+            if ctx.state.demo {
+                let fresh = demo::project_pipelines(project, page);
+                ctx.state.pipelines_pending.insert((project, page));
+                ctx.link()
+                    .send(Msg::PipelinesLoaded(project, epoch, page, Ok(fresh)));
+            }
+            return Update::full();
+        };
+        ctx.state.pipelines_pending.insert((project, page));
+        ctx.state.project_pipelines.entry(project).or_default();
+        Update::with_command(ctx.link().command(move |link| {
+            let result = api
+                .project_pipelines(project, page)
+                .map_err(|e| e.to_string());
+            link.send(Msg::PipelinesLoaded(project, epoch, page, result));
+        }))
+    }
+
+    /// Detail + jobs for expanded/drilled pipelines (bounded, independent deliveries).
+    fn load_pipeline_details(&self, ctx: &mut Context<Self>, project: u64) -> Option<Command> {
+        if ctx.elapsed() < ctx.state.blocked_until {
+            return None;
+        }
+        let wanted: Vec<u64> = ctx
+            .state
+            .wanted_pipelines(project)
+            .into_iter()
+            .filter(|id| !ctx.state.pipeline_detail_pending.contains(id))
+            .take(4)
+            .collect();
+        if wanted.is_empty() {
+            return None;
+        }
+        let epoch = ctx.state.pipeline_epoch;
+        let Some(api) = self.api.clone() else {
+            if ctx.state.demo {
+                for id in wanted {
+                    let result = demo::pipeline_with_jobs(project, id).map(Box::new);
+                    ctx.link()
+                        .send(Msg::PipelineLoaded(project, id, epoch, result));
+                }
+            }
+            return None;
+        };
+        ctx.state
+            .pipeline_detail_pending
+            .extend(wanted.iter().copied());
+        Some(ctx.link().command(move |link| {
+            std::thread::scope(|scope| {
+                for &id in &wanted {
+                    let api = api.clone();
+                    let link = link.clone();
+                    scope.spawn(move || {
+                        let result = api
+                            .pipeline_with_jobs(project, id)
+                            .map(Box::new)
+                            .map_err(|e| e.to_string());
+                        link.send(Msg::PipelineLoaded(project, id, epoch, result));
+                    });
+                }
+            });
+        }))
+    }
+
+    /// Newest pipeline for every MR-visible project except the open one, whose page 1
+    /// already covers it. Slower than list refresh: this only feeds the row indicator.
+    fn load_probes(&self, ctx: &mut Context<Self>) -> Update {
+        ctx.state.next_probe =
+            ctx.elapsed() + Duration::from_secs(ctx.state.config.pipeline_refresh_secs());
+        if ctx.elapsed() < ctx.state.blocked_until {
+            return Update::none();
+        }
+        let open = ctx
+            .state
+            .config
+            .project_route
+            .filter(|_| ctx.state.project_details());
+        let ids: Vec<u64> = ctx
+            .state
+            .config
+            .projects
+            .iter()
+            .filter(|p| p.kind_visible(ItemKind::MergeRequest) && Some(p.id) != open)
+            .map(|p| p.id)
+            .filter(|id| !ctx.state.probe_pending.contains(id))
+            .collect();
+        if ids.is_empty() {
+            return Update::none();
+        }
+        let epoch = ctx.state.pipeline_epoch;
+        let Some(api) = self.api.clone() else {
+            if ctx.state.demo {
+                for id in ids {
+                    let latest = demo::project_pipelines(id, 1).into_iter().next();
+                    ctx.link()
+                        .send(Msg::ProbeLoaded(id, epoch, Ok(latest.map(Box::new))));
+                }
+            }
+            return Update::full();
+        };
+        ctx.state.probe_pending.extend(ids.iter().copied());
+        Update::with_command(ctx.link().command(move |link| {
+            for batch in ids.chunks(4) {
+                std::thread::scope(|scope| {
+                    for &id in batch {
+                        let api = api.clone();
+                        let link = link.clone();
+                        scope.spawn(move || {
+                            link.send(Msg::ProbeLoaded(
+                                id,
+                                epoch,
+                                api.latest_pipeline(id)
+                                    .map(|p| p.map(Box::new))
+                                    .map_err(|e| e.to_string()),
+                            ));
+                        });
+                    }
+                });
+            }
+        }))
     }
 
     /// Drop all remembered state for a tab index that is vanishing or being reused.
@@ -2218,6 +2670,7 @@ impl Cronk {
         }
         let cache = TabCache {
             details: ctx.state.details.take(),
+            drilled: ctx.state.drilled.take(),
             traces: std::mem::take(&mut ctx.state.traces),
             log_views: std::mem::take(&mut ctx.state.log_views),
             next_details: ctx.state.next_details,
@@ -2259,6 +2712,7 @@ impl Cronk {
         ctx.state.detail_pending = None;
         ctx.state.trace_pending.clear();
         ctx.state.details = cache.details;
+        ctx.state.drilled = cache.drilled;
         ctx.state.traces = cache.traces;
         ctx.state.log_views = cache.log_views;
         self.close_log_mode(ctx);
@@ -2325,7 +2779,20 @@ impl Cronk {
         ctx.state.expanded.clear();
         ctx.state.collapsed.clear();
         ctx.state.log_views.clear();
+        ctx.state.drilled = None;
         self.close_log_mode(ctx);
+        // Older pages are dropped when a project is (re)opened; page 1 stays as a
+        // snapshot that renders immediately and then refreshes.
+        if let Some(window) = ctx.state.project_pipelines.get_mut(&id) {
+            window.pipelines.truncate(crate::gitlab::PIPELINE_PAGE);
+            window.pages_loaded = window.pages_loaded.min(1);
+            window.exhausted = false;
+            window.jobs.clear();
+        }
+        ctx.state.next_pipelines = Duration::ZERO;
+        if ctx.state.pipelines_section_present() {
+            ctx.link().send(Msg::LoadPipelines);
+        }
     }
 
     fn close_log_mode(&self, ctx: &mut Context<Self>) {
@@ -2370,6 +2837,7 @@ impl Cronk {
         ctx.state.expanded.clear();
         ctx.state.collapsed.clear();
         ctx.state.log_views.clear();
+        ctx.state.drilled = None;
         self.close_log_mode(ctx);
         ctx.state.section_cursor = 0;
         ctx.state.content_offset = 0;
@@ -2451,6 +2919,15 @@ impl Cronk {
                     "Forget this project" => 1,
                     "Fields" => ctx.state.fields().len(),
                     "Pipeline" => ctx.state.details.as_ref().map_or(0, |d| d.jobs.len()),
+                    "Pipelines" => {
+                        if ctx.state.drilled.is_some() {
+                            ctx.state.current_jobs().map_or(0, |(_, jobs)| jobs.len())
+                        } else {
+                            ctx.state
+                                .open_project_pipelines()
+                                .map_or(0, ProjectPipelines::row_count)
+                        }
+                    }
                     "Discussions" => ctx
                         .state
                         .details
@@ -2855,14 +3332,11 @@ impl Cronk {
                 }
             }
             Action::RetryJob => {
-                let job = if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Pipeline" {
-                    ctx.state.details.as_ref().and_then(|d| d.jobs.get(ctx.state.config.field)).cloned()
-                } else { None };
+                let job = ctx.state.selected_job().cloned();
                 if let Some(job) = job.filter(Job::retryable) {
-                    let project = ctx.state.details.as_ref().and_then(|d| d.jobs_project)
-                        .unwrap_or_else(|| ctx.state.config.route.as_ref().map_or(0, |k| k.project));
+                    let project = ctx.state.current_jobs().map_or(0, |(project, _)| project);
                     self.show_dialog(ctx, DialogKind::Confirm(Confirmation::Mutate(Mutation::RetryJob { project, job: job.id })), "Retry pipeline job?", &format!("{} · this consumes GitLab runner resources", job.name), vec![]);
-                } else { self.dialog_error(ctx, "Select a finished, retryable job in the Pipeline section"); }
+                } else { self.dialog_error(ctx, "Select a finished, retryable job first"); }
             }
         }
         Update::full()

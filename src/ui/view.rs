@@ -914,6 +914,7 @@ fn section_hint(section: &str) -> &'static str {
             "↑ ↓ choose a job · Space toggle · Enter logs · z zoom · Ctrl+↑/↓/PgUp/PgDn logs"
         }
         "Discussions" => "↑ ↓ choose a discussion · reply / resolve via commands",
+        "Pipelines" => "↑ ↓ choose a pipeline · Space expands · Enter opens its jobs",
         "Changes" => "Unified diff · ↑ ↓ scroll",
         _ => "↑ ↓ scroll · Esc returns to section navigation",
     }
@@ -1251,19 +1252,68 @@ fn project_row(
                 colors,
             ))
             .child(list_selection_line(
-                line(
-                    if work.is_empty() {
-                        String::new()
-                    } else {
-                        format!("   {work}")
-                    },
-                    style.fg(colors.muted),
-                ),
+                project_work_line(ctx, project, &work, style, colors),
                 marked,
                 colors,
             ))
             .child(blank()),
         move || Msg::Activate(index),
+    )
+}
+
+/// Open-work counts plus the newest pipeline (from the background probe) for
+/// projects whose pipelines are synced.
+fn project_work_line(
+    ctx: &Context<Cronk>,
+    project: &Project,
+    work: &str,
+    style: Style,
+    colors: Colors,
+) -> HStack {
+    let mut row = HStack::new().height(Length::Px(1)).style(style);
+    let mut text = if work.is_empty() {
+        String::new()
+    } else {
+        format!("   {work}")
+    };
+    let latest = ctx
+        .state
+        .latest_pipeline
+        .get(&project.id)
+        .filter(|_| project.kind_visible(ItemKind::MergeRequest));
+    let Some(latest) = latest else {
+        return row.child(line(text, style.fg(colors.muted)));
+    };
+    text.push_str(if text.is_empty() { "   " } else { "  ·  " });
+    row = row
+        .child(
+            Text::new(text)
+                .width(Length::Auto)
+                .height(Length::Px(1))
+                .style(style.fg(colors.muted)),
+        )
+        .child(status_dot(
+            ctx,
+            format!("project-pipeline-{}", project.id),
+            "Pipeline",
+            &latest.status,
+            style,
+            colors,
+        ));
+    let mut facts = vec![format!("pipeline {}", status_label(&latest.status))];
+    let reference = latest.ref_label();
+    if !reference.is_empty() {
+        facts.push(reference);
+    }
+    if let Some(updated) = latest.updated_at.as_deref().filter(|u| !u.is_empty()) {
+        facts.push(crate::dates::format_relative(updated, ctx.state.now_unix()));
+    }
+    row.child(
+        Text::new(format!(" {}", facts.join(" · ")))
+            .width(Length::Flex(1))
+            .height(Length::Px(1))
+            .overflow(Overflow::Ellipsis)
+            .style(style.fg(colors.muted)),
     )
 }
 
@@ -1380,7 +1430,7 @@ fn project_detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
     for (index, section) in state.sections().iter().enumerate() {
         let selected = state.section_cursor == index;
         // Match issue/MR details: contract the highlight to editable controls on Enter.
-        let broad = state.scope == Scope::Details || *section == "Pipelines";
+        let broad = state.scope == Scope::Details;
         let background = if state.config.animations {
             ctx.transition(
                 format!("detail-focus-background-{index}"),
@@ -1449,22 +1499,11 @@ fn project_detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
             move || Msg::DetailSection(index),
         ));
         let children = match *section {
-        "Fields" => project_fields(ctx, &project, section_colors),
-        "Pipelines" => vec![
-            VStack::new()
-                .height(Length::Px(7))
-                .style(section_colors.base())
-                .child(blank())
-                .child(Text::new("Project pipelines — coming soon")
-                    .style(section_colors.base().fg(colors.muted)).overflow(Overflow::Wrap))
-                .child(Text::new("Active and recent pipelines, including those not associated with a merge request, will appear here.")
-                    .height(Length::Auto).overflow(Overflow::Wrap)
-                    .style(section_colors.base().fg(colors.muted)))
-                .into(),
-        ],
-        "Forget this project" => project_forget(ctx, colors),
-        _ => Vec::new(),
-    };
+            "Fields" => project_fields(ctx, &project, section_colors),
+            "Pipelines" => project_pipelines(ctx, &project, index, section_colors),
+            "Forget this project" => project_forget(ctx, colors),
+            _ => Vec::new(),
+        };
         for (row_index, child) in children.into_iter().enumerate() {
             let key = child
                 .key
@@ -1496,11 +1535,12 @@ fn project_detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
     let target = state.reveal_content.then(|| state.detail_target_key());
     let id = project.id;
     let epoch = state.detail_epoch;
-    // Include the fixed-height pipeline placeholder and destructive button.
-    let overflows = content.len() + 8 > ctx.viewport().h.saturating_sub(9) as usize;
+    // Rows are single lines except expanded job panels and the destructive button.
+    let overflows = content.len() + 4 > ctx.viewport().h.saturating_sub(9) as usize;
+    let origin = target.clone();
     let mut scroll = scroll_content(ctx, content, colors, overflows).on_viewport_change(
         ctx.link().callback(move |event: ScrollViewportEvent| {
-            Msg::ProjectDetailViewport(id, epoch, Box::new(event))
+            Msg::ProjectDetailViewport(id, epoch, origin.clone(), Box::new(event))
         }),
     );
     if let Some(target) = target {
@@ -1634,14 +1674,26 @@ fn project_fields(ctx: &Context<Cronk>, project: &Project, colors: Colors) -> Ve
             vec![Span::new(value)]
         } else {
             let enabled = value == "visible";
-            vec![
+            let mut spans = vec![
                 Span::new(if enabled { "[on]  " } else { "[off] " }).fg(if enabled {
                     colors.green
                 } else {
                     colors.muted
                 }),
                 Span::new(value),
-            ]
+            ];
+            if label == "Merge requests" {
+                // Pipelines follow merge request visibility: no separate toggle.
+                spans.push(
+                    Span::new(if enabled {
+                        " · also syncs pipelines"
+                    } else {
+                        " · pipelines not synced"
+                    })
+                    .fg(colors.muted),
+                );
+            }
+            spans
         };
         content.push(DetailRow::interactive(
             format!("edit-field-{index}"),
@@ -1671,6 +1723,273 @@ fn project_fields(ctx: &Context<Cronk>, project: &Project, colors: Colors) -> Ve
         );
     }
     content
+}
+
+/// One pipeline per row: status, id, ref, source, run time, last update, name.
+fn pipeline_row_spans(
+    ctx: &Context<Cronk>,
+    pipeline: &Pipeline,
+    expanded: bool,
+    colors: Colors,
+) -> Vec<Span> {
+    let now = ctx.state.now_unix();
+    let mut spans = vec![
+        Span::new(if expanded { "▼ " } else { "▶ " }).fg(colors.muted),
+        Span::new(format!("#{}", pipeline.id)).bold(),
+        Span::new("  "),
+        Span::new(status_label(&pipeline.status).to_owned()).fg(colors.status(&pipeline.status).1),
+    ];
+    let mut facts = Vec::new();
+    let reference = pipeline.ref_label();
+    if !reference.is_empty() {
+        facts.push(reference);
+    }
+    let source = pipeline.source_label();
+    if !source.is_empty() {
+        facts.push(source);
+    }
+    if !facts.is_empty() {
+        spans.push(Span::new(format!("  {}", facts.join("  "))).fg(colors.foreground));
+    }
+    let mut times = Vec::new();
+    if let Some(secs) = pipeline.elapsed_secs(now) {
+        times.push(format_duration(secs));
+    }
+    if let Some(updated) = pipeline.updated_at.as_deref().filter(|u| !u.is_empty()) {
+        times.push(crate::dates::format_relative(updated, now));
+    }
+    if !times.is_empty() {
+        spans.push(Span::new(format!("   {}", times.join(" · "))).fg(colors.muted));
+    }
+    if let Some(name) = pipeline.name.as_deref().filter(|n| !n.is_empty()) {
+        spans.push(Span::new(format!("   {name}")).fg(colors.muted));
+    }
+    spans
+}
+
+/// Job-state counts for an expanded pipeline (only states that have jobs).
+fn job_counts(ctx: &Context<Cronk>, key_prefix: &str, jobs: &[Job], colors: Colors) -> HStack {
+    let count = |status: &str| jobs.iter().filter(|j| j.status == status).count();
+    let failed_status = if jobs.iter().any(Job::failed_hard) {
+        "failed"
+    } else {
+        STATUS_FAILED_ALLOWED
+    };
+    let mut summary = HStack::new().height(Length::Px(1)).style(colors.base());
+    for (key, status, label, count) in [
+        ("running", "running", "running", count("running")),
+        (
+            "pending",
+            "pending",
+            "pending",
+            count("pending") + count("created"),
+        ),
+        ("success", "success", "passed", count("success")),
+        ("failed", failed_status, "failed", count("failed")),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        summary = summary
+            .child(status_dot(
+                ctx,
+                format!("{key_prefix}-{key}-status"),
+                "Jobs",
+                status,
+                colors.base(),
+                colors,
+            ))
+            .child(
+                Text::new(format!(" {count} {label}   "))
+                    .height(Length::Px(1))
+                    .style(colors.base().fg(colors.status(status).1)),
+            );
+    }
+    summary.child(
+        Text::new(format!("{} total", jobs.len()))
+            .height(Length::Px(1))
+            .style(colors.base().fg(colors.muted)),
+    )
+}
+
+fn project_pipelines(
+    ctx: &Context<Cronk>,
+    project: &Project,
+    section: usize,
+    colors: Colors,
+) -> Vec<DetailRow> {
+    let state = &ctx.state;
+    let muted = colors.base().fg(colors.muted);
+    let Some(window) = state.project_pipelines.get(&project.id) else {
+        return loading_rows(ctx, "Pipelines", colors);
+    };
+    if !window.loaded && window.pipelines.is_empty() {
+        return match &window.error {
+            Some(error) => vec![
+                line(
+                    format!("⚠ Pipelines unavailable: {error}"),
+                    colors.base().fg(colors.yellow),
+                )
+                .into(),
+            ],
+            None => loading_rows(ctx, "Pipelines", colors),
+        };
+    }
+    let mut content = Vec::new();
+    if window.pipelines.is_empty() {
+        content.push(line("No pipelines yet for this project.", muted).into());
+    }
+    let in_section = state.scope == Scope::Section && state.section_name() == "Pipelines";
+    let indent = "    ";
+    for (index, pipeline) in window.pipelines.iter().enumerate() {
+        let id = pipeline.id;
+        let expanded = state.pipeline_expanded(project.id, id);
+        let drilled = state.drilled == Some(id);
+        let selected = in_section && state.drilled.is_none() && state.config.field == index;
+        let row_colors = if selected {
+            Colors {
+                background: colors.selection,
+                surface: colors.selection,
+                ..colors
+            }
+        } else {
+            colors
+        };
+        let style = interaction::style(ctx, &format!("pipeline-{id}"), row_colors.base());
+        content.push(
+            DetailRow::interactive(
+                format!("pipeline-{id}"),
+                rich(pipeline_row_spans(ctx, pipeline, expanded, colors), style),
+                selected,
+                move || Msg::ClickPipeline(id),
+            )
+            .with_status(
+                format!("pipeline-{id}-status"),
+                "Pipeline",
+                &pipeline.status,
+            ),
+        );
+        if !expanded {
+            continue;
+        }
+        let mut by = Vec::new();
+        if let Some(user) = &pipeline.user {
+            by.push(
+                Span::new(format!("{indent}by {}  ·  ", state.render_user(user))).fg(colors.muted),
+            );
+        } else {
+            by.push(Span::new(indent.to_owned()));
+        }
+        content.push(DetailRow::keyed(
+            format!("pipeline-{id}-link"),
+            HStack::new()
+                .height(Length::Auto)
+                .style(colors.base())
+                .child(Text::from_spans(by).style(colors.base()))
+                .child(web_link(&pipeline.web_url, colors)),
+        ));
+        match window.jobs.get(&id) {
+            Some(jobs_loaded) => {
+                let counts =
+                    job_counts(ctx, &format!("pipeline-{id}-summary"), jobs_loaded, colors);
+                content.push(DetailRow::keyed(
+                    format!("pipeline-{id}-jobs"),
+                    HStack::new()
+                        .height(Length::Px(1))
+                        .style(colors.base())
+                        .child(Text::new(indent).style(colors.base()))
+                        .child(counts),
+                ));
+                if drilled {
+                    content.push(blank().into());
+                    let cursor = in_section.then_some(state.config.field);
+                    content.extend(jobs(ctx, jobs_loaded, section, cursor, colors));
+                }
+            }
+            None => content.push(DetailRow::keyed(
+                format!("pipeline-{id}-jobs"),
+                line(format!("{indent}loading jobs…"), muted),
+            )),
+        }
+    }
+    if window.can_load_more() {
+        let selected =
+            in_section && state.drilled.is_none() && state.config.field == window.pipelines.len();
+        let pending = state
+            .pipelines_pending
+            .iter()
+            .any(|(p, page)| *p == project.id && *page > 1);
+        let style = interaction::style(
+            ctx,
+            "pipelines-older",
+            if selected {
+                colors.selected()
+            } else {
+                colors.base()
+            }
+            .fg(colors.accent),
+        );
+        content.push(blank().into());
+        content.push(DetailRow::interactive(
+            "pipelines-older".into(),
+            rich(
+                vec![Span::new(if pending {
+                    "  Loading older pipelines…".to_owned()
+                } else {
+                    format!(
+                        "  Show {} older pipelines…   ({} loaded)",
+                        crate::gitlab::PIPELINE_PAGE,
+                        window.pipelines.len()
+                    )
+                })],
+                style,
+            ),
+            selected,
+            || Msg::LoadOlderPipelines,
+        ));
+    } else if window.pages_loaded >= crate::gitlab::PIPELINE_PAGES {
+        content.push(blank().into());
+        content.push(
+            line(
+                format!(
+                    "  {} loaded · older pipelines are on GitLab: {}/-/pipelines",
+                    window.pipelines.len(),
+                    project_web_base(&state.config.gitlab_url, &project.path)
+                ),
+                muted,
+            )
+            .into(),
+        );
+    }
+    if let Some(error) = &window.error {
+        content.push(
+            line(
+                format!("⚠ Pipelines may be stale: {error}"),
+                colors.base().fg(colors.yellow),
+            )
+            .into(),
+        );
+    }
+    content
+}
+
+fn project_web_base(gitlab_url: &str, path: &str) -> String {
+    format!("{}/{path}", gitlab_url.trim_end_matches('/'))
+}
+
+/// Section skeleton while the first response is outstanding.
+fn loading_rows(ctx: &Context<Cronk>, section: &str, colors: Colors) -> Vec<DetailRow> {
+    let shade = if ctx.state.config.animations && ctx.state.tick.is_multiple_of(2) {
+        colors.blue
+    } else {
+        colors.muted
+    };
+    let style = colors.base();
+    vec![
+        line(format!("Loading {section}…"), style.fg(colors.muted)).into(),
+        line(" ▰▰▰▰▰▰▰▰  ▰▰▰▰", style.fg(shade)).into(),
+        line(" ▰▰▰▰▰▰  ▰▰▰▰▰▰▰▰", style.fg(shade)).into(),
+    ]
 }
 
 fn forget_style(colors: Colors) -> Style {
@@ -2033,7 +2352,8 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                 "Pipeline" => {
                     let mut rows = pipeline(ctx, details, section_colors);
                     rows.push(blank().into());
-                    rows.extend(jobs(ctx, details, section_colors));
+                    let cursor = ctx.state.in_jobs().then_some(ctx.state.config.field);
+                    rows.extend(jobs(ctx, &details.jobs, index, cursor, section_colors));
                     rows
                 }
                 "Discussions" => discussions(ctx, details, section_colors),
@@ -2734,8 +3054,16 @@ fn job_panel(ctx: &Context<Cronk>, job: &Job, lines: usize, colors: Colors) -> E
     Element::from(panel).key(format!("trace-{}", job.id))
 }
 
-fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRow> {
-    if details.jobs.is_empty() {
+/// Job rows with inline log panels. `section` is the owning section's index (the MR
+/// Pipeline section or the project Pipelines section); `cursor` is the selected job.
+fn jobs(
+    ctx: &Context<Cronk>,
+    jobs: &[Job],
+    section: usize,
+    cursor: Option<usize>,
+    colors: Colors,
+) -> Vec<DetailRow> {
+    if jobs.is_empty() {
         return vec![
             line(
                 "No jobs in this pipeline yet.",
@@ -2745,11 +3073,8 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRo
         ];
     }
     let mut content = Vec::new();
-    let section = ctx.state.section_index("Pipeline").unwrap_or(0);
-    for (index, job) in details.jobs.iter().enumerate() {
-        let selected = ctx.state.scope == Scope::Section
-            && ctx.state.section_name() == "Pipeline"
-            && ctx.state.config.field == index;
+    for (index, job) in jobs.iter().enumerate() {
+        let selected = cursor == Some(index);
         let expanded = ctx.state.job_expanded(job);
         let id = job.id;
         let link = ctx.link().clone();

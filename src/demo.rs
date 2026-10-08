@@ -330,6 +330,10 @@ fn jobs(item: &WorkItem) -> Vec<Job> {
     let Some(pipeline) = &item.pipeline else {
         return Vec::new();
     };
+    pipeline_jobs(pipeline, &item.web_url)
+}
+
+fn pipeline_jobs(pipeline: &Pipeline, base_url: &str) -> Vec<Job> {
     let entries = [
         ("format", "check"),
         ("clippy", "check"),
@@ -366,7 +370,7 @@ fn jobs(item: &WorkItem) -> Vec<Job> {
                     .then(|| format!("2025-01-01T10:{index:02}:00Z")),
                 web_url: format!(
                     "{}/-/jobs/{id}",
-                    item.web_url
+                    base_url
                         .split("/-/")
                         .next()
                         .unwrap_or("https://gitlab.demo.invalid")
@@ -376,6 +380,144 @@ fn jobs(item: &WorkItem) -> Vec<Job> {
         .collect();
     crate::model::sort_jobs(&mut jobs);
     jobs
+}
+
+fn timestamp(unix: i64) -> String {
+    chrono::DateTime::from_timestamp(unix, 0)
+        .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_default()
+}
+
+/// Every recent pipeline of a demo project, newest first: scheduled, push, web and API
+/// pipelines interleaved with the merge request head pipelines so both views agree.
+/// Project 9001 has 45 entries (three window pages); the others fit on one short page.
+fn all_project_pipelines(project: u64) -> Vec<Pipeline> {
+    let Some(index) = project.checked_sub(9_001).filter(|i| *i < 5) else {
+        return Vec::new();
+    };
+    let path = projects()[index as usize].path.clone();
+    let heads: Vec<Pipeline> = items()
+        .into_iter()
+        .filter(|item| item.key.project == project)
+        .filter_map(|item| item.pipeline)
+        .collect();
+    let count = if index == 0 { 45 } else { 12 };
+    let mut pipelines = Vec::with_capacity(count);
+    for n in 0..count {
+        let id = 60_999 + index * 1_000 - n as u64;
+        let created = NOW_UNIX - (n as i64 * 47 * 60 + 3 * 60 + 12 + index as i64 * 180);
+        let (source, reference, user, status, name) = match n % 6 {
+            0 => (
+                "schedule",
+                "main",
+                bot(),
+                if index % 2 == 0 && n == 0 {
+                    "running"
+                } else {
+                    "success"
+                },
+                Some("nightly"),
+            ),
+            1 => ("push", "main", user(), "success", None),
+            2 => ("push", "main", teammate(), "failed", None),
+            3 => ("web", "release/2026.09", reviewer(), "success", None),
+            4 => ("api", "main", bot(), "canceled", None),
+            _ => ("schedule", "main", bot(), "success", Some("nightly")),
+        };
+        let duration = if status == "running" {
+            None
+        } else {
+            Some(8 * 60 + 2 + (n as u64 * 37) % 300)
+        };
+        let started = created + 20;
+        let finished = duration.map(|d| started + d as i64);
+        pipelines.push(Pipeline {
+            id,
+            status: status.into(),
+            web_url: format!("https://gitlab.demo.invalid/{path}/-/pipelines/{id}"),
+            source: Some(source.into()),
+            ref_name: Some(reference.into()),
+            sha: Some(format!("{id:040x}")),
+            name: name.map(Into::into),
+            created_at: Some(timestamp(created)),
+            updated_at: Some(timestamp(finished.unwrap_or(NOW_UNIX - 5))),
+            started_at: Some(timestamp(started)),
+            finished_at: finished.map(timestamp),
+            duration,
+            queued_duration: Some(20),
+            user: Some(user),
+        });
+    }
+    // Merge request head pipelines sit between the first synthetic rows.
+    for (slot, head) in heads.into_iter().enumerate() {
+        let created = NOW_UNIX - ((slot as i64 + 1) * 23 * 60 + index as i64 * 180);
+        let duration = (head.status != "running").then_some(6 * 60 + 40 + slot as u64 * 11);
+        let started = created + 15;
+        pipelines.push(Pipeline {
+            source: Some("merge_request_event".into()),
+            ref_name: Some(format!("refs/merge-requests/{}/head", 101 + slot)),
+            sha: Some(format!("{:040x}", head.id)),
+            name: None,
+            created_at: Some(timestamp(created)),
+            updated_at: Some(timestamp(
+                duration.map_or(NOW_UNIX - 5, |d| started + d as i64),
+            )),
+            started_at: Some(timestamp(started)),
+            finished_at: duration.map(|d| timestamp(started + d as i64)),
+            duration,
+            queued_duration: Some(15),
+            user: Some(if slot % 2 == 0 { user() } else { teammate() }),
+            ..head
+        });
+    }
+    pipelines.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    pipelines
+}
+
+/// One window page (`crate::gitlab::PIPELINE_PAGE` entries) of a demo project's pipelines,
+/// with only the fields GitLab's list endpoint returns.
+pub fn project_pipelines(project: u64, page: usize) -> Vec<Pipeline> {
+    let size = crate::gitlab::PIPELINE_PAGE;
+    all_project_pipelines(project)
+        .into_iter()
+        .skip(page.max(1).saturating_sub(1) * size)
+        .take(size)
+        .map(|pipeline| Pipeline {
+            started_at: None,
+            finished_at: None,
+            duration: None,
+            queued_duration: None,
+            user: None,
+            ..pipeline
+        })
+        .collect()
+}
+
+/// The single-pipeline endpoint plus its jobs. Unknown ids are reported, not fabricated.
+pub fn pipeline_with_jobs(project: u64, id: u64) -> Result<(Pipeline, Vec<Job>), String> {
+    let pipeline = all_project_pipelines(project)
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("[DEMO] Pipeline {id} is not part of the demo dataset"))?;
+    let jobs = pipeline_jobs(&pipeline, &pipeline.web_url);
+    Ok((pipeline, jobs))
+}
+
+fn find_job(job: u64) -> Option<Job> {
+    items()
+        .into_iter()
+        .find_map(|item| jobs(&item).into_iter().find(|entry| entry.id == job))
+        .or_else(|| {
+            (9_001..=9_005).find_map(|project| {
+                all_project_pipelines(project)
+                    .into_iter()
+                    .find_map(|pipeline| {
+                        pipeline_jobs(&pipeline, &pipeline.web_url)
+                            .into_iter()
+                            .find(|entry| entry.id == job)
+                    })
+            })
+        })
 }
 
 pub fn details(key: &ItemKey) -> Details {
@@ -544,10 +686,7 @@ pub fn details(key: &ItemKey) -> Details {
 
 /// A bounded cumulative snapshot. Two running job IDs can be polled with the same tick.
 pub fn trace(job: u64, tick: u64) -> String {
-    let fixture = items()
-        .into_iter()
-        .find_map(|item| jobs(&item).into_iter().find(|entry| entry.id == job));
-    let Some(fixture) = fixture else {
+    let Some(fixture) = find_job(job) else {
         return format!("[DEMO] No synthetic trace fixture for job {job}.\n");
     };
     let mut text = format!(

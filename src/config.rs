@@ -55,6 +55,10 @@ pub struct Config {
     pub colors: ThemeColors,
     pub list_refresh_secs: u64,
     pub detail_refresh_secs: u64,
+    /// Background "latest pipeline" probe cadence for MR-visible projects.
+    /// Defaults to twice `list_refresh_secs`; minimum 30.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_refresh_secs: Option<u64>,
     /// In-memory navigation and read-only legacy TOML input. `save` omits these
     /// fields; the UI persists them independently in private local SQLite state.
     pub active_tab: usize,
@@ -139,6 +143,7 @@ impl Default for Config {
             colors: ThemeColors::default(),
             list_refresh_secs: 60,
             detail_refresh_secs: 10,
+            pipeline_refresh_secs: None,
             active_tab: 0,
             selections: BTreeMap::new(),
             tab_states: BTreeMap::new(),
@@ -245,6 +250,7 @@ impl fmt::Debug for Config {
             .field("views", &self.views.len())
             .field("list_refresh_secs", &self.list_refresh_secs)
             .field("detail_refresh_secs", &self.detail_refresh_secs)
+            .field("pipeline_refresh_secs", &self.pipeline_refresh_secs)
             .field("active_tab", &self.active_tab)
             .field("field", &self.field)
             .finish_non_exhaustive()
@@ -389,6 +395,7 @@ impl Config {
             && self.colors == other.colors
             && self.list_refresh_secs == other.list_refresh_secs
             && self.detail_refresh_secs == other.detail_refresh_secs
+            && self.pipeline_refresh_secs == other.pipeline_refresh_secs
             && self.filters == other.filters
     }
 
@@ -484,6 +491,13 @@ impl Config {
         self.field = 0;
     }
 
+    /// Effective probe cadence: explicit value or twice the list cadence.
+    pub fn pipeline_refresh_secs(&self) -> u64 {
+        self.pipeline_refresh_secs
+            .unwrap_or(self.list_refresh_secs.saturating_mul(2))
+            .max(30)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.list_refresh_secs >= 15,
@@ -492,6 +506,10 @@ impl Config {
         ensure!(
             self.detail_refresh_secs >= 2,
             "detail_refresh_secs must be at least 2"
+        );
+        ensure!(
+            self.pipeline_refresh_secs.is_none_or(|secs| secs >= 30),
+            "pipeline_refresh_secs must be at least 30"
         );
         ensure!(
             THEMES.contains(&self.theme.as_str()),
@@ -763,6 +781,7 @@ mod tests {
             },
             list_refresh_secs: 15,
             detail_refresh_secs: 2,
+            pipeline_refresh_secs: Some(45),
             active_tab: 3,
             selections: BTreeMap::from([("project/42:issues".into(), 17)]),
             tab_states: BTreeMap::from([(

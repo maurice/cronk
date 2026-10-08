@@ -9,7 +9,7 @@ use cronk::{
     config::{Config, SavedView, TabState, UserDisplay},
     demo,
     model::{CurrentIteration, DetailPart, ItemKey, ItemKind, Mutation, TraceChunk, User},
-    ui::{Confirmation, Cronk, Dialog, DialogKind, Msg, Scope, State},
+    ui::{Confirmation, Cronk, Dialog, DialogKind, JobSource, Msg, Scope, State},
 };
 use tui_lipan::{
     TestBackend,
@@ -1813,7 +1813,6 @@ fn project_details_edit_alias_and_forget_project() {
     assert_eq!(ui.state().scope, Scope::Details);
     let text = ui.capture_frame().plain_text();
     assert!(text.contains("Orbit scheduler"));
-    assert!(text.contains("Forget this project"));
 
     key(&mut ui, KeyCode::Enter);
     assert_eq!(ui.state().scope, Scope::Section);
@@ -2167,7 +2166,7 @@ fn cache_finished_job(ui: &mut Ui, marker: &str) -> u64 {
     let text = format!("{marker} λ cached trace\n").repeat(40);
     let offset = text.len() as u64;
     ui.dispatch(Msg::TraceLoaded(
-        route.clone(),
+        JobSource::Item(route.clone()),
         epoch,
         job,
         true,
@@ -2179,7 +2178,7 @@ fn cache_finished_job(ui: &mut Ui, marker: &str) -> u64 {
     ))
     .unwrap();
     ui.dispatch(Msg::TraceLoaded(
-        route,
+        JobSource::Item(route),
         epoch,
         job,
         true,
@@ -2629,7 +2628,7 @@ fn tab_switches_share_content_preserve_independent_navigation_and_reject_stale_r
         ))
         .unwrap();
         ui.dispatch(Msg::TraceLoaded(
-            route.clone(),
+            JobSource::Item(route.clone()),
             stale_epoch,
             job,
             true,
@@ -2641,7 +2640,7 @@ fn tab_switches_share_content_preserve_independent_navigation_and_reject_stale_r
         ))
         .unwrap();
         ui.dispatch(Msg::TraceLoaded(
-            route.clone(),
+            JobSource::Item(route.clone()),
             stale_epoch,
             job,
             true,
@@ -2694,7 +2693,7 @@ fn late_trace_success_and_failure_do_not_repopulate_or_corrupt_the_new_route() {
     ui.state_mut().trace_pending.insert((epoch, current_job));
     for (key, id) in [(old, job), (current, current_job)] {
         ui.dispatch(Msg::TraceLoaded(
-            key.clone(),
+            JobSource::Item(key.clone()),
             old_epoch,
             id,
             true,
@@ -2706,7 +2705,7 @@ fn late_trace_success_and_failure_do_not_repopulate_or_corrupt_the_new_route() {
         ))
         .unwrap();
         ui.dispatch(Msg::TraceLoaded(
-            key,
+            JobSource::Item(key),
             old_epoch,
             id,
             true,
@@ -2800,7 +2799,7 @@ fn a_finished_job_is_not_marked_drained_until_a_no_progress_eof_chunk() {
     {
         text.push_str(chunk);
         ui.dispatch(Msg::TraceLoaded(
-            key.clone(),
+            JobSource::Item(key.clone()),
             epoch,
             job,
             true,
@@ -2820,7 +2819,7 @@ fn a_finished_job_is_not_marked_drained_until_a_no_progress_eof_chunk() {
         );
     }
     ui.dispatch(Msg::TraceLoaded(
-        key,
+        JobSource::Item(key),
         epoch,
         job,
         true,
@@ -3294,7 +3293,7 @@ fn numeric_retry_after_in_a_detail_warning_survives_shorter_errors_from_other_re
     let short_error =
         "Trace HTTP 503 unavailable; Retry-After: 5 (retry later; no automatic retry)";
     ui.dispatch(Msg::TraceLoaded(
-        route.clone(),
+        JobSource::Item(route.clone()),
         epoch,
         job,
         false,
@@ -3602,7 +3601,7 @@ fn small_project_viewport_snapshot() {
             "",
             "▕ ● Orbit scheduler · DEMO                     █",
             "▕   demo-lab/constellation/platform/runtime/o…",
-            "▕   3 open issues · 3 open merge requests",
+            "▕   3 open issues · 3 open merge requests  ·…◐",
             "",
             "",
             "",

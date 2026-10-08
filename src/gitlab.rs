@@ -36,8 +36,8 @@
 //! A trailing incomplete UTF-8 character (at most three bytes) is held until another poll.
 
 use crate::model::{
-    CurrentIteration, DetailPart, Details, Diff, Discussion, ItemKey, ItemKind, Label, LookupKind,
-    LookupOption, Mutation, Pipeline, Project, TraceChunk, User, WorkItem, sort_jobs,
+    CurrentIteration, DetailPart, Details, Diff, Discussion, ItemKey, ItemKind, Job, Label,
+    LookupKind, LookupOption, Mutation, Pipeline, Project, TraceChunk, User, WorkItem, sort_jobs,
 };
 use anyhow::{Result, anyhow, bail};
 use reqwest::{
@@ -63,6 +63,10 @@ use std::{
 };
 
 const PAGE_SIZE: usize = 100;
+/// Pipelines per window page; also the public contract in the README.
+pub const PIPELINE_PAGE: usize = 20;
+/// Most pipeline pages held for one project (5 × 20).
+pub const PIPELINE_PAGES: usize = 5;
 const JSON_LIMIT: usize = 8 * 1024 * 1024;
 const CACHE_BYTES: usize = 16 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 128;
@@ -534,6 +538,55 @@ impl GitLab {
             .pop_if_empty()
             .extend(segments.iter().copied());
         url
+    }
+
+    /// One page of a project's pipelines, newest first. A single bounded request: the
+    /// collection can hold tens of thousands of entries and is never fully paginated.
+    pub fn project_pipelines(&self, project: u64, page: usize) -> Result<Vec<Pipeline>> {
+        let project = project.to_string();
+        let mut url = self.url(&["projects", &project, "pipelines"]);
+        url.query_pairs_mut()
+            .append_pair("order_by", "id")
+            .append_pair("sort", "desc")
+            .append_pair("per_page", &PIPELINE_PAGE.to_string())
+            .append_pair("page", &page.max(1).to_string());
+        let entries: Vec<ApiPipeline> = self.get(&url)?;
+        Ok(entries.into_iter().map(|p| p.pipeline).collect())
+    }
+
+    /// Only the newest pipeline (one bounded request), for list indicators.
+    pub fn latest_pipeline(&self, project: u64) -> Result<Option<Pipeline>> {
+        let project = project.to_string();
+        let mut url = self.url(&["projects", &project, "pipelines"]);
+        url.query_pairs_mut()
+            .append_pair("order_by", "id")
+            .append_pair("sort", "desc")
+            .append_pair("per_page", "1")
+            .append_pair("page", "1");
+        let entries: Vec<ApiPipeline> = self.get(&url)?;
+        Ok(entries.into_iter().next().map(|p| p.pipeline))
+    }
+
+    /// Full pipeline (user, timings) plus its jobs.
+    pub fn pipeline_with_jobs(&self, project: u64, pipeline: u64) -> Result<(Pipeline, Vec<Job>)> {
+        let project = project.to_string();
+        let id = pipeline.to_string();
+        let full: ApiPipeline = self.get(&self.url(&["projects", &project, "pipelines", &id]))?;
+        let mut jobs = self.url(&["projects", &project, "pipelines", &id, "jobs"]);
+        jobs.query_pairs_mut()
+            .append_pair("include_retried", "false");
+        let mut warnings = Vec::new();
+        let (mut jobs, complete) = self.optional::<Job>(jobs, "Pipeline jobs", &mut warnings);
+        if !complete {
+            bail!(
+                "{}",
+                warnings
+                    .pop()
+                    .unwrap_or_else(|| "Pipeline jobs unavailable".into())
+            );
+        }
+        sort_jobs(&mut jobs);
+        Ok((full.pipeline, jobs))
     }
 
     pub fn current_iteration(&self, project: u64) -> Result<Option<CurrentIteration>> {

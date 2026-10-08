@@ -185,7 +185,12 @@ fn order_is_saved_in_the_portable_config_by_project_path() {
     let saved = Config::load(&path).unwrap();
     assert_eq!(saved.starred, ui.state().config.starred);
     assert_eq!(saved.starred.len(), 2);
-    assert!(saved.starred[0].project.contains('/') || !saved.starred[0].project.is_empty());
+    let paths: Vec<_> = demo::projects().into_iter().map(|p| p.path).collect();
+    assert!(
+        saved.starred.iter().all(|s| paths.contains(&s.project)),
+        "stored by project path: {:?}",
+        saved.starred
+    );
     let source = std::fs::read_to_string(&path).unwrap();
     assert!(source.contains("[[starred]]"), "{source}");
     // A fresh session (another machine) starts with the same tab and order.
@@ -273,4 +278,198 @@ fn star_is_in_the_same_column_on_every_row_and_in_details() {
         columns[0],
         "same column in lists and details"
     );
+}
+
+fn star_two_issues(ui: &mut Ui) {
+    key(ui, KeyCode::Char('I'));
+    star(ui);
+    key(ui, KeyCode::Down);
+    star(ui);
+}
+
+#[test]
+fn star_colors_and_tooltips_follow_state() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    let items = ui.state().visible_items();
+    let (a, b) = (items[0].key.clone(), items[1].key.clone());
+    let id = |k: &ItemKey| format!("item-{}-{}-{}-star", k.project, k.kind.segment(), k.iid);
+    star(&mut ui);
+    let rect = ui.rect_of_key(&id(&a).into()).unwrap();
+    let cell = ui
+        .capture_frame()
+        .cell(rect.x as u16, rect.y as u16)
+        .clone();
+    assert_eq!(cell.symbol, "★");
+    // Unstarred rows hide the star until hovered, and then show it grey.
+    let other = ui.rect_of_key(&id(&b).into()).unwrap();
+    let hidden = ui
+        .capture_frame()
+        .cell(other.x as u16, other.y as u16)
+        .clone();
+    assert_eq!(hidden.symbol, " ");
+    mouse(&mut ui, other.x as u16, other.y as u16, MouseKind::Moved);
+    let grey = ui
+        .capture_frame()
+        .cell(other.x as u16, other.y as u16)
+        .clone();
+    assert_eq!(grey.symbol, "★");
+    assert_ne!(grey.fg, cell.fg, "starred is yellow, hover star is grey");
+    assert!(
+        text(&ui).contains("Click to add to ★ Starred"),
+        "{}",
+        text(&ui)
+    );
+    mouse(&mut ui, rect.x as u16, rect.y as u16, MouseKind::Moved);
+    assert!(text(&ui).contains("Click to remove from ★ Starred"));
+}
+
+#[test]
+fn digits_never_open_starred_and_rename_reports_an_error_there() {
+    let mut ui = mount(config(), None);
+    star_two_issues(&mut ui);
+    assert_eq!(ui.state().config.starred_tab(), Some(4));
+    key(&mut ui, KeyCode::Char('1'));
+    assert_eq!(
+        ui.state().config.active_tab,
+        2,
+        "digit 1 is not a saved view"
+    );
+    key(&mut ui, KeyCode::Char('S'));
+    press(&mut ui, KeyCode::Char('p'), KeyMods::CTRL);
+    ui.send_paste("rename").unwrap();
+    key(&mut ui, KeyCode::Enter);
+    let error = ui.state().error.clone().unwrap_or_default();
+    assert!(error.contains("Starred tabs cannot be renamed"), "{error}");
+}
+
+#[test]
+fn saved_views_and_the_starred_tab_keep_their_own_state_when_indices_shift() {
+    let mut ui = mount(config(), None);
+    star_two_issues(&mut ui);
+    key(&mut ui, KeyCode::Char('S'));
+    key(&mut ui, KeyCode::Char('/'));
+    ui.send_paste("state:opened").unwrap();
+    key(&mut ui, KeyCode::Enter);
+    assert!(ui.state().config.filters.contains_key("4"));
+    // Saving a view while Starred exists pushes Starred to index 5.
+    key(&mut ui, KeyCode::Char('I'));
+    press(&mut ui, KeyCode::Char('p'), KeyMods::CTRL);
+    ui.send_paste("save filter").unwrap();
+    key(&mut ui, KeyCode::Enter);
+    ui.send_paste("Mine").unwrap();
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().config.views.len(), 1);
+    assert_eq!(ui.state().config.active_tab, 4);
+    assert_eq!(ui.state().config.starred_tab(), Some(5));
+    assert!(
+        !ui.state().config.filters.contains_key("4"),
+        "the new view must not inherit Starred's filter"
+    );
+    assert_eq!(ui.state().query_text(), "");
+    key(&mut ui, KeyCode::Char('S'));
+    assert_eq!(ui.state().config.active_tab, 5);
+    assert_eq!(ui.state().visible_items().len(), 2);
+}
+
+#[test]
+fn hiding_the_project_removes_the_tab_but_keeps_the_dormant_star() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    star(&mut ui);
+    let key0 = ui.state().config.starred_keys()[0].clone();
+    key(&mut ui, KeyCode::Char('S'));
+    key(&mut ui, KeyCode::Char('P'));
+    let index = ui
+        .state()
+        .config
+        .projects
+        .iter()
+        .position(|p| p.id == key0.project)
+        .unwrap();
+    for _ in 0..index {
+        key(&mut ui, KeyCode::Down);
+    }
+    key(&mut ui, KeyCode::Char(' '));
+    assert!(ui.state().config.starred_tab().is_none());
+    assert_eq!(ui.state().config.starred.len(), 1, "star survives, dormant");
+    assert!(!text(&ui).contains("Starred"));
+    // Showing the project again brings the tab back.
+    key(&mut ui, KeyCode::Char(' '));
+    assert_eq!(ui.state().config.starred_tab(), Some(4));
+}
+
+#[test]
+fn reordering_while_filtered_swaps_the_visible_neighbours() {
+    let mut config = config();
+    let items = demo::items();
+    let projects = config.projects.clone();
+    let project = |id: u64| projects.iter().find(|p| p.id == id).unwrap().clone();
+    let a = items[0].key.clone();
+    let other = items
+        .iter()
+        .find(|i| i.key.project != a.project && i.key.kind == a.kind)
+        .unwrap()
+        .key
+        .clone();
+    let c = items
+        .iter()
+        .find(|i| i.key.project == a.project && i.key.kind == a.kind && i.key != a)
+        .unwrap()
+        .key
+        .clone();
+    for key in [&a, &other, &c] {
+        config.toggle_star(key, "");
+        assert_eq!(
+            config.starred.last().unwrap().project,
+            project(key.project).path
+        );
+    }
+    let path = project(a.project).path;
+    let mut ui = mount(config, None);
+    key(&mut ui, KeyCode::Char('S'));
+    key(&mut ui, KeyCode::Char('/'));
+    ui.send_paste(&format!("project:{path}")).unwrap();
+    key(&mut ui, KeyCode::Enter);
+    let shown: Vec<_> = ui
+        .state()
+        .visible_items()
+        .iter()
+        .map(|i| i.key.clone())
+        .collect();
+    assert_eq!(
+        shown,
+        vec![a.clone(), c.clone()],
+        "the middle item is filtered out"
+    );
+    press(&mut ui, KeyCode::Down, KeyMods::SHIFT);
+    assert_eq!(
+        ui.state().scroll.selected,
+        1,
+        "cursor follows the moved item"
+    );
+    assert_eq!(ui.state().config.starred_keys(), vec![c, other, a]);
+}
+
+#[test]
+fn unstarring_the_last_item_from_its_open_details_leaves_the_vanished_tab() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    star(&mut ui);
+    key(&mut ui, KeyCode::Char('S'));
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().scope, Scope::Details);
+    key(&mut ui, KeyCode::Char('s'));
+    assert!(ui.state().config.starred.is_empty());
+    assert_eq!(ui.state().config.active_tab, 0);
+    assert_eq!(ui.state().scope, Scope::List);
+}
+
+#[test]
+fn s_in_a_dialog_is_just_text() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    press(&mut ui, KeyCode::Char('p'), KeyMods::CTRL);
+    key(&mut ui, KeyCode::Char('s'));
+    assert!(ui.state().config.starred.is_empty());
 }

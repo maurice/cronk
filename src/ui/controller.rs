@@ -900,14 +900,21 @@ impl Component for Cronk {
                 if ctx.state.dialog.is_none()
                     && ctx.state.scope == Scope::List
                     && ctx.state.starred_active()
-                    && let Some(key) = ctx
-                        .state
-                        .visible_item_at(ctx.state.scroll.selected)
-                        .map(|i| i.key.clone())
-                    && ctx.state.config.move_star(&key, delta)
                 {
-                    self.move_selection(ctx, delta);
-                    self.persist(ctx);
+                    // Swap with the neighbour actually shown, so filters stay consistent.
+                    let at = ctx.state.scroll.selected;
+                    let keys = at.checked_add_signed(delta).and_then(|to| {
+                        Some((
+                            ctx.state.visible_item_at(at)?.key.clone(),
+                            ctx.state.visible_item_at(to)?.key.clone(),
+                        ))
+                    });
+                    if let Some((a, b)) = keys
+                        && ctx.state.config.swap_stars(&a, &b)
+                    {
+                        self.move_selection(ctx, delta);
+                        self.persist(ctx);
+                    }
                 }
             }
             Msg::Move(delta) => {
@@ -1592,7 +1599,8 @@ impl Component for Cronk {
         } else if key.mods.alt || ctrl || key.mods.super_key {
             None
         } else if let Some(index) = tab_shortcut(key) {
-            Some(Msg::Tab(index))
+            // Number keys address saved views only; Starred has its own Shift+S.
+            (index < 4 + ctx.state.config.views.len()).then_some(Msg::Tab(index))
         } else if matches!(
             (key.code, key.mods.shift),
             (KeyCode::Char('S'), _) | (KeyCode::Char('s'), true)
@@ -1687,6 +1695,16 @@ impl Cronk {
         let tab = navigation(&ctx.state);
         ctx.state.config.tab_states.insert(key, tab);
         prune_tab_routes(&mut ctx.state.config);
+        // Per-tab leftovers of a vanished tab (for example Starred) must not be
+        // inherited by whichever saved view later takes its index.
+        let tab_count = ctx.state.config.tab_count();
+        let live = |key: &String| key.parse::<usize>().map_or(true, |index| index < tab_count);
+        ctx.state.config.filters.retain(|key, _| live(key));
+        ctx.state.config.selections.retain(|key, _| live(key));
+        ctx.state.navigation_selections.retain(|key, _| live(key));
+        ctx.state.navigation_restoring.retain(live);
+        ctx.state.navigation_routes_restoring.retain(live);
+        ctx.state.tab_cache.retain(|key, _| live(key));
         ctx.state.invalidate_hidden_navigation();
         if ctx.state.config.route.as_ref().is_some_and(|route| {
             !ctx.state
@@ -2538,14 +2556,20 @@ impl Cronk {
                 else { self.show_dialog(ctx, DialogKind::SaveView, "Save as a tab", "The current filter becomes a persistent view", vec![FormField::new("Tab name", "", false)]); }
             }
             Action::RenameView | Action::DeleteView => {
-                if let Some(index) = ctx.state.config.active_tab.checked_sub(4) {
+                if let Some(index) = ctx
+                    .state
+                    .config
+                    .active_tab
+                    .checked_sub(4)
+                    .filter(|i| *i < ctx.state.config.views.len())
+                {
                     if let Some(view) = ctx.state.config.views.get(index) {
                         let name = view.name.clone();
                         if matches!(action, Action::RenameView) {
                             self.show_dialog(ctx, DialogKind::RenameView, "Rename saved tab", "Enter saves · Esc cancels", vec![FormField::new("Tab name", &name, false)]);
                         } else { self.show_dialog(ctx, DialogKind::Confirm(Confirmation::DeleteView(index)), "Remove saved tab?", "Only the local view is removed, not GitLab data", vec![]); }
                     }
-                } else { self.dialog_error(ctx, "The four built-in tabs cannot be renamed or removed"); }
+                } else { self.dialog_error(ctx, "The built-in and Starred tabs cannot be renamed or removed"); }
             }
             Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Search by name · Enter chooses a suggestion, then adds · Full paths and IDs also work · Blank alias keeps GitLab's short name", vec![FormField::lookup("Project", "", Completion::new(LookupKind::Projects, 0, false)), FormField::new("Short alias (optional)", "", false)]),
             Action::RemoveProject => {

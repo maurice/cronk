@@ -460,18 +460,11 @@ impl Config {
         true
     }
 
-    /// Move a starred item one step among the displayed (non-dormant) stars.
-    /// Returns whether the order changed.
-    pub fn move_star(&mut self, key: &ItemKey, delta: isize) -> bool {
-        let keys = self.starred_keys();
-        let Some(at) = keys.iter().position(|k| k == key) else {
-            return false;
-        };
-        let Some(to) = at.checked_add_signed(delta).filter(|to| *to < keys.len()) else {
-            return false;
-        };
-        match (self.starred_position(key), self.starred_position(&keys[to])) {
-            (Some(a), Some(b)) => {
+    /// Swap two starred items, as when reordering neighbours in the displayed
+    /// (possibly filtered) list. Returns whether the order changed.
+    pub fn swap_stars(&mut self, a: &ItemKey, b: &ItemKey) -> bool {
+        match (self.starred_position(a), self.starred_position(b)) {
+            (Some(a), Some(b)) if a != b => {
                 self.starred.swap(a, b);
                 true
             }
@@ -847,9 +840,10 @@ mod tests {
         assert_eq!(config.starred_tab(), Some(4));
         assert_eq!(config.tab_count(), 5);
         assert_eq!(config.starred_keys(), vec![key(1, 1), key(1, 2)]);
-        assert!(config.move_star(&key(1, 1), 1));
+        assert!(config.swap_stars(&key(1, 1), &key(1, 2)));
         assert_eq!(config.starred_keys(), vec![key(1, 2), key(1, 1)]);
-        assert!(!config.move_star(&key(1, 1), 1), "already last");
+        assert!(!config.swap_stars(&key(1, 1), &key(1, 1)));
+        assert!(!config.swap_stars(&key(1, 1), &key(9, 9)));
         assert!(!config.toggle_star(&key(1, 1), ""));
         assert!(!config.toggle_star(&key(1, 2), ""));
         // The hidden project's star remains for other machines but adds no tab.

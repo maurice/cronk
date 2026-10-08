@@ -693,11 +693,30 @@ impl State {
     }
     /// The Starred tab lists every starred item in its saved, user-chosen order.
     pub fn starred_active(&self) -> bool {
-        self.config.starred_tab() == Some(self.config.active_tab)
+        // Cheap checks first: this runs on every tab, for every list build.
+        self.config.active_tab == 4 + self.config.views.len()
+            && !self.config.starred.is_empty()
+            && self.config.starred_tab() == Some(self.config.active_tab)
+    }
+
+    /// Display rank of every starred item, when the Starred tab is active.
+    fn star_ranks(&self) -> Option<HashMap<ItemKey, usize>> {
+        self.starred_active().then(|| {
+            self.config
+                .starred_keys()
+                .into_iter()
+                .enumerate()
+                .map(|(rank, key)| (key, rank))
+                .collect()
+        })
     }
 
     /// Rebuild placeholder rows for starred items missing from `items`.
     pub(super) fn refresh_starred_stubs(&mut self) {
+        if self.config.starred.is_empty() {
+            self.starred_stubs.clear();
+            return;
+        }
         let keys = self.config.starred_keys();
         let loaded: HashSet<&ItemKey> = self.items.iter().map(|i| &i.key).collect();
         let stubs: Vec<WorkItem> = keys
@@ -787,30 +806,32 @@ impl State {
             .and_then(Option::as_ref)
     }
     pub fn visible_item_count(&self) -> usize {
-        self.matching_items().count()
+        let ranks = self.star_ranks();
+        self.matching_items_ranked(ranks.as_ref()).count()
     }
 
-    fn matching_items(&self) -> impl Iterator<Item = &WorkItem> {
+    fn matching_items_ranked<'a, 'b>(
+        &'a self,
+        ranks: Option<&'b HashMap<ItemKey, usize>>,
+    ) -> impl Iterator<Item = &'a WorkItem> + 'b
+    where
+        'a: 'b,
+    {
         let query = Query::parse(self.query_text()).unwrap_or_default();
-        let starred = self.starred_active();
-        let starred_keys: HashSet<ItemKey> = if starred {
-            self.config.starred_keys().into_iter().collect()
-        } else {
-            HashSet::new()
-        };
-        let loaded: HashSet<&ItemKey> = if starred {
+        // Stubs stand in only for starred items that are not loaded.
+        let loaded: HashSet<&ItemKey> = if ranks.is_some() && !self.starred_stubs.is_empty() {
             self.items.iter().map(|i| &i.key).collect()
         } else {
             HashSet::new()
         };
-        let stubs = if starred {
+        let stubs = if ranks.is_some() {
             &self.starred_stubs[..]
         } else {
             &[]
         };
         let stubs = stubs.iter().filter(move |item| !loaded.contains(&item.key));
         self.items.iter().chain(stubs).filter(move |item| {
-            if starred && !starred_keys.contains(&item.key) {
+            if ranks.is_some_and(|r| !r.contains_key(&item.key)) {
                 return false;
             }
             let Some(project) = self.project(item.key.project).filter(|p| p.visible) else {
@@ -836,19 +857,15 @@ impl State {
     }
 
     /// Total order of the list: dashboard urgency, or newest first elsewhere.
-    fn visible_order(&self, a: &WorkItem, b: &WorkItem) -> Ordering {
-        if self.starred_active() {
+    fn visible_order(
+        &self,
+        ranks: Option<&HashMap<ItemKey, usize>>,
+        a: &WorkItem,
+        b: &WorkItem,
+    ) -> Ordering {
+        if let Some(ranks) = ranks {
             // Saved order, which the user controls with Shift+Up / Shift+Down.
-            let rank = |item: &WorkItem| {
-                self.project(item.key.project).and_then(|project| {
-                    self.config.starred.iter().position(|s| {
-                        s.kind == item.key.kind
-                            && s.iid == item.key.iid
-                            && s.project.eq_ignore_ascii_case(&project.path)
-                    })
-                })
-            };
-            rank(a).cmp(&rank(b))
+            ranks.get(&a.key).cmp(&ranks.get(&b.key))
         } else if self.config.active_tab == 0 {
             a.attention_rank(self.user.id)
                 .cmp(&b.attention_rank(self.user.id))
@@ -863,20 +880,26 @@ impl State {
     }
 
     pub fn visible_items(&self) -> Vec<&WorkItem> {
-        let mut items: Vec<_> = self.matching_items().collect();
-        items.sort_by(|a, b| self.visible_order(a, b));
+        let ranks = self.star_ranks();
+        let mut items: Vec<_> = self.matching_items_ranked(ranks.as_ref()).collect();
+        items.sort_by(|a, b| self.visible_order(ranks.as_ref(), a, b));
         items
     }
 
     /// `visible_items()[index]` with one filter pass and no sort. Ties in
     /// `visible_order` fall back to filter order, as the stable sort does.
     pub fn visible_item_at(&self, index: usize) -> Option<&WorkItem> {
-        let mut items: Vec<_> = self.matching_items().enumerate().collect();
+        let ranks = self.star_ranks();
+        let mut items: Vec<_> = self
+            .matching_items_ranked(ranks.as_ref())
+            .enumerate()
+            .collect();
         if index >= items.len() {
             return None;
         }
         let (_, (_, item), _) = items.select_nth_unstable_by(index, |(a_at, a), (b_at, b)| {
-            self.visible_order(a, b).then(a_at.cmp(b_at))
+            self.visible_order(ranks.as_ref(), a, b)
+                .then(a_at.cmp(b_at))
         });
         Some(item)
     }
@@ -885,9 +908,14 @@ impl State {
     /// pass and no sort: the rank of the first matching item is the number of
     /// items that sort before it.
     pub fn visible_position(&self, key: &ItemKey) -> Option<usize> {
-        let items: Vec<_> = self.matching_items().enumerate().collect();
+        let ranks = self.star_ranks();
+        let items: Vec<_> = self
+            .matching_items_ranked(ranks.as_ref())
+            .enumerate()
+            .collect();
         let order = |(a_at, a): &(usize, &WorkItem), (b_at, b): &(usize, &WorkItem)| {
-            self.visible_order(a, b).then(a_at.cmp(b_at))
+            self.visible_order(ranks.as_ref(), a, b)
+                .then(a_at.cmp(b_at))
         };
         let first = items
             .iter()

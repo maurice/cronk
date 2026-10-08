@@ -2293,6 +2293,182 @@ fn detail_requests_survive_tab_navigation_and_are_shared_by_item_identity() {
 }
 
 #[test]
+fn detail_schema_failure_is_item_local_and_requires_explicit_refresh() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('M'));
+    key(&mut ui, KeyCode::Enter);
+    let route = ui.state().config.route.clone().unwrap();
+    let cached = ui.state().details.clone().unwrap();
+    ui.state_mut().detail_requests.insert(route.clone(), 42);
+    let epoch = ui.state().detail_epoch;
+    ui.state_mut().detail_pending = Some((route.clone(), epoch));
+    let error = "GET /api/v4/projects/7/merge_requests/1: invalid JSON/schema at field title: invalid type: null, expected a string at line 1, column 42";
+    ui.dispatch(Msg::DetailFinished(route.clone(), 42, Err(error.into())))
+        .unwrap();
+    assert!(ui.state().detail_requests.is_empty());
+    assert!(ui.state().detail_pending.is_none());
+    assert_eq!(ui.state().blocked_until, Duration::ZERO);
+    assert_eq!(ui.state().failures, 0);
+    assert_eq!(ui.state().next_details, Duration::MAX);
+    assert_eq!(
+        ui.state().details.as_ref().unwrap().item.title,
+        cached.item.title
+    );
+    assert!(
+        ui.state()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Refresh to retry")
+    );
+
+    // Re-entering the item must not bypass suppression (including shared cache).
+    key(&mut ui, KeyCode::Esc);
+    key(&mut ui, KeyCode::Enter);
+    ui.dispatch(Msg::LoadDetails).unwrap();
+    assert_eq!(ui.state().next_details, Duration::MAX);
+    assert!(ui.state().detail_requests.is_empty());
+
+    // A different item remains loadable immediately, without waiting for backoff.
+    key(&mut ui, KeyCode::Esc);
+    key(&mut ui, KeyCode::Down);
+    key(&mut ui, KeyCode::Enter);
+    let other = ui.state().config.route.clone().unwrap();
+    assert_ne!(route, other);
+    assert_eq!(ui.state().details.as_ref().unwrap().item.key, other);
+    assert!(ui.state().next_details < Duration::MAX);
+    assert!(ui.state().detail_schema_errors.contains_key(&route));
+
+    key(&mut ui, KeyCode::Esc);
+    key(&mut ui, KeyCode::Up);
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(ui.state().config.route.as_ref(), Some(&route));
+    ui.dispatch(Msg::Refresh).unwrap();
+    assert!(!ui.state().detail_schema_errors.contains_key(&route));
+    assert!(ui.state().next_details < Duration::MAX);
+}
+
+#[test]
+fn refresh_during_user_load_does_not_restore_stale_schema_suppression() {
+    let mut ui = mount(config(), None);
+    ui.state_mut().user.id = 0;
+    ui.state_mut().user_pending = true;
+    ui.dispatch(Msg::Refresh).unwrap();
+    assert!(ui.state().user_retry_requested);
+    let epoch = ui.state().user_epoch;
+    ui.dispatch(Msg::UserLoaded(
+        epoch,
+        Err("invalid JSON/schema at field id".into()),
+    ))
+    .unwrap();
+    assert!(!ui.state().user_retry_requested);
+    assert!(!ui.state().user_schema_error);
+    assert_eq!(ui.state().blocked_until, Duration::ZERO);
+    assert!(ui.state().error.is_none());
+}
+
+#[test]
+fn queued_refresh_preserves_transport_backoff_for_user_and_details() {
+    for user_load in [true, false] {
+        let mut ui = mount(config(), None);
+        if user_load {
+            ui.state_mut().user.id = 0;
+            ui.state_mut().user_pending = true;
+        } else {
+            key(&mut ui, KeyCode::Char('M'));
+            key(&mut ui, KeyCode::Enter);
+            let route = ui.state().config.route.clone().unwrap();
+            let epoch = ui.state().detail_epoch;
+            ui.state_mut().detail_requests.insert(route.clone(), 42);
+            ui.state_mut().detail_pending = Some((route, epoch));
+        }
+        ui.dispatch(Msg::Refresh).unwrap();
+        let error = "GET /api/v4/user: request timed out";
+        if user_load {
+            let epoch = ui.state().user_epoch;
+            ui.dispatch(Msg::UserLoaded(epoch, Err(error.into())))
+                .unwrap();
+        } else {
+            let route = ui.state().config.route.clone().unwrap();
+            ui.dispatch(Msg::DetailFinished(route, 42, Err(error.into())))
+                .unwrap();
+            assert_eq!(ui.state().next_details, Duration::ZERO);
+        }
+        assert_eq!(ui.state().failures, 1);
+        assert!(ui.state().blocked_until >= Duration::from_secs(10));
+        assert_eq!(ui.state().error.as_deref(), Some(error));
+    }
+}
+
+#[test]
+fn workspace_retry_expires_failed_details_saved_in_another_tab() {
+    for full_resync in [false, true] {
+        let mut ui = mount(config(), None);
+        key(&mut ui, KeyCode::Char('M'));
+        key(&mut ui, KeyCode::Enter);
+        let route = ui.state().config.route.clone().unwrap();
+        ui.state_mut().detail_requests.insert(route.clone(), 42);
+        ui.dispatch(Msg::DetailFinished(
+            route.clone(),
+            42,
+            Err("invalid JSON/schema at field title".into()),
+        ))
+        .unwrap();
+        assert_eq!(ui.state().next_details, Duration::MAX);
+        key(&mut ui, KeyCode::Char('I'));
+        assert!(ui.state().config.route.is_none());
+        assert_eq!(ui.state().shared_details[&route].1, Duration::MAX);
+        ui.dispatch(if full_resync {
+            Msg::FullResync
+        } else {
+            Msg::Refresh
+        })
+        .unwrap();
+        assert!(!ui.state().detail_schema_errors.contains_key(&route));
+        assert_eq!(ui.state().shared_details[&route].1, Duration::ZERO);
+        key(&mut ui, KeyCode::Char('M'));
+        assert_eq!(ui.state().config.route.as_ref(), Some(&route));
+        assert!(ui.state().next_details < Duration::MAX);
+        ui.dispatch(Msg::LoadDetails).unwrap();
+        assert!(ui.state().next_details < Duration::MAX);
+        assert_eq!(ui.state().details.as_ref().unwrap().item.key, route);
+    }
+}
+
+#[test]
+fn background_schema_failures_do_not_block_the_current_item_or_lists() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    key(&mut ui, KeyCode::Enter);
+    let current = ui.state().config.route.clone().unwrap();
+    let failed = ItemKey {
+        iid: current.iid + 100,
+        ..current.clone()
+    };
+    ui.state_mut().detail_requests.insert(failed.clone(), 42);
+    ui.dispatch(Msg::DetailFinished(
+        failed.clone(),
+        42,
+        Err("GET /api/v4/projects/7/issues/99: invalid JSON/schema at field title".into()),
+    ))
+    .unwrap();
+    assert!(ui.state().detail_schema_errors.contains_key(&failed));
+    assert_eq!(ui.state().details.as_ref().unwrap().item.key, current);
+    assert_eq!(ui.state().blocked_until, Duration::ZERO);
+    assert_eq!(ui.state().failures, 0);
+
+    let epoch = ui.state().list_epoch;
+    ui.dispatch(Msg::ProjectLoaded(
+        current.project,
+        epoch,
+        Err("GET /api/v4/projects/7/merge_requests/99: invalid JSON/schema at field title".into()),
+    ))
+    .unwrap();
+    assert_eq!(ui.state().blocked_until, Duration::ZERO);
+    assert_eq!(ui.state().failures, 0);
+}
+
+#[test]
 fn cached_rate_limit_warnings_do_not_restart_backoff() {
     let mut ui = mount(config(), None);
     key(&mut ui, KeyCode::Char('I'));

@@ -115,6 +115,9 @@ pub struct State {
     pub details: Option<Details>,
     pub shared_details: HashMap<ItemKey, (Details, Duration)>,
     pub detail_requests: HashMap<ItemKey, u64>,
+    /// Deterministic decode failures are retried only on explicit refresh.
+    pub detail_schema_errors: HashMap<ItemKey, String>,
+    pub detail_retry_requested: HashSet<ItemKey>,
     pub detail_sequence: u64,
     pub sync_progress: BTreeMap<u64, crate::gitlab::SyncProgress>,
     pub full_resync: bool,
@@ -144,6 +147,8 @@ pub struct State {
     pub trace_pending: HashSet<(u64, u64)>,
     pub mutation_pending: bool,
     pub user_pending: bool,
+    pub user_schema_error: bool,
+    pub user_retry_requested: bool,
     pub user_epoch: u64,
     pub list_epoch: u64,
     pub detail_epoch: u64,

@@ -226,7 +226,8 @@ Theme names are `midnight`, `dracula`, `light`, `blade-runner` (neon), `tokyo-ni
 
 - Visible project lists: incremental refresh every **60 seconds**, including while viewing details. Issues and MRs import independently so one long history does not block the other.
 - Active item details: every **10 seconds**, configurable down to 2 seconds (set 5 if preferred).
-- Running/expanded job traces: every **2 seconds**, only for the open item; batches of at most four concurrent trace requests.
+- Running/expanded job traces: every **2 seconds**, only for the open item or the drilled-in project pipeline; batches of at most four concurrent trace requests.
+- Project pipelines: while a project's details are open, one page-1 request plus detail + jobs for each expanded pipeline that is active or changed, at `detail_refresh_secs`; otherwise one `per_page=1` probe per merge-request-visible project every `pipeline_refresh_secs`. A 403/404 from the pipelines endpoint stops requests for that project until refresh or a visibility change, without triggering backoff.
 - Manual refresh: all visible projects and the active detail; does not bypass server backoff.
 - Conditional GET with ETag/Last-Modified, shared across client clones; bounded **128-entry / 16 MiB** HTTP cache. Successful writes invalidate cached validators/bodies.
 - Ordinary polls do not overlap for the same resource. Detail requests survive tab navigation and populate the shared item cache; successful writes invalidate caches and supersede older responses. Failures retain the last successful rows, detail sections, and editor drafts, and are displayed instead of becoming empty lists.

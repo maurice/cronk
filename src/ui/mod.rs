@@ -9,6 +9,7 @@ pub use logs::{LogView, TraceIndex};
 
 pub use completion::Completion;
 
+use crate::gitlab::Pipelines;
 use crate::{
     config::{Config, UserFormatter},
     filter::Query,
@@ -149,6 +150,8 @@ pub struct State {
     /// Pipeline ids whose detail + jobs are in flight.
     pub pipeline_detail_pending: HashSet<u64>,
     pub probe_pending: HashSet<u64>,
+    /// Projects whose pipelines returned 403/404: skipped until refresh or a visibility change.
+    pub pipelines_unavailable: HashMap<u64, String>,
     pub next_pipelines: Duration,
     pub next_probe: Duration,
     pub log_focus: Option<u64>,
@@ -180,6 +183,17 @@ pub struct State {
     pub lookup_inflight: Option<u64>,
 }
 
+/// One pipeline's detail, its jobs, and any warnings from the jobs request.
+pub type LoadedPipeline = (Pipeline, Vec<Job>, Vec<String>);
+
+/// Jobs of one pipeline plus the pipeline `updated_at` they were fetched for, so a
+/// pipeline that finished since is fetched again instead of showing stale states.
+#[derive(Clone, Debug, Default)]
+pub struct PipelineJobs {
+    pub jobs: Vec<Job>,
+    pub stamp: Option<String>,
+}
+
 /// Recent pipelines of one project. Only expanded or drilled pipelines carry jobs.
 #[derive(Clone, Debug, Default)]
 pub struct ProjectPipelines {
@@ -188,7 +202,7 @@ pub struct ProjectPipelines {
     pub pages_loaded: usize,
     /// The last page was short: there is nothing older to load.
     pub exhausted: bool,
-    pub jobs: HashMap<u64, Vec<Job>>,
+    pub jobs: HashMap<u64, PipelineJobs>,
     /// Page 1 has arrived at least once; distinguishes "none" from "not fetched".
     pub loaded: bool,
     pub error: Option<String>,
@@ -209,24 +223,36 @@ impl ProjectPipelines {
     pub fn row_count(&self) -> usize {
         self.pipelines.len() + usize::from(self.can_load_more())
     }
-    /// Insert or replace a page keeping newest-first id order; offsets are not a snapshot.
-    pub fn merge(&mut self, page: usize, fresh: Vec<Pipeline>) {
+    /// Apply one page. Page 1 is authoritative for the window head: rows that left
+    /// the newest twenty are dropped (except expanded/drilled ones, which the user is
+    /// looking at) so a long session cannot grow the window without bound. Older
+    /// pages are unioned by id, because offset pagination is not a snapshot.
+    pub fn merge(&mut self, page: usize, fresh: Vec<Pipeline>, keep: &HashSet<u64>) {
         let short = fresh.len() < crate::gitlab::PIPELINE_PAGE;
+        if page == 1 && self.pages_loaded <= 1 {
+            let fresh_ids: HashSet<u64> = fresh.iter().map(|p| p.id).collect();
+            self.pipelines
+                .retain(|p| fresh_ids.contains(&p.id) || keep.contains(&p.id));
+            self.jobs
+                .retain(|id, _| fresh_ids.contains(id) || keep.contains(id));
+            self.exhausted = short;
+        } else if page >= self.pages_loaded && short {
+            self.exhausted = true;
+        }
         for pipeline in fresh {
             match self.pipelines.iter_mut().find(|p| p.id == pipeline.id) {
                 Some(existing) => {
-                    // Keep detail-only fields already fetched (user, duration) unless newer.
-                    let keep = if existing.updated_at == pipeline.updated_at {
-                        Some(existing.clone())
-                    } else {
-                        None
-                    };
-                    *existing = pipeline;
-                    if let Some(keep) = keep {
-                        existing.user = existing.user.take().or(keep.user);
-                        existing.duration = existing.duration.or(keep.duration);
-                        existing.started_at = existing.started_at.take().or(keep.started_at);
-                        existing.finished_at = existing.finished_at.take().or(keep.finished_at);
+                    // The list endpoint omits detail-only fields; keep the ones that never
+                    // change, and the timings while the pipeline itself is unchanged.
+                    let same = existing.updated_at == pipeline.updated_at;
+                    let previous = std::mem::replace(existing, pipeline);
+                    existing.user = existing.user.take().or(previous.user);
+                    existing.started_at = existing.started_at.take().or(previous.started_at);
+                    if same {
+                        existing.duration = existing.duration.or(previous.duration);
+                        existing.finished_at = existing.finished_at.take().or(previous.finished_at);
+                        existing.queued_duration =
+                            existing.queued_duration.or(previous.queued_duration);
                     }
                 }
                 None => self.pipelines.push(pipeline),
@@ -236,9 +262,6 @@ impl ProjectPipelines {
         self.pipelines
             .sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
         self.pages_loaded = self.pages_loaded.max(page);
-        if page >= self.pages_loaded && short {
-            self.exhausted = true;
-        }
         self.loaded = true;
         self.error = None;
     }
@@ -446,8 +469,8 @@ pub enum Msg {
     /// Page 1 of the open project's pipelines plus expanded pipeline details.
     LoadPipelines,
     LoadOlderPipelines,
-    PipelinesLoaded(u64, u64, usize, Result<Vec<Pipeline>, String>),
-    PipelineLoaded(u64, u64, u64, Result<Box<(Pipeline, Vec<Job>)>, String>),
+    PipelinesLoaded(u64, u64, usize, Result<Pipelines<Vec<Pipeline>>, String>),
+    PipelineLoaded(u64, u64, u64, Result<Box<LoadedPipeline>, String>),
     /// Expand/collapse a project pipeline row.
     TogglePipeline(u64),
     /// Click on a project pipeline row: select it (leaving any drilled pipeline) and toggle.
@@ -455,7 +478,7 @@ pub enum Msg {
     /// Enter the jobs of a project pipeline.
     DrillPipeline(u64),
     LoadProbes,
-    ProbeLoaded(u64, u64, Result<Option<Box<Pipeline>>, String>),
+    ProbeLoaded(u64, u64, Result<Pipelines<Option<Box<Pipeline>>>, String>),
     ProjectResolved(Result<Project, String>),
     SetupValidate(u64),
     SetupValidated(u64, Box<onboarding::Validation>),
@@ -760,7 +783,12 @@ impl State {
             && let Some(project) = self.config.project_route
             && let Some(pipeline) = self.drilled
         {
-            let jobs = self.project_pipelines.get(&project)?.jobs.get(&pipeline)?;
+            let jobs = &self
+                .project_pipelines
+                .get(&project)?
+                .jobs
+                .get(&pipeline)?
+                .jobs;
             return Some((project, jobs.as_slice()));
         }
         None
@@ -824,7 +852,8 @@ impl State {
             .is_some_and(|first| first.id == id)
     }
 
-    /// Project pipelines whose detail and jobs should be fetched on each cycle.
+    /// Project pipelines whose detail and jobs should be fetched on each cycle: expanded
+    /// ones that are active, never loaded, or changed since their jobs were fetched.
     pub fn wanted_pipelines(&self, project: u64) -> Vec<u64> {
         let Some(window) = self.project_pipelines.get(&project) else {
             return Vec::new();
@@ -834,7 +863,11 @@ impl State {
             .iter()
             .filter(|p| {
                 self.pipeline_expanded(project, p.id)
-                    && (p.active() || !window.jobs.contains_key(&p.id))
+                    && (p.active()
+                        || window
+                            .jobs
+                            .get(&p.id)
+                            .is_none_or(|loaded| loaded.stamp != p.updated_at))
             })
             .map(|p| p.id)
             .collect()
@@ -1203,6 +1236,10 @@ impl State {
                 "Pipelines" => {
                     if let Some(job) = self.selected_job() {
                         return format!("job-{}", job.id);
+                    }
+                    if let Some(id) = self.drilled {
+                        // Jobs still loading: aim at the pipeline row, not the list top.
+                        return format!("pipeline-{id}");
                     }
                     if let Some(window) = self.open_project_pipelines() {
                         if let Some(pipeline) = window.pipelines.get(self.config.field) {

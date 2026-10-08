@@ -63,6 +63,13 @@ use std::{
 };
 
 const PAGE_SIZE: usize = 100;
+/// Pipeline data, or the reason this project's pipelines cannot be read at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pipelines<T> {
+    Available(T),
+    Unavailable(String),
+}
+
 /// Pipelines per window page; also the public contract in the README.
 pub const PIPELINE_PAGE: usize = 20;
 /// Most pipeline pages held for one project (5 × 20).
@@ -542,33 +549,56 @@ impl GitLab {
 
     /// One page of a project's pipelines, newest first. A single bounded request: the
     /// collection can hold tens of thousands of entries and is never fully paginated.
-    pub fn project_pipelines(&self, project: u64, page: usize) -> Result<Vec<Pipeline>> {
-        let project = project.to_string();
-        let mut url = self.url(&["projects", &project, "pipelines"]);
+    pub fn project_pipelines(&self, project: u64, page: usize) -> Result<Pipelines<Vec<Pipeline>>> {
+        let mut url = self.url(&["projects", &project.to_string(), "pipelines"]);
         url.query_pairs_mut()
             .append_pair("order_by", "id")
             .append_pair("sort", "desc")
             .append_pair("per_page", &PIPELINE_PAGE.to_string())
             .append_pair("page", &page.max(1).to_string());
-        let entries: Vec<ApiPipeline> = self.get(&url)?;
-        Ok(entries.into_iter().map(|p| p.pipeline).collect())
+        Ok(match self.get::<Vec<ApiPipeline>>(&url) {
+            Ok(entries) => Pipelines::Available(entries.into_iter().map(|p| p.pipeline).collect()),
+            Err(error) => Pipelines::Unavailable(Self::pipelines_unavailable(&error)?),
+        })
     }
 
     /// Only the newest pipeline (one bounded request), for list indicators.
-    pub fn latest_pipeline(&self, project: u64) -> Result<Option<Pipeline>> {
-        let project = project.to_string();
-        let mut url = self.url(&["projects", &project, "pipelines"]);
+    pub fn latest_pipeline(&self, project: u64) -> Result<Pipelines<Option<Pipeline>>> {
+        let mut url = self.url(&["projects", &project.to_string(), "pipelines"]);
         url.query_pairs_mut()
             .append_pair("order_by", "id")
             .append_pair("sort", "desc")
             .append_pair("per_page", "1")
             .append_pair("page", "1");
-        let entries: Vec<ApiPipeline> = self.get(&url)?;
-        Ok(entries.into_iter().next().map(|p| p.pipeline))
+        Ok(match self.get::<Vec<ApiPipeline>>(&url) {
+            Ok(entries) => Pipelines::Available(entries.into_iter().next().map(|p| p.pipeline)),
+            Err(error) => Pipelines::Unavailable(Self::pipelines_unavailable(&error)?),
+        })
     }
 
-    /// Full pipeline (user, timings) plus its jobs.
-    pub fn pipeline_with_jobs(&self, project: u64, pipeline: u64) -> Result<(Pipeline, Vec<Job>)> {
+    /// A deterministic 403/404 means CI/CD is disabled or the token cannot read pipelines
+    /// for this project. That is a per-project fact, not an outage: callers stop asking
+    /// instead of feeding the global backoff. Other errors propagate unchanged.
+    fn pipelines_unavailable(error: &anyhow::Error) -> Result<String> {
+        match http_status(error) {
+            Some(StatusCode::FORBIDDEN) => Ok(
+                "GitLab returned 403: CI/CD may be disabled or the token lacks pipeline access"
+                    .into(),
+            ),
+            Some(StatusCode::NOT_FOUND) => {
+                Ok("GitLab returned 404: pipelines are not available for this project".into())
+            }
+            _ => Err(anyhow!("{error:#}")),
+        }
+    }
+
+    /// Full pipeline (user, timings) plus its jobs. Like the merge request path, an
+    /// incomplete job list is returned with a warning rather than discarded.
+    pub fn pipeline_with_jobs(
+        &self,
+        project: u64,
+        pipeline: u64,
+    ) -> Result<(Pipeline, Vec<Job>, Vec<String>)> {
         let project = project.to_string();
         let id = pipeline.to_string();
         let full: ApiPipeline = self.get(&self.url(&["projects", &project, "pipelines", &id]))?;
@@ -576,17 +606,9 @@ impl GitLab {
         jobs.query_pairs_mut()
             .append_pair("include_retried", "false");
         let mut warnings = Vec::new();
-        let (mut jobs, complete) = self.optional::<Job>(jobs, "Pipeline jobs", &mut warnings);
-        if !complete {
-            bail!(
-                "{}",
-                warnings
-                    .pop()
-                    .unwrap_or_else(|| "Pipeline jobs unavailable".into())
-            );
-        }
+        let (mut jobs, _) = self.optional::<Job>(jobs, "Pipeline jobs", &mut warnings);
         sort_jobs(&mut jobs);
-        Ok((full.pipeline, jobs))
+        Ok((full.pipeline, jobs, warnings))
     }
 
     pub fn current_iteration(&self, project: u64) -> Result<Option<CurrentIteration>> {
@@ -3084,7 +3106,9 @@ mod tests {
             }
         });
         let client = mock.client();
-        let page = client.project_pipelines(7, 3).unwrap();
+        let Pipelines::Available(page) = client.project_pipelines(7, 3).unwrap() else {
+            panic!("pipelines readable");
+        };
         assert_eq!(
             page.len(),
             2,
@@ -3095,9 +3119,12 @@ mod tests {
         assert_eq!(page[1].merge_request_iid(), Some(104));
         assert_eq!(page[1].ref_label(), "!104");
         assert_eq!(page[1].source_label(), "merge request");
-        let latest = client.latest_pipeline(7).unwrap().unwrap();
+        let Pipelines::Available(Some(latest)) = client.latest_pipeline(7).unwrap() else {
+            panic!("probe readable");
+        };
         assert_eq!(latest.id, 48213);
-        let (full, jobs) = client.pipeline_with_jobs(7, 48213).unwrap();
+        let (full, jobs, warnings) = client.pipeline_with_jobs(7, 48213).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             full.user.as_ref().map(|u| u.username.as_str()),
             Some("release-bot")
@@ -3122,6 +3149,28 @@ mod tests {
             ],
             "window page 3 and a per_page=1 probe, nothing else"
         );
+    }
+
+    #[test]
+    fn unreadable_pipelines_are_a_per_project_fact_not_a_network_error() {
+        let mock = Mock::new(|request| {
+            if request.url().path() == "/api/v4/projects/7/pipelines" {
+                Reply::bytes(403, br#"{"message":"403 Forbidden"}"#.to_vec())
+            } else {
+                Reply::bytes(500, b"boom".to_vec())
+            }
+        });
+        let client = mock.client();
+        assert!(matches!(
+            client.project_pipelines(7, 1).unwrap(),
+            Pipelines::Unavailable(reason) if reason.contains("403")
+        ));
+        assert!(matches!(
+            client.latest_pipeline(7).unwrap(),
+            Pipelines::Unavailable(_)
+        ));
+        let error = client.pipeline_with_jobs(7, 1).unwrap_err().to_string();
+        assert!(error.contains("500"), "{error}");
     }
 
     #[test]

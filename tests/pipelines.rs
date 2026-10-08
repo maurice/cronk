@@ -2,8 +2,8 @@
 use cronk::{
     config::Config,
     demo,
-    gitlab::PIPELINE_PAGE,
-    model::{ItemKind, Project},
+    gitlab::{PIPELINE_PAGE, Pipelines},
+    model::{ItemKind, Job, Pipeline, Project},
     ui::{Cronk, Msg, Scope},
 };
 use tui_lipan::{
@@ -424,4 +424,183 @@ fn pipeline_refresh_cadence_defaults_to_twice_the_list_cadence() {
     config.validate().unwrap();
     let parsed: Config = toml::from_str("onboarding = false\npipeline_refresh_secs = 90").unwrap();
     assert_eq!(parsed.pipeline_refresh_secs(), 90);
+}
+
+#[test]
+fn a_pipeline_that_finishes_is_fetched_again_and_its_jobs_stop_streaming() {
+    let mut ui = mount(40);
+    open_pipelines(&mut ui);
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Enter);
+    let newest = ui.state().drilled.unwrap();
+    let running = ui.state().selected_job().unwrap().clone();
+    assert!(running.running());
+    assert!(
+        ui.state().wanted_pipelines(PROJECT).contains(&newest),
+        "active pipelines re-fetch"
+    );
+    let mut finished = ui.state().project_pipelines[&PROJECT]
+        .get(newest)
+        .unwrap()
+        .clone();
+    finished.status = "success".into();
+    finished.updated_at = Some("2026-09-28T11:59:59Z".into());
+    let epoch = ui.state().pipeline_epoch;
+    // Page 1 now reports the pipeline as finished with list-only fields.
+    ui.dispatch(Msg::PipelinesLoaded(
+        PROJECT,
+        epoch,
+        1,
+        Ok(Pipelines::Available(vec![Pipeline {
+            user: None,
+            duration: None,
+            started_at: None,
+            ..finished.clone()
+        }])),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    let window = ui.state().project_pipelines[&PROJECT].clone();
+    assert_eq!(
+        window.pipelines.len(),
+        1,
+        "page 1 is authoritative for the window head"
+    );
+    assert!(
+        window.get(newest).unwrap().user.is_some(),
+        "who started it is retained"
+    );
+    assert!(
+        !ui.state().wanted_pipelines(PROJECT).contains(&newest)
+            || window.jobs[&newest].stamp != finished.updated_at,
+        "the stale job list is marked for re-fetch"
+    );
+    let jobs: Vec<Job> = window.jobs[&newest]
+        .jobs
+        .iter()
+        .map(|job| Job {
+            status: "success".into(),
+            ..job.clone()
+        })
+        .collect();
+    ui.dispatch(Msg::PipelineLoaded(
+        PROJECT,
+        newest,
+        epoch,
+        Ok(Box::new((finished.clone(), jobs, Vec::new()))),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    assert_eq!(ui.state().drilled, Some(newest));
+    let job = ui.state().selected_job().unwrap().clone();
+    assert_eq!(job.id, running.id, "cursor keeps its job identity");
+    assert!(!job.running());
+    assert!(
+        !ui.state().trace_wanted(&job)
+            || ui.state().traces.get(&job.id).is_none_or(|t| !t.finished)
+    );
+    assert!(
+        ui.state().wanted_pipelines(PROJECT).is_empty(),
+        "finished and current: nothing to fetch"
+    );
+    // A pipeline that vanishes from the window drops the drill.
+    ui.dispatch(Msg::PipelinesLoaded(
+        PROJECT,
+        epoch,
+        1,
+        Ok(Pipelines::Available(Vec::new())),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    assert_eq!(
+        ui.state().drilled,
+        Some(newest),
+        "expanded/drilled rows survive a page-1 refresh"
+    );
+    ui.state_mut().drilled = None;
+    ui.state_mut().pipeline_expanded.clear();
+    ui.dispatch(Msg::PipelinesLoaded(
+        PROJECT,
+        epoch,
+        1,
+        Ok(Pipelines::Available(Vec::new())),
+    ))
+    .unwrap();
+    assert!(ui.state().project_pipelines[&PROJECT].pipelines.is_empty());
+    assert!(!ui.state().latest_pipeline.contains_key(&PROJECT));
+}
+
+#[test]
+fn unreadable_pipelines_do_not_trigger_global_backoff() {
+    let mut ui = mount(40);
+    let epoch = ui.state().pipeline_epoch;
+    let blocked = ui.state().blocked_until;
+    ui.dispatch(Msg::ProbeLoaded(
+        9004,
+        epoch,
+        Ok(Pipelines::Unavailable("GitLab returned 403".into())),
+    ))
+    .unwrap();
+    assert_eq!(ui.state().blocked_until, blocked);
+    assert!(ui.state().error.is_none());
+    assert!(!ui.state().latest_pipeline.contains_key(&9004));
+    assert!(ui.state().pipelines_unavailable.contains_key(&9004));
+    ui.state_mut().probe_pending.clear();
+    ui.dispatch(Msg::LoadProbes).unwrap();
+    assert!(
+        !ui.state().probe_pending.contains(&9004)
+            && !ui.state().latest_pipeline.contains_key(&9004),
+        "not probed again"
+    );
+    key(&mut ui, KeyCode::Enter);
+    ui.dispatch(Msg::PipelinesLoaded(
+        PROJECT,
+        epoch,
+        1,
+        Ok(Pipelines::Unavailable("GitLab returned 404".into())),
+    ))
+    .unwrap();
+    assert_eq!(ui.state().blocked_until, blocked);
+    assert!(ui.state().error.is_none());
+    let shown = text(&mut ui);
+    assert!(shown.contains("GitLab returned 404"), "{shown}");
+    // Transient probe failures back off quietly; explicit refresh clears unavailability.
+    ui.dispatch(Msg::ProbeLoaded(9005, epoch, Err("HTTP 503".into())))
+        .unwrap();
+    assert!(ui.state().blocked_until > blocked);
+    assert!(
+        ui.state().error.is_none(),
+        "no banner for a background probe"
+    );
+    ui.state_mut().blocked_until = std::time::Duration::ZERO;
+    ui.dispatch(Msg::Refresh).unwrap();
+    assert!(ui.state().pipelines_unavailable.is_empty());
+}
+
+#[test]
+fn hiding_the_project_or_replacing_setup_stops_drilled_polling() {
+    let mut ui = mount(40);
+    open_pipelines(&mut ui);
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Enter);
+    assert!(ui.state().drilled.is_some());
+    assert!(ui.state().job_source().is_some());
+    ui.dispatch(Msg::ToggleProject).unwrap();
+    assert!(!ui.state().config.projects[0].visible);
+    assert_eq!(ui.state().sections().len(), 2);
+    assert!(ui.state().section_cursor <= 1);
+    assert!(ui.state().drilled.is_none());
+    assert!(
+        ui.state().job_source().is_none(),
+        "no trace polling for a hidden project"
+    );
+    ui.dispatch(Msg::ToggleProject).unwrap();
+    assert_eq!(ui.state().sections().len(), 3);
+    assert!(ui.state().project_pipelines.contains_key(&PROJECT));
+
+    // Toggling issue visibility must not restart pipeline sync.
+    let epoch = ui.state().pipeline_epoch;
+    ui.dispatch(Msg::ToggleProjectKind(ItemKind::Issue))
+        .unwrap();
+    assert_eq!(ui.state().pipeline_epoch, epoch);
 }

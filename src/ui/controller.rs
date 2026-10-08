@@ -1,4 +1,5 @@
 use super::*;
+use crate::gitlab::Pipelines;
 use crate::{
     config::{SavedView, TabState},
     demo,
@@ -172,6 +173,7 @@ impl Component for Cronk {
             pipelines_pending: HashSet::new(),
             pipeline_detail_pending: HashSet::new(),
             probe_pending: HashSet::new(),
+            pipelines_unavailable: HashMap::new(),
             next_pipelines: Duration::ZERO,
             next_probe: Duration::ZERO,
             log_focus: None,
@@ -545,6 +547,13 @@ impl Component for Cronk {
                     self.queue_lists(ctx);
                     ctx.link().send(Msg::LoadDetails);
                     ctx.link().send(Msg::LoadTraces);
+                    // Explicit refresh is the way back in after a per-project 403/404.
+                    ctx.state.pipelines_unavailable.clear();
+                    ctx.state.next_pipelines = Duration::ZERO;
+                    ctx.state.next_probe = Duration::ZERO;
+                    if ctx.state.pipelines_section_present() {
+                        ctx.link().send(Msg::LoadPipelines);
+                    }
                 }
             }
             Msg::LoadProject(id, epoch) => {
@@ -1101,6 +1110,10 @@ impl Component for Cronk {
                                 let id = job.id;
                                 return self.update(Msg::FocusLog(id), ctx);
                             }
+                            if ctx.state.drilled.is_some() {
+                                // Jobs not loaded yet (or none): nothing to drill further into.
+                                return Update::none();
+                            }
                             let Some(window) = ctx.state.open_project_pipelines() else {
                                 return Update::none();
                             };
@@ -1370,6 +1383,8 @@ impl Component for Cronk {
                                 "hidden"
                             }
                         );
+                        self.reclamp_after_visibility_change(ctx);
+                        self.restart_pipeline_sync(ctx);
                         self.persist(ctx);
                         self.normalize(ctx);
                         self.restart_project_sync(ctx);
@@ -1387,18 +1402,9 @@ impl Component for Cronk {
                             project.merge_requests_visible = !project.merge_requests_visible
                         }
                     }
-                    // The Pipelines section follows MR visibility; keep the cursor valid.
-                    let last = ctx.state.sections().len() - 1;
-                    ctx.state.section_cursor = ctx.state.section_cursor.min(last);
-                    ctx.state.config.section = ctx.state.config.section.map(|s| s.min(last));
-                    if !ctx.state.pipelines_section_present() {
-                        ctx.state.drilled = None;
-                    }
-                    ctx.state.pipeline_epoch += 1;
-                    ctx.state.next_pipelines = Duration::ZERO;
-                    ctx.state.next_probe = Duration::ZERO;
-                    if ctx.state.pipelines_section_present() {
-                        ctx.link().send(Msg::LoadPipelines);
+                    self.reclamp_after_visibility_change(ctx);
+                    if kind == ItemKind::MergeRequest {
+                        self.restart_pipeline_sync(ctx);
                     }
                     self.persist(ctx);
                     self.normalize(ctx);
@@ -2266,7 +2272,7 @@ impl Cronk {
         project: u64,
         epoch: u64,
         page: usize,
-        result: Result<Vec<Pipeline>, String>,
+        result: Result<Pipelines<Vec<Pipeline>>, String>,
     ) -> Update {
         ctx.state.pipelines_pending.remove(&(project, page));
         if epoch != ctx.state.pipeline_epoch {
@@ -2290,26 +2296,59 @@ impl Cronk {
                 .state
                 .open_project_pipelines()
                 .is_some_and(|w| w.can_load_more() && ctx.state.config.field == w.pipelines.len());
+        let keep: HashSet<u64> = ctx
+            .state
+            .pipeline_expanded
+            .iter()
+            .chain(ctx.state.drilled.iter())
+            .copied()
+            .collect();
         let window = ctx.state.project_pipelines.entry(project).or_default();
         match result {
-            Ok(pipelines) => {
-                if page == 1
-                    && let Some(newest) = pipelines.first()
-                {
-                    ctx.state.latest_pipeline.insert(project, newest.clone());
+            Ok(Pipelines::Available(pipelines)) => {
+                if page == 1 {
+                    match pipelines.first() {
+                        Some(newest) => {
+                            ctx.state.latest_pipeline.insert(project, newest.clone());
+                        }
+                        None => {
+                            ctx.state.latest_pipeline.remove(&project);
+                        }
+                    }
                 }
-                window.merge(page, pipelines);
+                window.merge(page, pipelines, &keep);
                 if let Some(id) = selected
                     && let Some(index) = window.position(id)
                 {
                     ctx.state.config.field = index;
                 } else if on_footer {
                     ctx.state.config.field = window.row_count().saturating_sub(1);
+                } else if on_rows {
+                    ctx.state.config.field = ctx
+                        .state
+                        .config
+                        .field
+                        .min(window.row_count().saturating_sub(1));
+                }
+                if let Some(id) = ctx.state.drilled
+                    && ctx.state.config.project_route == Some(project)
+                    && window.get(id).is_none()
+                {
+                    // The drilled pipeline left the window: back to the pipeline rows.
+                    ctx.state.drilled = None;
+                    ctx.state.config.field = 0;
+                    self.close_log_mode(ctx);
                 }
                 if ctx.state.config.project_route == Some(project) {
                     ctx.state.status = "Pipelines updated".into();
                 }
                 return Update::with_command(self.load_pipeline_details(ctx, project));
+            }
+            Ok(Pipelines::Unavailable(reason)) => {
+                // A per-project fact (CI/CD disabled, no permission): stop asking until an
+                // explicit refresh or visibility change, and leave the global backoff alone.
+                ctx.state.pipelines_unavailable.insert(project, reason);
+                ctx.state.latest_pipeline.remove(&project);
             }
             Err(error) => {
                 window.error = Some(error.clone());
@@ -2327,52 +2366,60 @@ impl Cronk {
         project: u64,
         pipeline: u64,
         epoch: u64,
-        result: Result<Box<(Pipeline, Vec<Job>)>, String>,
+        result: Result<Box<LoadedPipeline>, String>,
     ) -> Update {
         ctx.state.pipeline_detail_pending.remove(&pipeline);
         if epoch != ctx.state.pipeline_epoch {
             return Update::none();
         }
-        let Some(window) = ctx.state.project_pipelines.get_mut(&project) else {
+        if !ctx.state.project_pipelines.contains_key(&project) {
             return Update::none();
-        };
+        }
         match result {
             Ok(loaded) => {
-                let (full, jobs) = *loaded;
+                let (full, jobs, warnings) = *loaded;
+                let drilled_here = ctx.state.config.project_route == Some(project)
+                    && ctx.state.drilled == Some(pipeline);
                 let job_id = ctx
                     .state
                     .selected_job()
-                    .filter(|_| ctx.state.drilled == Some(pipeline))
+                    .filter(|_| drilled_here)
                     .map(|j| j.id);
                 let window = ctx.state.project_pipelines.get_mut(&project).unwrap();
+                let first_jobs = !window.jobs.contains_key(&pipeline);
+                let stamp = full.updated_at.clone();
                 if let Some(existing) = window.pipelines.iter_mut().find(|p| p.id == pipeline) {
                     *existing = full;
                 }
-                if ctx.state.config.project_route == Some(project)
-                    && ctx.state.drilled == Some(pipeline)
-                {
+                window.jobs.insert(pipeline, PipelineJobs { jobs, stamp });
+                window.error = warnings.into_iter().next();
+                let jobs = &window.jobs[&pipeline].jobs;
+                if drilled_here {
                     if let Some(index) = jobs.iter().position(|j| Some(j.id) == job_id) {
                         ctx.state.config.field = index;
                     } else {
                         ctx.state.config.field =
                             ctx.state.config.field.min(jobs.len().saturating_sub(1));
                     }
-                    if ctx
+                    let focus_lost = ctx
                         .state
                         .log_focus
-                        .is_some_and(|id| !jobs.iter().any(|j| j.id == id))
-                    {
+                        .is_some_and(|id| !jobs.iter().any(|j| j.id == id));
+                    if focus_lost {
                         self.close_log_mode(ctx);
                     }
-                }
-                let window = ctx.state.project_pipelines.get_mut(&project).unwrap();
-                window.jobs.insert(pipeline, jobs);
-                if ctx.state.drilled == Some(pipeline) {
+                    if first_jobs {
+                        // The first render after drilling targeted the pipeline row; now
+                        // that its jobs exist, bring the selected job into view.
+                        ctx.state.reveal_content = true;
+                    }
                     ctx.link().send(Msg::LoadTraces);
                 }
             }
             Err(error) => {
-                window.error = Some(error.clone());
+                if let Some(window) = ctx.state.project_pipelines.get_mut(&project) {
+                    window.error = Some(error.clone());
+                }
                 self.network_error(ctx, error);
             }
         }
@@ -2397,12 +2444,12 @@ impl Cronk {
                     .unwrap_or(0);
                 self.close_log_mode(ctx);
             }
+            Update::full()
         } else {
             ctx.state.pipeline_collapsed.remove(&id);
             ctx.state.pipeline_expanded.insert(id);
-            return Update::with_command(self.load_pipeline_details(ctx, project));
+            Update::with_command(self.load_pipeline_details(ctx, project))
         }
-        Update::full()
     }
 
     /// Kept out of `update` so its stack frame stays small in debug builds.
@@ -2464,17 +2511,21 @@ impl Cronk {
         ctx: &mut Context<Self>,
         project: u64,
         epoch: u64,
-        result: Result<Option<Box<Pipeline>>, String>,
+        result: Result<Pipelines<Option<Box<Pipeline>>>, String>,
     ) -> Update {
         ctx.state.probe_pending.remove(&project);
         if epoch != ctx.state.pipeline_epoch {
             return Update::none();
         }
         match result {
-            Ok(Some(pipeline)) => {
+            Ok(Pipelines::Available(Some(pipeline))) => {
                 ctx.state.latest_pipeline.insert(project, *pipeline);
             }
-            Ok(None) => {
+            Ok(Pipelines::Available(None)) => {
+                ctx.state.latest_pipeline.remove(&project);
+            }
+            Ok(Pipelines::Unavailable(reason)) => {
+                ctx.state.pipelines_unavailable.insert(project, reason);
                 ctx.state.latest_pipeline.remove(&project);
             }
             // A flaky CI endpoint must not nag on every tab: back off quietly.
@@ -2483,17 +2534,52 @@ impl Cronk {
         Update::full()
     }
 
+    /// The Pipelines section follows merge request visibility: keep the section
+    /// cursor valid and stop any drilled job polling when it disappears.
+    fn reclamp_after_visibility_change(&self, ctx: &mut Context<Self>) {
+        if !ctx.state.project_details() {
+            return;
+        }
+        let last = ctx.state.sections().len() - 1;
+        ctx.state.section_cursor = ctx.state.section_cursor.min(last);
+        ctx.state.config.section = ctx.state.config.section.map(|s| s.min(last));
+        if !ctx.state.pipelines_section_present() {
+            ctx.state.drilled = None;
+            self.close_log_mode(ctx);
+        }
+    }
+
+    /// Visibility or setup changed: forget per-project unavailability, invalidate
+    /// in-flight pipeline replies and re-probe soon.
+    pub(super) fn restart_pipeline_sync(&self, ctx: &mut Context<Self>) {
+        ctx.state.pipeline_epoch += 1;
+        ctx.state.pipelines_pending.clear();
+        ctx.state.pipeline_detail_pending.clear();
+        ctx.state.probe_pending.clear();
+        ctx.state.pipelines_unavailable.clear();
+        ctx.state.next_pipelines = Duration::ZERO;
+        ctx.state.next_probe = Duration::ZERO;
+        if ctx.state.pipelines_section_present() {
+            ctx.link().send(Msg::LoadPipelines);
+        }
+    }
+
     /// Page 1 (or the next older page) of the open project's pipelines, then the
     /// detail + jobs of expanded pipelines. Memory-only; nothing is cached on disk.
     fn load_pipelines(&self, ctx: &mut Context<Self>, older: bool) -> Update {
-        ctx.state.next_pipelines =
-            ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs);
+        if !older {
+            ctx.state.next_pipelines =
+                ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs);
+        }
         if !ctx.state.pipelines_section_present() {
             return Update::none();
         }
         let Some(project) = ctx.state.config.project_route else {
             return Update::none();
         };
+        if ctx.state.pipelines_unavailable.contains_key(&project) {
+            return Update::none();
+        }
         let page = if older {
             let Some(window) = ctx.state.project_pipelines.get(&project) else {
                 return Update::none();
@@ -2515,8 +2601,12 @@ impl Cronk {
             if ctx.state.demo {
                 let fresh = demo::project_pipelines(project, page);
                 ctx.state.pipelines_pending.insert((project, page));
-                ctx.link()
-                    .send(Msg::PipelinesLoaded(project, epoch, page, Ok(fresh)));
+                ctx.link().send(Msg::PipelinesLoaded(
+                    project,
+                    epoch,
+                    page,
+                    Ok(Pipelines::Available(fresh)),
+                ));
             }
             return Update::full();
         };
@@ -2549,7 +2639,8 @@ impl Cronk {
         let Some(api) = self.api.clone() else {
             if ctx.state.demo {
                 for id in wanted {
-                    let result = demo::pipeline_with_jobs(project, id).map(Box::new);
+                    let result = demo::pipeline_with_jobs(project, id)
+                        .map(|(pipeline, jobs)| Box::new((pipeline, jobs, Vec::new())));
                     ctx.link()
                         .send(Msg::PipelineLoaded(project, id, epoch, result));
                 }
@@ -2588,7 +2679,7 @@ impl Cronk {
             .state
             .config
             .project_route
-            .filter(|_| ctx.state.project_details());
+            .filter(|_| ctx.state.pipelines_section_present());
         let ids: Vec<u64> = ctx
             .state
             .config
@@ -2596,7 +2687,10 @@ impl Cronk {
             .iter()
             .filter(|p| p.kind_visible(ItemKind::MergeRequest) && Some(p.id) != open)
             .map(|p| p.id)
-            .filter(|id| !ctx.state.probe_pending.contains(id))
+            .filter(|id| {
+                !ctx.state.probe_pending.contains(id)
+                    && !ctx.state.pipelines_unavailable.contains_key(id)
+            })
             .collect();
         if ids.is_empty() {
             return Update::none();
@@ -2606,8 +2700,11 @@ impl Cronk {
             if ctx.state.demo {
                 for id in ids {
                     let latest = demo::project_pipelines(id, 1).into_iter().next();
-                    ctx.link()
-                        .send(Msg::ProbeLoaded(id, epoch, Ok(latest.map(Box::new))));
+                    ctx.link().send(Msg::ProbeLoaded(
+                        id,
+                        epoch,
+                        Ok(Pipelines::Available(latest.map(Box::new))),
+                    ));
                 }
             }
             return Update::full();
@@ -2620,13 +2717,18 @@ impl Cronk {
                         let api = api.clone();
                         let link = link.clone();
                         scope.spawn(move || {
-                            link.send(Msg::ProbeLoaded(
-                                id,
-                                epoch,
-                                api.latest_pipeline(id)
-                                    .map(|p| p.map(Box::new))
-                                    .map_err(|e| e.to_string()),
-                            ));
+                            let result = api
+                                .latest_pipeline(id)
+                                .map(|outcome| match outcome {
+                                    Pipelines::Available(p) => {
+                                        Pipelines::Available(p.map(Box::new))
+                                    }
+                                    Pipelines::Unavailable(reason) => {
+                                        Pipelines::Unavailable(reason)
+                                    }
+                                })
+                                .map_err(|e| e.to_string());
+                            link.send(Msg::ProbeLoaded(id, epoch, result));
                         });
                     }
                 });

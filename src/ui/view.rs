@@ -890,7 +890,13 @@ fn context_line(state: &State, item_count: usize, colors: Colors) -> Element {
                 ),
                 Scope::Section => (
                     state.section_name().to_uppercase(),
-                    section_hint(state.section_name()).into(),
+                    // Inside a drilled project pipeline the cursor is on jobs.
+                    section_hint(if state.in_jobs() {
+                        "Pipeline"
+                    } else {
+                        state.section_name()
+                    })
+                    .into(),
                 ),
             }
         };
@@ -914,7 +920,7 @@ fn section_hint(section: &str) -> &'static str {
             "↑ ↓ choose a job · Space toggle · Enter logs · z zoom · Ctrl+↑/↓/PgUp/PgDn logs"
         }
         "Discussions" => "↑ ↓ choose a discussion · reply / resolve via commands",
-        "Pipelines" => "↑ ↓ choose a pipeline · Space expands · Enter opens its jobs",
+        "Pipelines" => "↑ ↓ choose a pipeline · Space expands · Enter opens its jobs · Esc back",
         "Changes" => "Unified diff · ↑ ↓ scroll",
         _ => "↑ ↓ scroll · Esc returns to section navigation",
     }
@@ -1820,6 +1826,16 @@ fn project_pipelines(
 ) -> Vec<DetailRow> {
     let state = &ctx.state;
     let muted = colors.base().fg(colors.muted);
+    if let Some(reason) = state.pipelines_unavailable.get(&project.id) {
+        return vec![
+            line(
+                format!("⚠ Pipelines unavailable: {reason}"),
+                colors.base().fg(colors.yellow),
+            )
+            .into(),
+            line("Refresh (r) retries after fixing access.", muted).into(),
+        ];
+    }
     let Some(window) = state.project_pipelines.get(&project.id) else {
         return loading_rows(ctx, "Pipelines", colors);
     };
@@ -1888,7 +1904,7 @@ fn project_pipelines(
                 .child(Text::from_spans(by).style(colors.base()))
                 .child(web_link(&pipeline.web_url, colors)),
         ));
-        match window.jobs.get(&id) {
+        match window.jobs.get(&id).map(|loaded| loaded.jobs.as_slice()) {
             Some(jobs_loaded) => {
                 let counts =
                     job_counts(ctx, &format!("pipeline-{id}-summary"), jobs_loaded, colors);
@@ -2750,52 +2766,7 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Deta
             .into(),
         );
     }
-    let count = |status: &str| details.jobs.iter().filter(|j| j.status == status).count();
-    let failed_status = if details.jobs.iter().any(Job::failed_hard) {
-        "failed"
-    } else {
-        STATUS_FAILED_ALLOWED
-    };
-    let mut summary = HStack::new().height(Length::Px(1)).style(colors.base());
-    // Only list states that have jobs: a "0 failed" entry reads as a problem when scanning.
-    for (key, status, label, count) in [
-        ("running", "running", "running", count("running")),
-        (
-            "pending",
-            "pending",
-            "pending",
-            count("pending") + count("created"),
-        ),
-        ("success", "success", "passed", count("success")),
-        ("failed", failed_status, "failed", count("failed")),
-    ] {
-        if count == 0 {
-            continue;
-        }
-        summary = summary
-            .child(status_dot(
-                ctx,
-                format!("pipeline-summary-{key}-status"),
-                "Jobs",
-                status,
-                colors.base(),
-                colors,
-            ))
-            .child(
-                Text::new(format!(" {count} {label}   "))
-                    .height(Length::Px(1))
-                    .style(colors.base().fg(colors.status(status).1)),
-            );
-    }
-    content.push(
-        summary
-            .child(
-                Text::new(format!("{} total", details.jobs.len()))
-                    .height(Length::Px(1))
-                    .style(colors.base().fg(colors.muted)),
-            )
-            .into(),
-    );
+    content.push(job_counts(ctx, "pipeline-summary", &details.jobs, colors).into());
     content
 }
 

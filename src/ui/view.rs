@@ -153,7 +153,8 @@ impl Colors {
 
     fn status(self, status: &str) -> (char, Color) {
         match status {
-            "opened" | "success" | "passed" | "resolved" => ('●', self.green),
+            "opened" | "success" | "passed" | "resolved" | "visible" => ('●', self.green),
+            "partially_visible" => ('◐', self.green),
             "running" => ('◐', self.blue),
             STATUS_RUNNING_FAILING => ('◐', self.red),
             STATUS_RUNNING_WARNING => ('◐', self.yellow),
@@ -274,6 +275,7 @@ fn status_help(subject: &str, status: &str) -> String {
         "comment" => "Comment that does not require resolution",
         "warning" => "See the adjacent message for additional information",
         "visible" => "Included in Dashboard, Issues, and Merge Requests",
+        "partially_visible" => "Included in work lists for the enabled item type only",
         "hidden" => "Excluded from work lists until shown again",
         _ => "Status reported by GitLab",
     };
@@ -1192,11 +1194,8 @@ fn project_row(
         colors.base()
     };
     let style = interaction::style(ctx, &format!("project-{}", project.id), style);
-    let (symbol, color, status) = if project.visible {
-        ('●', colors.green, "visible")
-    } else {
-        ('○', colors.muted, "hidden")
-    };
+    let status = project.visibility_status();
+    let (symbol, color) = colors.status(status);
     let link = ctx.link().clone();
     let visibility = click(
         ctx,
@@ -1214,43 +1213,50 @@ fn project_row(
             Msg::ToggleProject
         },
     );
-    let count = state
-        .items
-        .iter()
-        .filter(|item| item.key.project == project.id)
-        .count();
+    let work = project_open_work(project, &state.items);
     let top = HStack::new()
         .height(Length::Px(1))
         .style(style)
         .child(Text::new(" ").width(Length::Px(1)).style(style))
         .child(visibility)
         .child(Text::new(" ").width(Length::Px(1)).style(style))
-        .child(line(project_name(state, project.id), style.bold()))
-        .child(Text::new(format!("{count} items  ")).style(Style::new().fg(colors.muted)));
+        .child(line(project_name(state, project.id), style.bold()));
     let marked = selected && state.scope == Scope::List;
     click(
         ctx,
         format!("project-{}", project.id),
         VStack::new()
-            .height(Length::Px(3))
+            .height(Length::Px(4))
             .style(colors.base())
             .child(list_selection_line(top, marked, colors))
             .child(list_selection_line(
                 rich(
                     vec![
                         Span::new(format!("   {}  ·  ", project.path)).fg(colors.muted),
-                        Span::new(if project.visible {
+                        Span::new(if project.effectively_visible() {
                             "visible"
                         } else {
-                            "hidden from work lists"
+                            "hidden"
                         })
-                        .fg(if project.visible {
+                        .fg(if project.effectively_visible() {
                             colors.green
                         } else {
                             colors.muted
                         }),
                     ],
                     style,
+                ),
+                marked,
+                colors,
+            ))
+            .child(list_selection_line(
+                line(
+                    if work.is_empty() {
+                        String::new()
+                    } else {
+                        format!("   {work}")
+                    },
+                    style.fg(colors.muted),
                 ),
                 marked,
                 colors,
@@ -1370,107 +1376,132 @@ fn project_detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
         );
     };
     let mut content = Vec::new();
-    let selected = state.section_cursor == 0;
-    // Match issue/MR details: broad section fill on Details, contract to the focused
-    // field after Enter, and expand again on Escape.
-    let broad = state.scope == Scope::Details;
-    let background = if state.config.animations {
-        ctx.transition(
-            "detail-focus-background-0",
-            if broad {
-                colors.selection
-            } else {
-                colors.background
-            },
-            TransitionConfig {
-                duration: std::time::Duration::from_millis(160),
-                ..TransitionConfig::default()
-            },
-        )
-    } else if broad {
-        colors.selection
-    } else {
-        colors.background
-    };
-    let edge = if state.config.animations {
-        ctx.transition(
-            "detail-focus-edge-0",
-            if broad {
-                colors.accent
-            } else {
-                colors.background
-            },
-            TransitionConfig {
-                duration: std::time::Duration::from_millis(160),
-                ..TransitionConfig::default()
-            },
-        )
-    } else if broad {
-        colors.accent
-    } else {
-        colors.background
-    };
-    let section_colors = Colors {
-        background: if selected {
-            background
+    for (index, section) in state.sections().iter().enumerate() {
+        let selected = state.section_cursor == index;
+        // Match issue/MR details: contract the highlight to editable controls on Enter.
+        let broad = state.scope == Scope::Details || *section == "Pipelines";
+        let background = if state.config.animations {
+            ctx.transition(
+                format!("detail-focus-background-{index}"),
+                if broad {
+                    colors.selection
+                } else {
+                    colors.background
+                },
+                TransitionConfig {
+                    duration: std::time::Duration::from_millis(160),
+                    ..TransitionConfig::default()
+                },
+            )
+        } else if broad {
+            colors.selection
         } else {
             colors.background
-        },
-        ..colors
-    };
-    let edge = if selected { edge } else { colors.background };
-    let style = interaction::style(ctx, "detail-section-0", section_colors.base());
-    content.push(click(
-        ctx,
-        "detail-section-0",
-        detail_selection_row(
-            HStack::new()
-                .height(Length::Px(1))
-                .style(style)
-                .child(Text::new("Fields ").style(style.fg(colors.accent).bold()))
-                .child(Divider::horizontal().style(style.fg(colors.muted)))
-                .into(),
-            None,
-            edge,
-            style,
-            colors,
-        ),
-        || Msg::DetailSection(0),
-    ));
-    for (row_index, child) in project_fields(ctx, &project, section_colors)
-        .into_iter()
-        .enumerate()
-    {
-        let key = child
-            .key
-            .unwrap_or_else(|| format!("detail-section-0-row-{row_index}"));
-        let row_style = if child.focused {
-            colors.selected()
-        } else {
-            section_colors.base()
         };
-        let row_style = interaction::style(ctx, &key, row_style);
-        let status = child.status.map(|(key, subject, status)| {
-            status_dot(ctx, key, &subject, &status, row_style, colors)
-        });
-        let row = detail_selection_row(
-            child.content,
-            status,
-            if child.focused { colors.accent } else { edge },
-            row_style,
-            colors,
-        );
-        content.push(if let Some(message) = child.on_click {
-            click(ctx, key, row, message)
+        let edge = if state.config.animations {
+            ctx.transition(
+                format!("detail-focus-edge-{index}"),
+                if broad {
+                    colors.accent
+                } else {
+                    colors.background
+                },
+                TransitionConfig {
+                    duration: std::time::Duration::from_millis(160),
+                    ..TransitionConfig::default()
+                },
+            )
+        } else if broad {
+            colors.accent
         } else {
-            row.key(key)
-        });
+            colors.background
+        };
+        let section_colors = Colors {
+            background: if selected {
+                background
+            } else {
+                colors.background
+            },
+            ..colors
+        };
+        let edge = if selected { edge } else { colors.background };
+        let style = interaction::style(
+            ctx,
+            &format!("detail-section-{index}"),
+            section_colors.base(),
+        );
+        content.push(click(
+            ctx,
+            format!("detail-section-{index}"),
+            detail_selection_row(
+                HStack::new()
+                    .height(Length::Px(1))
+                    .style(style)
+                    .child(Text::new(format!("{section} ")).style(style.fg(colors.accent).bold()))
+                    .child(Divider::horizontal().style(style.fg(colors.muted)))
+                    .into(),
+                None,
+                edge,
+                style,
+                colors,
+            ),
+            move || Msg::DetailSection(index),
+        ));
+        let children = match *section {
+        "Fields" => project_fields(ctx, &project, section_colors),
+        "Pipelines" => vec![
+            VStack::new()
+                .height(Length::Px(7))
+                .style(section_colors.base())
+                .child(blank())
+                .child(Text::new("Project pipelines — coming soon")
+                    .style(section_colors.base().fg(colors.muted)).overflow(Overflow::Wrap))
+                .child(Text::new("Active and recent pipelines, including those not associated with a merge request, will appear here.")
+                    .height(Length::Auto).overflow(Overflow::Wrap)
+                    .style(section_colors.base().fg(colors.muted)))
+                .into(),
+        ],
+        "Forget this project" => project_forget(ctx, colors),
+        _ => Vec::new(),
+    };
+        for (row_index, child) in children.into_iter().enumerate() {
+            let key = child
+                .key
+                .unwrap_or_else(|| format!("detail-section-{index}-row-{row_index}"));
+            let row_style = if child.focused {
+                colors.selected()
+            } else {
+                section_colors.base()
+            };
+            let row_style = interaction::style(ctx, &key, row_style);
+            let status = child.status.map(|(key, subject, status)| {
+                status_dot(ctx, key, &subject, &status, row_style, colors)
+            });
+            let row = detail_selection_row(
+                child.content,
+                status,
+                if child.focused { colors.accent } else { edge },
+                row_style,
+                colors,
+            );
+            content.push(if let Some(message) = child.on_click {
+                click(ctx, key, row, message)
+            } else {
+                row.key(key)
+            });
+        }
+        content.push(blank().key(format!("detail-section-gap-{index}")));
     }
-    content.push(blank().key("detail-section-gap-0"));
     let target = state.reveal_content.then(|| state.detail_target_key());
-    // Project details are a handful of rows; assume they fit unless the pane is tiny.
-    let overflows = content.len() + 2 > ctx.viewport().h.saturating_sub(9) as usize;
-    let mut scroll = scroll_content(ctx, content, colors, overflows);
+    let id = project.id;
+    let epoch = state.detail_epoch;
+    // Include the fixed-height pipeline placeholder and destructive button.
+    let overflows = content.len() + 8 > ctx.viewport().h.saturating_sub(9) as usize;
+    let mut scroll = scroll_content(ctx, content, colors, overflows).on_viewport_change(
+        ctx.link().callback(move |event: ScrollViewportEvent| {
+            Msg::ProjectDetailViewport(id, epoch, Box::new(event))
+        }),
+    );
     if let Some(target) = target {
         scroll = scroll.reveal_key(target);
     } else if let Some(offset) = state.detail_offset_request {
@@ -1483,86 +1514,153 @@ fn project_detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
     )
 }
 
+const PROJECT_FIELD_LABELS: [&str; 7] = [
+    "Alias",
+    "Visibility",
+    "Issues",
+    "Merge requests",
+    "Path",
+    "Project ID",
+    "Open work",
+];
+
+/// Measure every detail schema so all three screens share a value column.
+fn detail_label_width() -> usize {
+    [ItemKind::Issue, ItemKind::MergeRequest]
+        .into_iter()
+        .flat_map(|kind| {
+            super::editable_field_definitions(kind)
+                .map(|(label, _)| label)
+                .chain(readonly_field_labels(kind))
+        })
+        .chain(PROJECT_FIELD_LABELS)
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+fn project_open_work(project: &Project, items: &[WorkItem]) -> String {
+    [ItemKind::Issue, ItemKind::MergeRequest]
+        .into_iter()
+        .filter(|kind| project.kind_visible(*kind))
+        .map(|kind| {
+            let count = items
+                .iter()
+                .filter(|item| {
+                    item.key.project == project.id
+                        && item.key.kind == kind
+                        && item.state == "opened"
+                })
+                .count();
+            let noun = match (kind, count) {
+                (ItemKind::Issue, 1) => "issue",
+                (ItemKind::Issue, _) => "issues",
+                (ItemKind::MergeRequest, 1) => "merge request",
+                (ItemKind::MergeRequest, _) => "merge requests",
+            };
+            format!("{count} open {noun}")
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 fn project_fields(ctx: &Context<Cronk>, project: &Project, colors: Colors) -> Vec<DetailRow> {
     let state = &ctx.state;
-    let issues = state
-        .items
-        .iter()
-        .filter(|item| item.key.project == project.id && item.key.kind == ItemKind::Issue)
-        .count();
-    let merge_requests = state
-        .items
-        .iter()
-        .filter(|item| item.key.project == project.id && item.key.kind == ItemKind::MergeRequest)
-        .count();
-    let visibility = if project.visible { "visible" } else { "hidden" };
+    let status = project.visibility_status();
     let mut content = vec![
-        DetailRow::from(rich(
-            vec![
-                Span::new(if project.visible { "Visible" } else { "Hidden" }).fg(
-                    if project.visible {
-                        colors.green
-                    } else {
-                        colors.muted
-                    },
-                ),
-                Span::new(format!("   {}", project.path)).fg(colors.accent),
-            ],
-            colors.base(),
+        DetailRow::from(line(
+            if project.effectively_visible() {
+                "visible"
+            } else {
+                "hidden"
+            },
+            colors.base().fg(colors.status(status).1),
         ))
-        .with_status("detail-project-status", "Project", visibility),
+        .with_status("detail-project-status", "Project", status),
         blank().into(),
     ];
-    let alias_selected = state.scope == Scope::Section
-        && state.section_name() == "Fields"
-        && state.config.field == 0;
-    let alias_style = if alias_selected {
-        colors.selected()
-    } else {
-        colors.base()
-    };
-    let alias_style = interaction::style(ctx, "edit-field-0", alias_style);
-    let alias_value = if project.alias.is_empty() {
-        "—".into()
-    } else {
-        project.alias.clone()
-    };
-    let label_width = ["Alias", "Path", "Project ID", "Visibility", "Open work"]
-        .into_iter()
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
-    content.push(DetailRow::interactive(
-        "edit-field-0".into(),
-        field_row(
-            &format!("{:>label_width$}", "Alias"),
-            label_width,
-            vec![Span::new(alias_value)],
-            colors.accent,
-            alias_style,
-        ),
-        alias_selected,
-        || Msg::Field(0),
-    ));
-    for (label, value) in [
-        ("Path", project.path.clone()),
-        ("Project ID", project.id.to_string()),
+    let label_width = detail_label_width();
+    for (index, (label, value)) in [
         (
-            "Visibility",
-            if project.visible {
-                "Included in work lists".into()
+            "Alias",
+            if project.alias.is_empty() {
+                "—".into()
             } else {
-                "Hidden from work lists".into()
+                project.alias.clone()
             },
         ),
         (
-            "Open work",
-            format!("{issues} issues · {merge_requests} merge requests"),
+            "Visibility",
+            if project.visible {
+                "visible".into()
+            } else {
+                "hidden".into()
+            },
         ),
+        (
+            "Issues",
+            if project.issues_visible {
+                "visible".into()
+            } else {
+                "hidden".into()
+            },
+        ),
+        (
+            "Merge requests",
+            if project.merge_requests_visible {
+                "visible".into()
+            } else {
+                "hidden".into()
+            },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let selected = state.scope == Scope::Section
+            && state.section_name() == "Fields"
+            && state.config.field == index;
+        let style = interaction::style(
+            ctx,
+            &format!("edit-field-{index}"),
+            if selected {
+                colors.selected()
+            } else {
+                colors.base()
+            },
+        );
+        let value = if index == 0 {
+            vec![Span::new(value)]
+        } else {
+            let enabled = value == "visible";
+            vec![
+                Span::new(if enabled { "[on]  " } else { "[off] " }).fg(if enabled {
+                    colors.green
+                } else {
+                    colors.muted
+                }),
+                Span::new(value),
+            ]
+        };
+        content.push(DetailRow::interactive(
+            format!("edit-field-{index}"),
+            field_row(label, label_width, value, colors.accent, style),
+            selected,
+            move || Msg::Field(index),
+        ));
+    }
+    content.push(blank().into());
+    for (label, value) in [
+        ("Path", project.path.clone()),
+        ("Project ID", project.id.to_string()),
+        ("Open work", project_open_work(project, &state.items)),
     ] {
+        if label == "Open work" && value.is_empty() {
+            continue;
+        }
         content.push(
             field_row(
-                &format!("{label:>label_width$}"),
+                label,
                 label_width,
                 vec![Span::new(value)],
                 colors.muted,
@@ -1571,30 +1669,49 @@ fn project_fields(ctx: &Context<Cronk>, project: &Project, colors: Colors) -> Ve
             .into(),
         );
     }
-    content.push(blank().into());
-    let remove_selected = state.scope == Scope::Section
-        && state.section_name() == "Fields"
-        && state.config.field == 1;
-    let remove_style = if remove_selected {
-        colors.selected().fg(colors.red).bold()
-    } else {
-        colors.base().fg(colors.red).bold()
-    };
-    let remove_style = interaction::style(ctx, "project-remove", remove_style);
-    content.push(DetailRow::interactive(
-        "project-remove".into(),
-        Element::from(Text::new(" Remove from workspace ").style(remove_style)),
-        remove_selected,
-        || Msg::Action(Action::RemoveProject),
-    ));
-    content.push(
-        line(
-            "Removes this project from Cronk only. GitLab data is unchanged.",
-            colors.base().fg(colors.muted),
-        )
-        .into(),
-    );
     content
+}
+
+fn forget_style(colors: Colors) -> Style {
+    let foreground = if colors.red.luminance() > 0.179 {
+        Color::hex_u24(0x000000)
+    } else {
+        Color::hex_u24(0xffffff)
+    };
+    Style::new().fg(foreground).bg(colors.red).bold()
+}
+
+fn project_forget(ctx: &Context<Cronk>, colors: Colors) -> Vec<DetailRow> {
+    let selected =
+        ctx.state.scope == Scope::Section && ctx.state.section_name() == "Forget this project";
+    let style = interaction::style(ctx, "project-remove", forget_style(colors));
+    vec![
+        DetailRow::interactive(
+            "project-remove".into(),
+            VStack::new()
+                .height(Length::Px(3))
+                .style(style)
+                .justify(Justify::Center)
+                .child(
+                    HStack::new()
+                        .height(Length::Px(1))
+                        .style(style)
+                        .justify(Justify::Center)
+                        .child(
+                            Text::new("Forget this project")
+                                .width(Length::Auto)
+                                .style(style),
+                        ),
+                ),
+            selected,
+            || Msg::Action(Action::RemoveProject),
+        ),
+        Text::new("Removes this project from Cronk only. GitLab data is unchanged.")
+            .height(Length::Auto)
+            .overflow(Overflow::Wrap)
+            .style(colors.base().fg(colors.muted))
+            .into(),
+    ]
 }
 
 /// A `label  value` row with the label left-aligned in a `label_width` column
@@ -2096,17 +2213,7 @@ fn fields(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Detail
             (label, value)
         })
         .collect::<Vec<_>>();
-    // Measure the full schema, not the current item or its populated values.
-    let label_width = [ItemKind::Issue, ItemKind::MergeRequest]
-        .into_iter()
-        .flat_map(|kind| {
-            super::editable_field_definitions(kind)
-                .map(|(label, _)| label)
-                .chain(readonly_field_labels(kind))
-        })
-        .map(|label| label.chars().count())
-        .max()
-        .unwrap_or(0);
+    let label_width = detail_label_width();
     for (index, (label, _, value)) in editable.into_iter().enumerate() {
         let selected = ctx.state.scope == Scope::Section
             && ctx.state.section_name() == "Fields"

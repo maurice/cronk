@@ -381,6 +381,8 @@ pub enum Msg {
     ListScroll(usize),
     ListViewportChanged,
     ToggleProject,
+    ToggleProjectKind(ItemKind),
+    ProjectDetailViewport(u64, u64, Box<ScrollViewportEvent>),
     ToggleJob(u64),
     FocusLog(u64),
     ZoomLog,
@@ -493,7 +495,7 @@ impl State {
                     .config
                     .projects
                     .iter()
-                    .any(|p| p.id == item.project && p.visible),
+                    .any(|p| p.id == item.project && p.kind_visible(item.kind)),
                 Selection::Project(id) => self.config.projects.iter().any(|p| p.id == *id),
                 Selection::Legacy(_) => false,
             });
@@ -539,7 +541,7 @@ impl State {
                         .config
                         .projects
                         .iter()
-                        .any(|p| p.id == item.project && p.visible),
+                        .any(|p| p.id == item.project && p.kind_visible(item.kind)),
                     Selection::Project(id) => self.config.projects.iter().any(|p| p.id == *id),
                     Selection::Legacy(_) => true,
                 };
@@ -570,7 +572,7 @@ impl State {
         self.config
             .projects
             .iter()
-            .filter(|p| p.visible)
+            .filter(|p| p.effectively_visible())
             .all(|p| self.navigation_hydrated.contains(&p.id))
     }
 
@@ -839,7 +841,10 @@ impl State {
             if ranks.is_some_and(|r| !r.contains_key(&item.key)) {
                 return false;
             }
-            let Some(project) = self.project(item.key.project).filter(|p| p.visible) else {
+            let Some(project) = self
+                .project(item.key.project)
+                .filter(|p| p.kind_visible(item.key.kind))
+            else {
                 return false;
             };
             if let Some(kind) = self.kind()
@@ -939,7 +944,7 @@ impl State {
 
     pub fn sections(&self) -> &'static [&'static str] {
         if self.project_details() {
-            &["Fields"]
+            &["Fields", "Pipelines", "Forget this project"]
         } else if self
             .config
             .route
@@ -967,9 +972,7 @@ impl State {
     pub(super) fn detail_target_key(&self) -> String {
         if self.scope == Scope::Section {
             match self.section_name() {
-                "Fields" if self.project_details() && self.config.field == 1 => {
-                    return "project-remove".into();
-                }
+                "Forget this project" => return "project-remove".into(),
                 "Fields" => return format!("edit-field-{}", self.config.field),
                 "Jobs" => {
                     if let Some(job) = self
@@ -1080,9 +1083,9 @@ fn command_match(label: &str, query: &str) -> Option<bool> {
     Some(in_order)
 }
 
-/// Dashboard rows have a fourth spacer row; other list rows occupy three rows.
+/// Dashboard and Projects rows include a fourth spacer row; work-list rows occupy three.
 pub fn list_row_height(active_tab: usize) -> usize {
-    if active_tab == 0 { 4 } else { 3 }
+    if matches!(active_tab, 0 | 1) { 4 } else { 3 }
 }
 
 /// Top and bottom chrome occupy eight rows; the remaining area determines visible items.
@@ -1090,9 +1093,9 @@ pub fn list_height_for_tab(viewport_height: u16, active_tab: usize) -> usize {
     (viewport_height.saturating_sub(8) as usize / list_row_height(active_tab)).max(1)
 }
 
-/// Visible list items for the standard three-row list layout.
+/// Visible list items for the standard three-row work-list layout.
 pub fn list_height(viewport_height: u16) -> usize {
-    list_height_for_tab(viewport_height, 1)
+    list_height_for_tab(viewport_height, 2)
 }
 
 #[cfg(test)]

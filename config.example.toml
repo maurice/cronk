@@ -28,7 +28,9 @@ detail_refresh_secs = 10 # minimum 2; use 5 for faster details
 # id = 1234
 # path = "company/division/team/planning"
 # alias = "Planning"
-# visible = true
+# visible = true # master switch; preserves the two preferences below
+# issues_visible = true # defaults to true; hidden types stop syncing
+# merge_requests_visible = true # defaults to true; cached content is retained
 
 # [[views]]
 # name = "My iteration"

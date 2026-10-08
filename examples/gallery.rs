@@ -18,6 +18,10 @@ fn main() -> anyhow::Result<()> {
     for (name, tab, route, section, theme) in [
         ("dashboard", 0, None, None, "midnight"),
         ("projects", 1, None, None, "midnight"),
+        ("project-details", 1, None, None, "midnight"),
+        ("project-details-light", 1, None, None, "light"),
+        ("project-details-partial", 1, None, None, "midnight"),
+        ("project-details-hidden", 1, None, None, "midnight"),
         (
             "issue",
             2,
@@ -63,8 +67,20 @@ fn main() -> anyhow::Result<()> {
             "dracula",
         ),
     ] {
+        let mut projects = demo::projects();
+        if name == "project-details-partial" {
+            projects[0].issues_visible = false;
+        }
+        if name == "project-details-hidden" {
+            projects[0].visible = false;
+        }
+        if name == "projects" {
+            projects[1].issues_visible = false;
+            projects[2].visible = false;
+        }
         let config = Config {
-            projects: demo::projects(),
+            projects,
+            project_route: name.starts_with("project-details").then_some(9001),
             active_tab: tab,
             route,
             section,
@@ -98,6 +114,6 @@ fn main() -> anyhow::Result<()> {
         )?;
         std::fs::write(output.join(format!("{name}.md")), snapshot.to_markdown())?;
     }
-    println!("Wrote six PNG/Markdown snapshots to {}", output.display());
+    println!("Wrote PNG/Markdown snapshots to {}", output.display());
     Ok(())
 }

@@ -24,7 +24,7 @@ impl ItemKind {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Project {
     pub id: u64,
@@ -33,9 +33,47 @@ pub struct Project {
     /// New projects may start with GitLab's short name when the add dialog leaves this blank.
     pub alias: String,
     pub visible: bool,
+    /// Local collection preferences, preserved when the master switch is off.
+    pub issues_visible: bool,
+    pub merge_requests_visible: bool,
+}
+
+impl Default for Project {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            path: String::new(),
+            alias: String::new(),
+            visible: false,
+            issues_visible: true,
+            merge_requests_visible: true,
+        }
+    }
 }
 
 impl Project {
+    pub fn kind_visible(&self, kind: ItemKind) -> bool {
+        self.visible
+            && match kind {
+                ItemKind::Issue => self.issues_visible,
+                ItemKind::MergeRequest => self.merge_requests_visible,
+            }
+    }
+
+    pub fn effectively_visible(&self) -> bool {
+        self.visible && (self.issues_visible || self.merge_requests_visible)
+    }
+
+    pub fn visibility_status(&self) -> &'static str {
+        if !self.effectively_visible() {
+            "hidden"
+        } else if self.issues_visible && self.merge_requests_visible {
+            "visible"
+        } else {
+            "partially_visible"
+        }
+    }
+
     pub fn name(&self) -> &str {
         if self.alias.is_empty() {
             &self.path
@@ -574,6 +612,9 @@ pub fn pipeline_status(jobs: &[Job], reported: &str) -> String {
 
 /// The text to display for a (pseudo-)status.
 pub fn status_label(status: &str) -> &str {
+    if status == "partially_visible" {
+        return "visible";
+    }
     status.split(" (").next().unwrap_or(status)
 }
 

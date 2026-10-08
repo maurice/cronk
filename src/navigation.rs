@@ -78,7 +78,11 @@ fn context(config: &Config, index: usize) -> String {
         });
     // Conservative invalidation: changed project visibility or filter must not
     // restore an old detail/cursor into a now different list. Order is irrelevant.
-    let mut projects: Vec<_> = config.projects.iter().map(|p| (p.id, p.visible)).collect();
+    let mut projects: Vec<_> = config
+        .projects
+        .iter()
+        .map(|p| (p.id, p.visible, p.issues_visible, p.merge_requests_visible))
+        .collect();
     projects.sort_unstable();
     hash(serde_json::to_vec(&(query, projects)).unwrap())
 }

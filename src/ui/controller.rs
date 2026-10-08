@@ -50,7 +50,7 @@ impl Component for Cronk {
             !config
                 .projects
                 .iter()
-                .any(|p| p.id == key.project && p.visible)
+                .any(|p| p.id == key.project && p.kind_visible(key.kind))
         }) {
             config.route = None;
             config.section = None;
@@ -99,7 +99,7 @@ impl Component for Cronk {
             .copied()
             .unwrap_or(0);
         let section_last = if config.active_tab == 1 && config.project_route.is_some() {
-            0
+            2
         } else if config
             .route
             .as_ref()
@@ -402,7 +402,10 @@ impl Component for Cronk {
             }
             Msg::ProjectCached(id, epoch, result) => {
                 if epoch != ctx.state.list_epoch
-                    || !ctx.state.project(id).is_some_and(|p| p.visible)
+                    || !ctx
+                        .state
+                        .project(id)
+                        .is_some_and(|p| p.effectively_visible())
                 {
                     return Update::none();
                 }
@@ -417,7 +420,10 @@ impl Component for Cronk {
             }
             Msg::ProjectProgress(id, epoch, progress, items) => {
                 if epoch != ctx.state.list_epoch
-                    || !ctx.state.project(id).is_some_and(|p| p.visible)
+                    || !ctx
+                        .state
+                        .project(id)
+                        .is_some_and(|p| p.kind_visible(progress.kind))
                 {
                     return Update::none();
                 }
@@ -532,7 +538,12 @@ impl Component for Cronk {
                     ctx.state.list_pending.remove(&id);
                     return Update::none();
                 }
-                let Some(project) = ctx.state.project(id).filter(|p| p.visible).cloned() else {
+                let Some(project) = ctx
+                    .state
+                    .project(id)
+                    .filter(|p| p.effectively_visible())
+                    .cloned()
+                else {
                     ctx.state.list_pending.remove(&id);
                     return Update::none();
                 };
@@ -553,7 +564,10 @@ impl Component for Cronk {
                         .sync_project(&project, full, |progress, items| {
                             link.send(Msg::ProjectProgress(id, epoch, progress, items));
                         })
-                        .map(|items| (items, api.current_iteration(project.id).ok().flatten()))
+                        .map(|items| {
+                            let iteration = api.current_iteration_for_sync(&project).ok().flatten();
+                            (items, iteration)
+                        })
                         .map_err(|e| e.to_string());
                     link.send(Msg::ProjectLoaded(id, epoch, result));
                 }));
@@ -591,7 +605,11 @@ impl Component for Cronk {
                 if ctx.state.list_pending.is_empty() {
                     ctx.state.full_resync = false;
                 }
-                if !ctx.state.project(id).is_some_and(|p| p.visible) {
+                if !ctx
+                    .state
+                    .project(id)
+                    .is_some_and(|p| p.effectively_visible())
+                {
                     return Update::none();
                 }
                 let selected = ctx
@@ -601,7 +619,16 @@ impl Component for Cronk {
                 match result {
                     Ok((items, current_iteration)) => {
                         ctx.state.navigation_hydrated.insert(id);
-                        ctx.state.items.retain(|i| i.key.project != id);
+                        let replaced: HashSet<_> = items.iter().map(|i| i.key.clone()).collect();
+                        let project = ctx
+                            .state
+                            .project(id)
+                            .expect("project checked above")
+                            .clone();
+                        ctx.state.items.retain(|i| {
+                            i.key.project != id
+                                || (!project.kind_visible(i.key.kind) && !replaced.contains(&i.key))
+                        });
                         ctx.state.items.extend(items);
                         ctx.state.current_iterations.insert(id, current_iteration);
                         if let Some(key) = selected
@@ -932,7 +959,7 @@ impl Component for Cronk {
                 }
                 if index == ctx.state.config.active_tab {
                     // Re-selecting the current tab pops all the way back to its list.
-                    if ctx.state.config.route.is_none() {
+                    if ctx.state.config.route.is_none() && !ctx.state.project_details() {
                         return Update::none();
                     }
                     self.reset_detail(ctx);
@@ -1033,11 +1060,9 @@ impl Component for Cronk {
                     }
                     Scope::Section => match ctx.state.section_name() {
                         "Fields" if ctx.state.project_details() => {
-                            if ctx.state.config.field == 1 {
-                                return self.action(ctx, Action::RemoveProject);
-                            }
-                            self.edit_project_alias(ctx);
+                            return self.activate_project_field(ctx);
                         }
+                        "Forget this project" => return self.action(ctx, Action::RemoveProject),
                         "Fields" => self.edit_field(ctx),
                         "Description" => {
                             if let Some(d) = &ctx.state.details {
@@ -1160,10 +1185,21 @@ impl Component for Cronk {
                 ctx.state.config.field = index;
                 self.persist(ctx);
                 if ctx.state.project_details() {
-                    self.edit_project_alias(ctx);
+                    return self.activate_project_field(ctx);
                 } else {
                     self.edit_field(ctx);
                 }
+            }
+            Msg::ProjectDetailViewport(id, epoch, event) => {
+                if !ctx.state.project_details()
+                    || ctx.state.config.project_route != Some(id)
+                    || ctx.state.detail_epoch != epoch
+                {
+                    return Update::none();
+                }
+                ctx.state.content_max_offset = event.metrics.max_offset;
+                ctx.state.content_offset = event.offset;
+                ctx.state.reveal_content = false;
             }
             Msg::DetailViewport(event, target, origin, route, epoch) => {
                 // Ignore callbacks from a previous route or a superseded keyboard target.
@@ -1265,8 +1301,25 @@ impl Component for Cronk {
                             }
                         );
                         self.persist(ctx);
-                        ctx.link().send(Msg::Refresh);
+                        self.normalize(ctx);
+                        self.restart_project_sync(ctx);
                     }
+                }
+            }
+            Msg::ToggleProjectKind(kind) => {
+                if ctx.state.project_details()
+                    && let Some(id) = ctx.state.config.project_route
+                    && let Some(project) = ctx.state.config.projects.iter_mut().find(|p| p.id == id)
+                {
+                    match kind {
+                        ItemKind::Issue => project.issues_visible = !project.issues_visible,
+                        ItemKind::MergeRequest => {
+                            project.merge_requests_visible = !project.merge_requests_visible
+                        }
+                    }
+                    self.persist(ctx);
+                    self.normalize(ctx);
+                    self.restart_project_sync(ctx);
                 }
             }
             Msg::ToggleJob(id) => {
@@ -1707,6 +1760,16 @@ impl Component for Cronk {
                 )),
                 KeyCode::Home => Some(Msg::Move(isize::MIN)),
                 KeyCode::End => Some(Msg::Move(isize::MAX)),
+                KeyCode::Char(' ')
+                    if ctx.state.project_details() && ctx.state.scope == Scope::Section =>
+                {
+                    match (ctx.state.section_name(), ctx.state.config.field) {
+                        ("Fields", 1) => Some(Msg::ToggleProject),
+                        ("Fields", 2) => Some(Msg::ToggleProjectKind(ItemKind::Issue)),
+                        ("Fields", 3) => Some(Msg::ToggleProjectKind(ItemKind::MergeRequest)),
+                        _ => None,
+                    }
+                }
                 KeyCode::Char(' ') => Some(Msg::ToggleProject),
                 KeyCode::Char('/') => Some(Msg::Action(Action::Filter)),
                 KeyCode::Char('s') => Some(Msg::Action(Action::ToggleStar)),
@@ -1742,6 +1805,20 @@ impl Component for Cronk {
 
 impl Cronk {
     pub(super) fn persist(&self, ctx: &mut Context<Self>) -> bool {
+        if ctx.state.config.projects != ctx.state.saved_config.projects
+            && let Some(api) = &self.api
+        {
+            for project in &ctx.state.config.projects {
+                api.set_project_visibility(project);
+            }
+            for old in &ctx.state.saved_config.projects {
+                if !ctx.state.config.projects.iter().any(|p| p.id == old.id) {
+                    let mut hidden = old.clone();
+                    hidden.visible = false;
+                    api.set_project_visibility(&hidden);
+                }
+            }
+        }
         ctx.state.refresh_starred_stubs();
         if ctx.state.config.active_tab >= ctx.state.config.tab_count() {
             // The Starred tab vanished (for example its project was hidden).
@@ -1773,7 +1850,7 @@ impl Cronk {
                 .config
                 .projects
                 .iter()
-                .any(|p| p.id == route.project && p.visible)
+                .any(|p| p.id == route.project && p.kind_visible(route.kind))
         }) {
             self.reset_detail(ctx);
         }
@@ -1781,21 +1858,23 @@ impl Cronk {
         let visible: HashSet<_> = config
             .projects
             .iter()
-            .filter(|p| p.visible)
+            .filter(|p| p.effectively_visible())
             .map(|p| p.id)
             .collect();
-        ctx.state
-            .shared_details
-            .retain(|key, _| visible.contains(&key.project));
-        ctx.state
-            .detail_requests
-            .retain(|key, _| visible.contains(&key.project));
+        let item_visible = |key: &ItemKey| {
+            config
+                .projects
+                .iter()
+                .any(|p| p.id == key.project && p.kind_visible(key.kind))
+        };
+        ctx.state.shared_details.retain(|key, _| item_visible(key));
+        ctx.state.detail_requests.retain(|key, _| item_visible(key));
         ctx.state
             .detail_schema_errors
-            .retain(|key, _| visible.contains(&key.project));
+            .retain(|key, _| item_visible(key));
         ctx.state
             .detail_retry_requested
-            .retain(|key| visible.contains(&key.project));
+            .retain(|key| item_visible(key));
         ctx.state.sync_progress.retain(|id, _| visible.contains(id));
         ctx.state.tab_cache.retain(|key, _| {
             config
@@ -1902,6 +1981,17 @@ impl Cronk {
         ctx.state.scroll.normalize(len, height);
     }
 
+    fn restart_project_sync(&self, ctx: &mut Context<Self>) {
+        // A worker owns a snapshot of collection preferences. Never apply its
+        // partial/skipped collections using the newly selected preferences.
+        ctx.state.list_epoch += 1;
+        ctx.state.list_pending.clear();
+        ctx.state.sync_progress.clear();
+        ctx.state.next_lists = Duration::ZERO;
+        // Per-project API locks serialize replacements with any old import.
+        ctx.link().send(Msg::Refresh);
+    }
+
     fn queue_lists(&self, ctx: &mut Context<Self>) {
         if !ctx.state.list_pending.is_empty() {
             return;
@@ -1918,7 +2008,7 @@ impl Cronk {
             .config
             .projects
             .iter()
-            .filter(|p| p.visible)
+            .filter(|p| p.effectively_visible())
             .map(|p| p.id)
             .collect();
         ctx.state.list_pending.extend(&ids);
@@ -2357,7 +2447,8 @@ impl Cronk {
             }
             Scope::Section => {
                 let len = match ctx.state.section_name() {
-                    "Fields" if ctx.state.project_details() => 2,
+                    "Fields" if ctx.state.project_details() => 4,
+                    "Forget this project" => 1,
                     "Fields" => ctx.state.fields().len(),
                     "Jobs" => ctx.state.details.as_ref().map_or(0, |d| d.jobs.len()),
                     "Discussions" => ctx
@@ -2522,6 +2613,19 @@ impl Cronk {
         };
         if let Some(theme) = crate::config::THEMES.get(selected) {
             ctx.state.config.theme = (*theme).into();
+        }
+    }
+
+    fn activate_project_field(&mut self, ctx: &mut Context<Self>) -> Update {
+        match ctx.state.config.field {
+            0 => {
+                self.edit_project_alias(ctx);
+                Update::full()
+            }
+            1 => self.update(Msg::ToggleProject, ctx),
+            2 => self.update(Msg::ToggleProjectKind(ItemKind::Issue), ctx),
+            3 => self.update(Msg::ToggleProjectKind(ItemKind::MergeRequest), ctx),
+            _ => Update::none(),
         }
     }
 
@@ -2707,7 +2811,7 @@ impl Cronk {
                     self.show_dialog(
                         ctx,
                         DialogKind::Confirm(Confirmation::RemoveProject(id)),
-                        "Remove project from workspace?",
+                        "Forget this project?",
                         &format!("{name} · GitLab project and issues are NOT deleted"),
                         vec![],
                     );
@@ -3045,7 +3149,7 @@ fn prune_tab_routes(config: &mut Config) {
             !config
                 .projects
                 .iter()
-                .any(|p| p.id == route.project && p.visible)
+                .any(|p| p.id == route.project && p.kind_visible(route.kind))
         }) {
             *tab = TabState {
                 list_offset: tab.list_offset,

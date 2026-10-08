@@ -38,6 +38,7 @@ pub fn projects() -> Vec<Project> {
         path: path.into(),
         alias: alias.into(),
         visible: true,
+        ..Project::default()
     })
     .collect()
 }

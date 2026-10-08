@@ -132,7 +132,11 @@ Log rendering preserves ANSI SGR colors (standard/bright, 256-color, and truecol
 
 Complete fetched history is retained in memory for scrolling and search; only visible lines are rendered. Search covers output fetched so far, not bytes still being loaded. Log positions are retained across tab visits, but log history, searches, and log-focus/zoom state are not written to disk. Large traces consequently use more memory until their item cache is discarded.
 
-Project rows open a project details view. A green solid status dot means the project is included in work lists; a grey outline means it is hidden. Click the dot or press **Space** to toggle. The details page shows path, ID, open-work counts, an editable local alias, and a red **Remove from workspace** action. Alias and remove are no longer command-palette actions. When adding a project, leaving the optional alias blank keeps GitLab's short display name as the starting local alias; an empty alias later falls back to the full path.
+Project rows open a project details view. A green solid status dot means both issues and merge requests are visible; a half-filled green dot means only one type is visible; a grey outline means the project is hidden. Click the dot or press **Space** to toggle overall visibility. The details page has editable local alias and visibility controls, including separate issues and merge requests preferences. Click a visibility field or focus it and press **Space** or **Enter** to toggle that control. Overall visibility preserves these preferences when switched off. Hidden item types disappear from work lists and stop syncing, while cached data is retained for re-enabling. The list and details show separate counts of open, visible issues and merge requests, with no counts for hidden projects. Fields use the same left-aligned label column as issue/MR details. Below them is a placeholder for project-wide pipelines, followed by a red **Forget this project** button that removes the project from Cronk only. Re-selecting the Projects tab or pressing **Shift+P** returns to its list. Alias editing and forgetting a project live in details, not the command palette. When adding a project, leaving the optional alias blank keeps GitLab's short display name as the starting local alias; an empty alias later falls back to the full path.
+
+![Projects with full, partial, and hidden visibility](docs/projects.png)
+
+![Project visibility controls, pipeline placeholder, and forget action](docs/project-details.png)
 
 ## Name-based field completion
 

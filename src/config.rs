@@ -426,7 +426,9 @@ impl Config {
         self.starred
             .iter()
             .filter_map(|s| {
-                let project = self.project_for_path(&s.project).filter(|p| p.visible)?;
+                let project = self
+                    .project_for_path(&s.project)
+                    .filter(|p| p.kind_visible(s.kind))?;
                 Some(ItemKey {
                     project: project.id,
                     iid: s.iid,
@@ -731,6 +733,7 @@ mod tests {
                 path: "team/repo".into(),
                 alias: "work".into(),
                 visible: true,
+                ..Project::default()
             }],
             views: vec![SavedView {
                 name: "Reviews".into(),
@@ -823,6 +826,7 @@ mod tests {
             path: path.into(),
             alias: String::new(),
             visible,
+            ..Project::default()
         };
         let mut config = Config {
             projects: vec![project(1, "a/one", true), project(2, "b/two", false)],

@@ -208,6 +208,7 @@ mod tests {
             path: "Platform/Control-Plane".into(),
             alias: "Core Services".into(),
             visible: true,
+            ..Project::default()
         };
         let user = |username: &str, name: &str| User {
             username: username.into(),

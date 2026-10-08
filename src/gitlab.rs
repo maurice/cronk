@@ -138,7 +138,19 @@ pub struct GitLab {
     trace_byte_params: Arc<AtomicU8>,
     persistent: Option<Arc<crate::cache::ContentCache>>,
     sync_locks: Arc<Mutex<HashMap<u64, Arc<Mutex<()>>>>>,
+    sync_visibility: Arc<Mutex<HashMap<u64, [bool; 2]>>>,
 }
+
+#[derive(Debug)]
+struct SyncPaused;
+
+impl std::fmt::Display for SyncPaused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Project collection sync paused")
+    }
+}
+
+impl std::error::Error for SyncPaused {}
 
 #[derive(Clone, Debug)]
 pub struct SyncProgress {
@@ -511,6 +523,7 @@ impl GitLab {
             trace_byte_params: Arc::new(AtomicU8::new(0)),
             persistent: None,
             sync_locks: Arc::new(Mutex::new(HashMap::new())),
+            sync_visibility: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -931,9 +944,19 @@ impl GitLab {
 
     fn pages_progress<T: DeserializeOwned>(
         &self,
+        url: Url,
+        result: Option<&mut Vec<T>>,
+        progress: impl FnMut(&[T], &HeaderMap) -> Result<()>,
+    ) -> Result<()> {
+        self.pages_progress_while(url, result, progress, || true)
+    }
+
+    fn pages_progress_while<T: DeserializeOwned>(
+        &self,
         mut url: Url,
         mut result: Option<&mut Vec<T>>,
         mut progress: impl FnMut(&[T], &HeaderMap) -> Result<()>,
+        can_continue: impl Fn() -> bool,
     ) -> Result<()> {
         url.query_pairs_mut()
             .append_pair("per_page", &PAGE_SIZE.to_string())
@@ -941,6 +964,9 @@ impl GitLab {
         let mut visited = HashSet::new();
         let mut previous: Option<Arc<[u8]>> = None;
         loop {
+            if !can_continue() {
+                return Err(SyncPaused.into());
+            }
             if !visited.insert(url.as_str().to_owned()) {
                 bail!(
                     "{}: pagination cycle detected",
@@ -1040,6 +1066,7 @@ impl GitLab {
         Ok(None)
     }
 
+    #[cfg(test)]
     fn all<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>> {
         let mut result = Vec::new();
         self.pages(url, &mut result)?;
@@ -1119,17 +1146,27 @@ impl GitLab {
             // Prefer GitLab's short display name as the starting local alias.
             alias: project.name,
             visible: true,
+            ..Project::default()
         })
     }
 
     fn labels(&self, project: u64) -> Result<HashMap<String, Label>> {
+        self.labels_while(project, || true)
+    }
+
+    fn labels_while(
+        &self,
+        project: u64,
+        can_continue: impl Fn() -> bool,
+    ) -> Result<HashMap<String, Label>> {
         let mut url = self.url(&["projects", &project.to_string(), "labels"]);
         url.query_pairs_mut()
             .append_pair("include_ancestor_groups", "true");
-        Ok(self
-            .all::<Label>(url)?
+        let mut labels = Vec::new();
+        self.pages_progress_while(url, Some(&mut labels), |_, _| Ok(()), can_continue)?;
+        Ok(labels
             .into_iter()
-            .map(|label| (label.name.clone(), label))
+            .map(|label: Label| (label.name.clone(), label))
             .collect())
     }
 
@@ -1157,7 +1194,12 @@ impl GitLab {
         Ok(access.map_or(enabled == Some(false), |access| access == "disabled"))
     }
 
-    fn dashboard_discussions(&self, key: &ItemKey, budget: &mut usize) -> Result<Option<usize>> {
+    fn dashboard_discussions(
+        &self,
+        project: &Project,
+        key: &ItemKey,
+        budget: &mut usize,
+    ) -> Result<Option<usize>> {
         let mut url = self.item_url(key, &["discussions"]);
         url.query_pairs_mut()
             .append_pair("per_page", &PAGE_SIZE.to_string())
@@ -1166,6 +1208,9 @@ impl GitLab {
         let mut discussions = HashSet::new();
         let mut unresolved = 0;
         while *budget > 0 {
+            if !self.sync_kind_visible(project, ItemKind::MergeRequest) {
+                return Ok(None);
+            }
             if !visited.insert(url.as_str().to_owned()) {
                 bail!(
                     "{}: discussion pagination cycle detected",
@@ -1178,6 +1223,9 @@ impl GitLab {
                 Err(error) if unsupported_enrichment(&error) => return Ok(None),
                 Err(error) => return Err(error),
             };
+            if !self.sync_kind_visible(project, ItemKind::MergeRequest) {
+                return Ok(None);
+            }
             let page: Vec<Discussion> = self.decode(&url, &doc)?;
             for discussion in &page {
                 if !discussions.insert(discussion.id.clone()) {
@@ -1200,6 +1248,42 @@ impl GitLab {
         Ok(None)
     }
 
+    /// Update live collection eligibility so an in-flight import stops between pages.
+    /// Its durable cursor is left unfinished and can resume when shown again.
+    pub fn set_project_visibility(&self, project: &Project) {
+        self.sync_visibility
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                project.id,
+                [
+                    project.kind_visible(ItemKind::Issue),
+                    project.kind_visible(ItemKind::MergeRequest),
+                ],
+            );
+    }
+
+    /// Issue metadata belongs to the same live visibility gate as its import.
+    pub fn current_iteration_for_sync(
+        &self,
+        project: &Project,
+    ) -> Result<Option<CurrentIteration>> {
+        if !self.sync_kind_visible(project, ItemKind::Issue) {
+            return Ok(None);
+        }
+        self.current_iteration(project.id)
+    }
+
+    fn sync_kind_visible(&self, project: &Project, kind: ItemKind) -> bool {
+        project.kind_visible(kind)
+            && self
+                .sync_visibility
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&project.id)
+                .is_none_or(|enabled| enabled[if kind == ItemKind::Issue { 0 } else { 1 }])
+    }
+
     pub fn list_project(&self, project: &Project) -> Result<Vec<WorkItem>> {
         self.sync_project(project, false, |_, _| {})
     }
@@ -1212,6 +1296,9 @@ impl GitLab {
         full: bool,
         progress: impl FnMut(SyncProgress, Vec<WorkItem>) + Send,
     ) -> Result<Vec<WorkItem>> {
+        if !project.effectively_visible() {
+            return self.cached_items(project.id);
+        }
         let lock = self
             .sync_locks
             .lock()
@@ -1229,6 +1316,9 @@ impl GitLab {
         let report =
             |status, items| (progress.lock().unwrap_or_else(|e| e.into_inner()))(status, items);
         let fetch_kind = |kind: ItemKind| -> Result<Vec<WorkItem>> {
+            if !self.sync_kind_visible(project, kind) {
+                return Ok(Vec::new());
+            }
             let mut items = Vec::new();
             let mut url = self.url(&["projects", &project.id.to_string(), kind.segment()]);
             url.query_pairs_mut()
@@ -1252,52 +1342,67 @@ impl GitLab {
             let mut loaded = 0;
             let mut page_number = 0;
             let mut label_colors = None;
-            match self.pages_progress::<ApiItem>(url, None, |raw, headers| {
-                page_number += 1;
-                loaded += raw.len();
-                let total = headers
-                    .get("x-total")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse().ok());
-                let mut page: Vec<WorkItem> = raw
-                    .iter()
-                    .cloned()
-                    .map(|raw| raw.into_item(project.id, kind))
-                    .collect();
-                if page.iter().any(needs_label_colors) {
-                    if label_colors.is_none() {
-                        label_colors = Some(self.labels(project.id)?);
+            match self.pages_progress_while::<ApiItem>(
+                url,
+                None,
+                |raw, headers| {
+                    if !self.sync_kind_visible(project, kind) {
+                        return Err(SyncPaused.into());
                     }
-                    for item in &mut page {
-                        apply_label_colors(item, label_colors.as_ref().unwrap());
+                    page_number += 1;
+                    loaded += raw.len();
+                    let total = headers
+                        .get("x-total")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse().ok());
+                    let mut page: Vec<WorkItem> = raw
+                        .iter()
+                        .cloned()
+                        .map(|raw| raw.into_item(project.id, kind))
+                        .collect();
+                    if page.iter().any(needs_label_colors) {
+                        if label_colors.is_none() {
+                            label_colors = Some(self.labels_while(project.id, || {
+                                self.sync_kind_visible(project, kind)
+                            })?);
+                        }
+                        for item in &mut page {
+                            apply_label_colors(item, label_colors.as_ref().unwrap());
+                        }
                     }
-                }
-                let mut status = SyncProgress {
-                    kind,
-                    loaded,
-                    total,
-                    page: page_number,
-                    phase: "saving",
-                };
-                report(status.clone(), Vec::new());
-                // Serialize writes with successful mutations: an older GET cannot
-                // repopulate disk after mutation invalidation.
-                let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-                if guard.generation != revision {
-                    bail!("Sync superseded by a GitLab write; refresh again");
-                }
-                if let (Some(cache), Some(plan)) = (&self.persistent, &plan) {
-                    cache.page(project.id, kind, plan, &page)?;
-                }
-                drop(guard);
-                if self.persistent.is_none() {
-                    items.extend(page.clone());
-                }
-                status.phase = "fetching";
-                report(status, page);
-                Ok(())
-            }) {
+                    let mut status = SyncProgress {
+                        kind,
+                        loaded,
+                        total,
+                        page: page_number,
+                        phase: "saving",
+                    };
+                    report(status.clone(), Vec::new());
+                    // Serialize writes with successful mutations: an older GET cannot
+                    // repopulate disk after mutation invalidation.
+                    let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                    if guard.generation != revision {
+                        bail!("Sync superseded by a GitLab write; refresh again");
+                    }
+                    if let (Some(cache), Some(plan)) = (&self.persistent, &plan) {
+                        cache.page(project.id, kind, plan, &page)?;
+                    }
+                    drop(guard);
+                    if self.persistent.is_none() {
+                        items.extend(page.clone());
+                    }
+                    status.phase = "fetching";
+                    report(status, page);
+                    if !self.sync_kind_visible(project, kind) {
+                        return Err(SyncPaused.into());
+                    }
+                    Ok(())
+                },
+                || self.sync_kind_visible(project, kind),
+            ) {
                 Ok(()) => (),
+                Err(error) if error.is::<SyncPaused>() => return Ok(items),
+                Err(_) if !self.sync_kind_visible(project, kind) => return Ok(items),
                 Err(error)
                     if matches!(
                         http_status(&error),
@@ -1330,6 +1435,9 @@ impl GitLab {
                 );
                 let mut removed = Vec::new();
                 for key in cache.missing(project.id, kind, plan)? {
+                    if !self.sync_kind_visible(project, kind) {
+                        return Ok(items);
+                    }
                     // Offset pagination is not an atomic snapshot: an updated item
                     // may have moved out of the bounded import window. Verify it.
                     match self.core_item(&key) {
@@ -1356,6 +1464,9 @@ impl GitLab {
                 let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.generation != revision {
                     bail!("Sync superseded by a GitLab write; refresh again");
+                }
+                if !self.sync_kind_visible(project, kind) {
+                    return Ok(items);
                 }
                 cache.finish(project.id, kind, plan, &removed)?;
             }
@@ -1391,9 +1502,22 @@ impl GitLab {
             Vec::new(),
         );
         let mut enriched_keys = HashSet::new();
-        if items.iter().any(needs_label_colors) {
-            let labels = self.labels(project.id)?;
+        if items
+            .iter()
+            .any(|item| self.sync_kind_visible(project, item.key.kind) && needs_label_colors(item))
+        {
+            let labels = match self.labels_while(project.id, || {
+                self.sync_kind_visible(project, ItemKind::Issue)
+                    || self.sync_kind_visible(project, ItemKind::MergeRequest)
+            }) {
+                Ok(labels) => labels,
+                Err(error) if error.is::<SyncPaused>() => return Ok(items),
+                Err(error) => return Err(error),
+            };
             for item in &mut items {
+                if !self.sync_kind_visible(project, item.key.kind) {
+                    continue;
+                }
                 if needs_label_colors(item) {
                     enriched_keys.insert(item.key.clone());
                 }
@@ -1404,7 +1528,8 @@ impl GitLab {
             .iter()
             .enumerate()
             .filter_map(|(i, item)| {
-                (item.key.kind == ItemKind::MergeRequest
+                (self.sync_kind_visible(project, ItemKind::MergeRequest)
+                    && item.key.kind == ItemKind::MergeRequest
                     && item.state == "opened"
                     && (self.persistent.is_some()
                         || item.pipeline.is_none()
@@ -1420,6 +1545,9 @@ impl GitLab {
         });
         let mut discussion_pages = DASHBOARD_DISCUSSION_PAGES;
         for index in candidates.into_iter().take(DASHBOARD_ENRICHMENT) {
+            if !self.sync_kind_visible(project, ItemKind::MergeRequest) {
+                break;
+            }
             enriched_keys.insert(items[index].key.clone());
             // Pipeline/discussion changes need not bump MR updated_at. Refresh the
             // bounded dashboard candidates independently of the list delta feed.
@@ -1440,9 +1568,12 @@ impl GitLab {
                     Err(error) => return Err(error),
                 }
             }
+            if !self.sync_kind_visible(project, ItemKind::MergeRequest) {
+                break;
+            }
             if items[index].unresolved.is_none() {
                 items[index].unresolved =
-                    self.dashboard_discussions(&items[index].key, &mut discussion_pages)?;
+                    self.dashboard_discussions(project, &items[index].key, &mut discussion_pages)?;
             }
         }
         if let Some(cache) = &self.persistent {
@@ -3558,6 +3689,220 @@ mod tests {
                 .iter()
                 .all(|r| r.url().query_pairs().any(|(k, _)| k == "updated_after"))
         );
+    }
+
+    #[test]
+    fn hidden_collections_skip_http_reconciliation_and_dashboard_enrichment() {
+        for persistent in [false, true] {
+            for (master, issues, mrs) in [
+                (false, true, true),
+                (true, false, false),
+                (true, true, false),
+                (true, false, true),
+            ] {
+                let mock = Mock::new(|request| {
+                    assert!(
+                        request.url().path().ends_with("/issues")
+                            || request.url().path().ends_with("/merge_requests")
+                    );
+                    Reply::json(json!([]))
+                });
+                let dir = tempfile::tempdir().unwrap();
+                let mut api = mock.client();
+                let hidden_mr = WorkItem {
+                    key: key(ItemKind::MergeRequest),
+                    state: "opened".into(),
+                    updated_at: "2026-09-02T00:00:00Z".into(),
+                    ..WorkItem::default()
+                };
+                if persistent {
+                    api.enable_persistence(&dir.path().join("config.toml"))
+                        .unwrap();
+                    if !(master && mrs) {
+                        let cache = api.persistent.as_ref().unwrap();
+                        let plan = cache.plan(7, ItemKind::MergeRequest, false).unwrap();
+                        cache
+                            .page(
+                                7,
+                                ItemKind::MergeRequest,
+                                &plan,
+                                std::slice::from_ref(&hidden_mr),
+                            )
+                            .unwrap();
+                        cache.finish(7, ItemKind::MergeRequest, &plan, &[]).unwrap();
+                    }
+                }
+                let project = Project {
+                    visible: master,
+                    issues_visible: issues,
+                    merge_requests_visible: mrs,
+                    ..project()
+                };
+                // Dormant open MRs must not trigger enrichment or reconciliation.
+                let items = api.sync_project(&project, true, |_, _| {}).unwrap();
+                let requests = mock.requests.lock().unwrap();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r.url().path().ends_with("/issues"))
+                        .count(),
+                    usize::from(master && issues)
+                );
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r.url().path().ends_with("/merge_requests"))
+                        .count(),
+                    usize::from(master && mrs)
+                );
+                if persistent && !(master && mrs) {
+                    assert!(items.iter().any(|i| i.key == hidden_mr.key));
+                    assert!(
+                        api.cached_items(7)
+                            .unwrap()
+                            .iter()
+                            .any(|i| i.key == hidden_mr.key)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hiding_during_sync_stops_new_core_discussion_label_feature_and_iteration_requests() {
+        for phase in ["core", "discussions", "labels", "feature", "iteration"] {
+            let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let mock = Mock::new(move |request| {
+                let url = request.url();
+                let path = url.path();
+                let block = match phase {
+                    "core" => path.ends_with("/merge_requests/1"),
+                    "discussions" => path.ends_with("/discussions"),
+                    "labels" => path.ends_with("/labels"),
+                    "feature" => path.ends_with("/merge_requests"),
+                    "iteration" => path.ends_with("/issues"),
+                    _ => unreachable!(),
+                };
+                if block {
+                    blocked_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                let mut item = raw_item(1, "opened");
+                if phase == "discussions" {
+                    item["head_pipeline"] = json!({"id": 77, "status": "success"});
+                }
+                if phase == "labels" {
+                    item["labels"] = json!(["bug"]);
+                }
+                match path {
+                    "/api/v4/projects/7/issues" => Reply::json(json!([])),
+                    "/api/v4/projects/7/merge_requests" if phase == "feature" => {
+                        Reply::bytes(403, "disabled")
+                    }
+                    "/api/v4/projects/7/merge_requests" => Reply::json(json!([item])),
+                    "/api/v4/projects/7/merge_requests/1" => Reply::json(item),
+                    "/api/v4/projects/7/merge_requests/1/discussions" => Reply::json(json!([
+                        {"id": "one", "notes": [{"resolvable": true, "resolved": false}]}
+                    ]))
+                    .header("x-next-page", "2"),
+                    "/api/v4/projects/7/labels" => Reply::json(json!([
+                        {"name": "bug", "color": "#ff0000", "text_color": "#ffffff"}
+                    ]))
+                    .header("x-next-page", "2"),
+                    other => panic!("unexpected follow-up request in {phase}: {other}"),
+                }
+            });
+            let api = mock.client();
+            let project = Project {
+                issues_visible: phase == "iteration",
+                merge_requests_visible: phase != "iteration",
+                ..project()
+            };
+            let worker_api = api.clone();
+            let snapshot = project.clone();
+            let worker = thread::spawn(move || {
+                let items = worker_api.sync_project(&snapshot, false, |_, _| {})?;
+                let iteration = worker_api.current_iteration_for_sync(&snapshot)?;
+                Ok::<_, anyhow::Error>((items, iteration))
+            });
+            blocked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let mut hidden = project;
+            hidden.visible = false;
+            api.set_project_visibility(&hidden);
+            release_tx.send(()).unwrap();
+            let (items, iteration) = worker.join().unwrap().unwrap();
+            assert!(iteration.is_none());
+            assert!(
+                items.iter().all(|item| item.unresolved.is_none()),
+                "interrupted discussion counts remain unknown, not exact"
+            );
+            let requests = mock.requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                if matches!(phase, "feature" | "iteration") {
+                    1
+                } else {
+                    2
+                },
+                "{phase}"
+            );
+            assert!(
+                requests.iter().all(|r| r.page() == 1),
+                "{phase}: no extra pages after hide"
+            );
+        }
+    }
+
+    #[test]
+    fn hiding_a_collection_during_import_pauses_pagination_and_resumes_its_cursor() {
+        let mock = Mock::new(|request| {
+            assert!(request.url().path().ends_with("/issues"));
+            if request.page() == 1 {
+                Reply::json(json!([raw_item(1, "opened")])).header("x-next-page", "2")
+            } else {
+                Reply::json(json!([raw_item(2, "closed")])).header("x-next-page", "")
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = mock.client();
+        api.enable_persistence(&dir.path().join("config.toml"))
+            .unwrap();
+        let project = Project {
+            merge_requests_visible: false,
+            ..project()
+        };
+        let mut hidden = project.clone();
+        hidden.issues_visible = false;
+        let items = api
+            .sync_project(&project, false, |_, page| {
+                if !page.is_empty() {
+                    api.set_project_visibility(&hidden);
+                }
+            })
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            mock.requests.lock().unwrap().len(),
+            1,
+            "no second page after hide"
+        );
+        let before = mock.requests.lock().unwrap()[0].url();
+        api.set_project_visibility(&project);
+        let resumed = api.sync_project(&project, false, |_, _| {}).unwrap();
+        assert_eq!(resumed.len(), 2);
+        let requests = mock.requests.lock().unwrap();
+        let resume = requests[1].url();
+        assert_eq!(
+            resume
+                .query_pairs()
+                .find(|(k, _)| k == "updated_before")
+                .unwrap()
+                .1,
+            "2026-09-02T00:00:00Z"
+        );
+        assert!(before.query_pairs().any(|(k, _)| k == "updated_before"));
+        assert!(!resume.query_pairs().any(|(k, _)| k == "updated_after"));
     }
 
     #[test]

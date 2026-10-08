@@ -104,7 +104,7 @@ fn missing_or_invalid_web_urls_remain_plain_text() {
         settle(&mut ui);
         let (label_x, y) = point(&ui, "Web URL");
         let frame = ui.capture_frame();
-        let value_x = label_x + "Target branch".len() as u16 + 2;
+        let value_x = label_x + "Merge requests".len() as u16 + 2;
         assert!(frame.cell(value_x, y).modifiers.underline.is_none());
         if url.is_empty() {
             assert_eq!(frame.cell(value_x, y).symbol, "—");

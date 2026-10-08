@@ -346,10 +346,10 @@ fn project_details_contract_section_highlight_to_focused_fields() {
 
             ui.dispatch(Msg::Move(1)).unwrap();
             settle(&mut ui);
-            let remove = point(&ui, "project-remove");
+            let visibility = point(&ui, "edit-field-1");
             let frame = ui.capture_frame();
-            assert_eq!(frame.cell(remove.0, remove.1).fg, accent);
-            assert_eq!(frame.cell(remove.0 + 1, remove.1).bg, selection);
+            assert_eq!(frame.cell(visibility.0, visibility.1).fg, accent);
+            assert_eq!(frame.cell(visibility.0 + 1, visibility.1).bg, selection);
             assert_eq!(frame.cell(focused.0 + 1, focused.1).bg, base);
 
             ui.dispatch(Msg::Back).unwrap();

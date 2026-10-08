@@ -154,6 +154,8 @@ fn validate(mut config: Config, values: Vec<String>, demo_mode: bool) -> Validat
         if let Some(existing) = result.config.projects.iter().find(|p| p.id == project.id) {
             project.alias = existing.alias.clone();
             project.visible = existing.visible;
+            project.issues_visible = existing.issues_visible;
+            project.merge_requests_visible = existing.merge_requests_visible;
         }
     }
     result.config.projects = projects;

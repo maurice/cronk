@@ -884,7 +884,7 @@ fn issue_and_mr_fields_share_left_aligned_labels_and_value_columns() {
                     value_x,
                     "{label}:\n{text}"
                 );
-                assert_eq!(value_x - label_x, "Target branch".len() + 2);
+                assert_eq!(value_x - label_x, "Merge requests".len() + 2);
             }
             columns.push(value_column.unwrap());
         }
@@ -1252,12 +1252,11 @@ fn palette_theme_and_project_rows_share_selection_edges() {
     let frame = ui.capture_frame();
     let x = u16::try_from(rect.x).unwrap();
     let top = u16::try_from(rect.y).unwrap();
-    for y in top..top + 2 {
+    for y in top..top + 3 {
         assert_eq!(frame.cell(x, y).symbol, "▕");
         assert_eq!(frame.cell(x, y).bg, Color::hex_u24(0x010203));
         assert_eq!(frame.cell(x + rect.w - 2, y).bg, Color::hex_u24(0x212223));
     }
-    assert_eq!(frame.cell(x, top + 2).symbol, " ");
 
     modified(&mut ui, KeyCode::Char('p'), KeyMods::CTRL);
     ui.send_paste("theme").unwrap();
@@ -1796,8 +1795,17 @@ fn mouse_project_status_dot_toggles_the_clicked_project_without_activating_the_r
 }
 
 #[test]
-fn project_details_edit_alias_and_remove_from_workspace() {
-    let mut ui = mount(config(), None);
+fn project_details_edit_alias_and_forget_project() {
+    let mut ui = mount_with_viewport(
+        config(),
+        None,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 40,
+        },
+    );
     key(&mut ui, KeyCode::Char('P'));
     key(&mut ui, KeyCode::Enter);
     let project = demo::projects()[0].id;
@@ -1805,7 +1813,7 @@ fn project_details_edit_alias_and_remove_from_workspace() {
     assert_eq!(ui.state().scope, Scope::Details);
     let text = ui.capture_frame().plain_text();
     assert!(text.contains("Orbit scheduler"));
-    assert!(text.contains("Remove from workspace"));
+    assert!(text.contains("Forget this project"));
 
     key(&mut ui, KeyCode::Enter);
     assert_eq!(ui.state().scope, Scope::Section);
@@ -1816,14 +1824,29 @@ fn project_details_edit_alias_and_remove_from_workspace() {
     assert_eq!(ui.state().project(project).unwrap().alias, "Orbit");
     assert_eq!(ui.state().scope, Scope::Section);
 
-    key(&mut ui, KeyCode::Down);
+    key(&mut ui, KeyCode::Esc);
+    ui.dispatch(Msg::Move(2)).unwrap();
+    key(&mut ui, KeyCode::Enter);
     key(&mut ui, KeyCode::Enter);
     assert!(
         matches!(dialog(&ui).kind, DialogKind::Confirm(Confirmation::RemoveProject(id)) if id == project)
     );
     key(&mut ui, KeyCode::Esc);
     assert!(ui.state().project(project).is_some());
-    click_text(&mut ui, "Remove from workspace", 0);
+    ui.render();
+    let button = ui.rect_of_key(&"project-remove".into()).unwrap();
+    for kind in [
+        MouseKind::Down(MouseButton::Left),
+        MouseKind::Up(MouseButton::Left),
+    ] {
+        ui.send_mouse(MouseEvent {
+            x: button.x as u16 + button.w / 2,
+            y: button.y as u16 + 1,
+            kind,
+            mods: KeyMods::NONE,
+        })
+        .unwrap();
+    }
     assert!(
         matches!(dialog(&ui).kind, DialogKind::Confirm(Confirmation::RemoveProject(id)) if id == project)
     );
@@ -1898,8 +1921,7 @@ fn hiding_or_removing_a_project_invalidates_all_cached_tab_routes() {
         if remove {
             key(&mut ui, KeyCode::Enter);
             assert_eq!(ui.state().config.project_route, Some(project));
-            key(&mut ui, KeyCode::Enter);
-            key(&mut ui, KeyCode::Down);
+            open_section(&mut ui, "Forget this project");
             key(&mut ui, KeyCode::Enter);
             assert!(
                 matches!(dialog(&ui).kind, DialogKind::Confirm(Confirmation::RemoveProject(id)) if id == project)
@@ -3580,11 +3602,11 @@ fn small_project_viewport_snapshot() {
             "  Projects",
             "  5 PROJECTS   Space toggles visibility · Ent…",
             "",
-            "▕ ● Orbit scheduler · DEMO           8 items   █",
-            "▕   demo-lab/constellation/platform/runtime/o… █",
-            "                                               ▀",
-            "  ● Meteor cache · DEMO              8 items",
-            "    demo-lab/constellation/platform/storage/m…",
+            "▕ ● Orbit scheduler · DEMO                     █",
+            "▕   demo-lab/constellation/platform/runtime/o…",
+            "▕   3 open issues · 3 open merge requests",
+            "",
+            "",
             "",
             " LIST   DEMO  Demo workspace · no requests or r…",
             " D/P/I/M tabs   1–0 views   ↑ ↓ move   Enter op…",

@@ -181,6 +181,9 @@ fn vertical_scrollbar(ctx: &Context<Cronk>, key: &str, colors: Colors) -> Scroll
         .track_style(track)
 }
 
+/// Width of the standalone scrollbar: its one-cell gap plus the track.
+const SCROLLBAR_COLUMNS: u16 = 2;
+
 fn content_padding(left: u16) -> Padding {
     Padding {
         left,
@@ -974,6 +977,7 @@ fn main_list(ctx: &Context<Cronk>, items: &[&WorkItem], colors: Colors) -> Eleme
         // The child tree is already windowed. Measure it exactly so large
         // spacer heights never pollute the widget's per-row height estimates.
         .virtualize(false)
+        .padding(scrollbar_margin(len > slots))
         .height(Length::Px(
             (slots * row_height).min(u16::MAX as usize) as u16
         ))
@@ -1269,7 +1273,24 @@ fn empty_state(title: &str, help: &str, colors: Colors) -> Element {
         .into()
 }
 
-fn scroll_content(ctx: &Context<Cronk>, children: Vec<Element>, colors: Colors) -> ScrollView {
+/// Scrolling panes keep the same right margin whether or not a scrollbar is shown:
+/// a scrollbar takes `SCROLLBAR_COLUMNS` (a gap, then the track), so when the content
+/// fits we pad by the same amount instead of letting rows touch the pane edge.
+fn scrollbar_margin(overflows: bool) -> Padding {
+    Padding {
+        left: 0,
+        right: if overflows { 0 } else { SCROLLBAR_COLUMNS },
+        top: 0,
+        bottom: 0,
+    }
+}
+
+fn scroll_content(
+    ctx: &Context<Cronk>,
+    children: Vec<Element>,
+    colors: Colors,
+    overflows: bool,
+) -> ScrollView {
     ScrollView::new()
         // Measure variable-height content before dragging so the thumb's range stays accurate.
         .virtualize(false)
@@ -1281,7 +1302,7 @@ fn scroll_content(ctx: &Context<Cronk>, children: Vec<Element>, colors: Colors) 
         .scrollbar_config(vertical_scrollbar(ctx, "detail-scrollbar", colors))
         .scroll_wheel_multiplier(3)
         .smooth_wheel_scroll(false)
-        .padding(content_padding(0))
+        .padding(scrollbar_margin(overflows))
         .style(colors.base())
         .on_scroll_to(ctx.link().callback(Msg::DetailScrolled))
         .children(children)
@@ -1445,7 +1466,9 @@ fn project_detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
     }
     content.push(blank().key("detail-section-gap-0"));
     let target = state.reveal_content.then(|| state.detail_target_key());
-    let mut scroll = scroll_content(ctx, content, colors);
+    // Project details are a handful of rows; assume they fit unless the pane is tiny.
+    let overflows = content.len() + 2 > ctx.viewport().h.saturating_sub(9) as usize;
+    let mut scroll = scroll_content(ctx, content, colors, overflows);
     if let Some(target) = target {
         scroll = scroll.reveal_key(target);
     } else if let Some(offset) = state.detail_offset_request {
@@ -1943,8 +1966,14 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
     let route = details.item.key.clone();
     let epoch = state.detail_epoch;
     let callback_target = target.clone();
-    let mut scroll = scroll_content(ctx, content, colors).on_viewport_change(ctx.link().callback(
-        move |event: ScrollViewportEvent| {
+    // Until the first measurement assume a long document, as almost all are.
+    let overflows = state
+        .detail_viewport
+        .as_ref()
+        .filter(|(route, _)| *route == details.item.key)
+        .is_none_or(|(_, event)| event.metrics.len > event.metrics.visible);
+    let mut scroll = scroll_content(ctx, content, colors, overflows).on_viewport_change(
+        ctx.link().callback(move |event: ScrollViewportEvent| {
             Msg::DetailViewport(
                 Box::new(event),
                 callback_target.clone(),
@@ -1952,8 +1981,8 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                 route.clone(),
                 epoch,
             )
-        },
-    ));
+        }),
+    );
     if let Some(target) = target {
         let measured = state
             .detail_viewport

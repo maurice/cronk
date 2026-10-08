@@ -478,3 +478,108 @@ fn s_in_a_dialog_is_just_text() {
     key(&mut ui, KeyCode::Char('s'));
     assert!(ui.state().config.starred.is_empty());
 }
+
+/// Last column of row `y` whose background is the row's selection fill.
+fn selection_end(ui: &Ui, y: u16) -> u16 {
+    let frame = ui.capture_frame();
+    let fill = frame.cell(2, y).bg;
+    (0..frame.width)
+        .rev()
+        .find(|x| frame.cell(*x, y).bg == fill)
+        .expect("selection fill")
+}
+
+fn scrollbar_column(ui: &Ui, key: &str) -> Option<u16> {
+    let rect = ui.rect_of_key(&key.to_owned().into())?;
+    let frame = ui.capture_frame();
+    let x = (rect.x + rect.w as i16 - 1) as u16;
+    (0..rect.h)
+        .any(|dy| frame.cell(x, rect.y as u16 + dy).symbol == "█")
+        .then_some(x)
+}
+
+#[test]
+fn selection_ends_at_the_same_column_with_and_without_a_scrollbar() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    let w = ui.viewport().w;
+    let list_y = ui.rect_of_key(&"main-list-2".to_owned().into()).unwrap().y as u16;
+    assert!(
+        scrollbar_column(&ui, "main-list-2").is_some(),
+        "long list scrolls"
+    );
+    let with_bar = selection_end(&ui, list_y);
+    assert_eq!(
+        with_bar,
+        w - 3,
+        "gap + scrollbar track follow the selection"
+    );
+    // A short list has no scrollbar but keeps the same margin.
+    star(&mut ui);
+    key(&mut ui, KeyCode::Char('S'));
+    assert!(scrollbar_column(&ui, "main-list-4").is_none());
+    assert_eq!(selection_end(&ui, list_y), with_bar);
+    // The Projects list is the same widget and follows the same rule.
+    key(&mut ui, KeyCode::Char('P'));
+    let projects = ui.rect_of_key(&"main-list-1".to_owned().into()).unwrap();
+    let end = selection_end(&ui, projects.y as u16);
+    assert_eq!(end, with_bar, "projects list");
+}
+
+#[test]
+fn details_keep_the_same_right_margin_with_and_without_a_scrollbar() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    key(&mut ui, KeyCode::Enter);
+    settle(&mut ui);
+    let scroll = ui.rect_of_key(&"detail-scrollbar".to_owned().into());
+    let y = ui
+        .rect_of_key(&"detail-section-0".to_owned().into())
+        .unwrap()
+        .y as u16;
+    let with_bar = selection_end(&ui, y);
+    assert_eq!(with_bar, ui.viewport().w - 3, "{scroll:?}");
+    // Make the document fit: a very tall terminal removes the scrollbar.
+    let mut tall = mount_tall();
+    key(&mut tall, KeyCode::Char('I'));
+    key(&mut tall, KeyCode::Enter);
+    settle(&mut tall);
+    assert!(scrollbar_column(&tall, "detail-scrollbar").is_none());
+    let y = tall
+        .rect_of_key(&"detail-section-0".to_owned().into())
+        .unwrap()
+        .y as u16;
+    assert_eq!(selection_end(&tall, y), with_bar);
+    // Project details are short, so they have no scrollbar either.
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('P'));
+    key(&mut ui, KeyCode::Enter);
+    settle(&mut ui);
+    assert!(scrollbar_column(&ui, "detail-scrollbar").is_none());
+    let y = ui
+        .rect_of_key(&"detail-section-0".to_owned().into())
+        .unwrap()
+        .y as u16;
+    assert_eq!(selection_end(&ui, y), with_bar, "project details");
+}
+
+fn mount_tall() -> Ui {
+    let mut ui = TestBackend::new_with_app_and_viewport(
+        App::new().focus_policy(FocusPolicy::Manual),
+        Cronk {
+            config: config(),
+            path: None,
+            api: None,
+            demo: true,
+        },
+        (),
+        Rect {
+            x: 0,
+            y: 0,
+            w: 110,
+            h: 200,
+        },
+    );
+    settle(&mut ui);
+    ui
+}

@@ -1862,7 +1862,10 @@ impl Component for Cronk {
                         _ => None,
                     }
                 }
-                KeyCode::Char(' ') => Some(Msg::ToggleProject),
+                // Space toggles visibility only from the project list; inside details it
+                // acts solely on a focused control (fields, pipelines, jobs above).
+                KeyCode::Char(' ') if ctx.state.scope == Scope::List => Some(Msg::ToggleProject),
+                KeyCode::Char(' ') => None,
                 KeyCode::Char('/') => Some(Msg::Action(Action::Filter)),
                 KeyCode::Char('s') => Some(Msg::Action(Action::ToggleStar)),
                 KeyCode::Char('n') => Some(Msg::Action(
@@ -2274,10 +2277,12 @@ impl Cronk {
         page: usize,
         result: Result<Pipelines<Vec<Pipeline>>, String>,
     ) -> Update {
-        ctx.state.pipelines_pending.remove(&(project, page));
+        // A superseded reply must not evict the entry of a request re-issued after the
+        // epoch bump (restart_pipeline_sync clears the pending sets itself).
         if epoch != ctx.state.pipeline_epoch {
             return Update::none();
         }
+        ctx.state.pipelines_pending.remove(&(project, page));
         // Keep the selected row identity (a pipeline, or the footer) while the window shifts.
         let on_rows = ctx.state.config.project_route == Some(project)
             && ctx.state.scope == Scope::Section
@@ -2368,10 +2373,10 @@ impl Cronk {
         epoch: u64,
         result: Result<Box<LoadedPipeline>, String>,
     ) -> Update {
-        ctx.state.pipeline_detail_pending.remove(&pipeline);
         if epoch != ctx.state.pipeline_epoch {
             return Update::none();
         }
+        ctx.state.pipeline_detail_pending.remove(&pipeline);
         if !ctx.state.project_pipelines.contains_key(&project) {
             return Update::none();
         }
@@ -2418,6 +2423,13 @@ impl Cronk {
             }
             Err(error) => {
                 if let Some(window) = ctx.state.project_pipelines.get_mut(&project) {
+                    // Retry only when the row changes or on explicit refresh: a deleted
+                    // pipeline that stays expanded must not drive the backoff every cycle.
+                    let stamp = window.get(pipeline).and_then(|p| p.updated_at.clone());
+                    window.jobs.entry(pipeline).or_insert_with(|| PipelineJobs {
+                        jobs: Vec::new(),
+                        stamp,
+                    });
                     window.error = Some(error.clone());
                 }
                 self.network_error(ctx, error);
@@ -2513,10 +2525,10 @@ impl Cronk {
         epoch: u64,
         result: Result<Pipelines<Option<Box<Pipeline>>>, String>,
     ) -> Update {
-        ctx.state.probe_pending.remove(&project);
         if epoch != ctx.state.pipeline_epoch {
             return Update::none();
         }
+        ctx.state.probe_pending.remove(&project);
         match result {
             Ok(Pipelines::Available(Some(pipeline))) => {
                 ctx.state.latest_pipeline.insert(project, *pipeline);
@@ -2541,12 +2553,19 @@ impl Cronk {
             return;
         }
         let last = ctx.state.sections().len() - 1;
-        ctx.state.section_cursor = ctx.state.section_cursor.min(last);
-        ctx.state.config.section = ctx.state.config.section.map(|s| s.min(last));
         if !ctx.state.pipelines_section_present() {
+            // The Pipelines heading sat at index 1; do not let the cursor slide onto
+            // the destructive "Forget this project" section that now occupies it.
+            if ctx.state.section_cursor == 1 && ctx.state.section_cursor <= last {
+                ctx.state.section_cursor = 0;
+                ctx.state.config.section = ctx.state.config.section.map(|_| 0);
+                ctx.state.config.field = 0;
+            }
             ctx.state.drilled = None;
             self.close_log_mode(ctx);
         }
+        ctx.state.section_cursor = ctx.state.section_cursor.min(last);
+        ctx.state.config.section = ctx.state.config.section.map(|s| s.min(last));
     }
 
     /// Visibility or setup changed: forget per-project unavailability, invalidate

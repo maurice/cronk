@@ -84,7 +84,7 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | `PageUp` / `PageDown` | Page through a list or scroll the whole detail document |
 | Mouse click / wheel | Open rows, choose tabs/sections, select fields, scroll |
 | Scrollbar track click / thumb drag | Scroll the corresponding viewport without activating its contents |
-| `Space` in Projects | Include/hide the selected project in other lists |
+| `Space` in the Projects list | Include/hide the selected project in other lists (in details, Space only acts on the focused field, pipeline or job) |
 | `Space` on a job | Expand/collapse the selected job, including running jobs |
 | `Space` on a project pipeline | Expand/collapse that pipeline's summary |
 | `Enter` on a project pipeline | Open its jobs; `Esc` returns to the pipeline row |

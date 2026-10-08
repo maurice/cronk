@@ -127,7 +127,11 @@ fn pipelines_follow_merge_request_visibility() {
     ui.dispatch(Msg::ToggleProjectKind(ItemKind::MergeRequest))
         .unwrap();
     assert_eq!(ui.state().sections().len(), 2);
-    assert_eq!(ui.state().section_cursor, 1);
+    assert_eq!(
+        ui.state().section_cursor,
+        0,
+        "never slide onto Forget this project"
+    );
     assert!(ui.state().drilled.is_none());
 }
 
@@ -603,4 +607,54 @@ fn hiding_the_project_or_replacing_setup_stops_drilled_polling() {
     ui.dispatch(Msg::ToggleProjectKind(ItemKind::Issue))
         .unwrap();
     assert_eq!(ui.state().pipeline_epoch, epoch);
+
+    // Replacing the GitLab setup (demo: save setup) drops windows and indicators.
+    ui.dispatch(Msg::Action(cronk::ui::Action::Onboarding))
+        .unwrap();
+    settle(&mut ui);
+    ui.dispatch(Msg::SetupValidate(ui.state().onboarding.epoch))
+        .unwrap();
+    for _ in 0..20 {
+        settle(&mut ui);
+        if ui.state().onboarding.validated.is_some() {
+            break;
+        }
+    }
+    ui.dispatch(Msg::Submit).unwrap();
+    settle(&mut ui);
+    assert!(ui.state().dialog.is_none(), "setup saved");
+    assert!(ui.state().pipeline_epoch > epoch);
+    assert!(ui.state().drilled.is_none());
+    assert!(
+        ui.state()
+            .project_pipelines
+            .get(&PROJECT)
+            .is_none_or(|w| w.pages_loaded <= 1),
+        "old windows were cleared before the fresh page-1 load"
+    );
+}
+
+#[test]
+fn space_in_project_details_never_toggles_visibility_outside_a_field() {
+    let mut ui = mount(40);
+    key(&mut ui, KeyCode::Enter);
+    for section in 0..3 {
+        ui.dispatch(Msg::DetailSection(section)).unwrap();
+        key(&mut ui, KeyCode::Char(' '));
+        assert!(ui.state().config.projects[0].visible, "section {section}");
+    }
+    // Inside Pipelines, Space acts on the pipeline under the cursor only.
+    ui.dispatch(Msg::DetailSection(1)).unwrap();
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Char(' '));
+    assert!(ui.state().config.projects[0].visible);
+    let newest = ui.state().project_pipelines[&PROJECT].pipelines[0].id;
+    assert!(!ui.state().pipeline_expanded(PROJECT, newest));
+    // The Visibility field still toggles with Space when focused.
+    key(&mut ui, KeyCode::Esc);
+    ui.dispatch(Msg::DetailSection(0)).unwrap();
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Down);
+    key(&mut ui, KeyCode::Char(' '));
+    assert!(!ui.state().config.projects[0].visible);
 }

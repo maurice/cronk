@@ -139,6 +139,8 @@ impl Component for Cronk {
             details,
             shared_details: HashMap::new(),
             detail_requests: HashMap::new(),
+            detail_schema_errors: HashMap::new(),
+            detail_retry_requested: HashSet::new(),
             detail_sequence: 0,
             sync_progress: BTreeMap::new(),
             full_resync: false,
@@ -179,6 +181,8 @@ impl Component for Cronk {
             trace_pending: HashSet::new(),
             mutation_pending: false,
             user_pending: false,
+            user_schema_error: false,
+            user_retry_requested: false,
             user_epoch: 0,
             list_epoch: 0,
             detail_epoch: 0,
@@ -317,7 +321,10 @@ impl Component for Cronk {
                         .as_ref()
                         .is_some_and(|d| matches!(d.kind, DialogKind::Onboarding))
                 {
-                    if ctx.state.user.id == 0 && !ctx.state.user_pending {
+                    if ctx.state.user.id == 0
+                        && !ctx.state.user_pending
+                        && !ctx.state.user_schema_error
+                    {
                         ctx.link().send(Msg::LoadUser);
                     }
                     if now >= ctx.state.next_lists {
@@ -342,6 +349,7 @@ impl Component for Cronk {
                     return Update::full();
                 }
                 ctx.state.full_resync = true;
+                self.retry_detail_schemas(ctx, None);
                 return self.update(Msg::Refresh, ctx);
             }
             Msg::ClearCache => {
@@ -359,6 +367,8 @@ impl Component for Cronk {
                     match api.clear_content_cache() {
                         Ok(()) => {
                             ctx.state.shared_details.clear();
+                            ctx.state.detail_schema_errors.clear();
+                            ctx.state.detail_retry_requested.clear();
                             ctx.state.tab_cache.clear();
                             // Content eviction is not a navigation reset. Retain
                             // routes, cursor identities, offsets and job choices.
@@ -448,7 +458,33 @@ impl Component for Cronk {
                     return Update::none();
                 }
                 ctx.state.detail_requests.remove(&key);
+                // Refresh during an in-flight load queues one replacement, not
+                // parallel reads or suppression from the pre-refresh response.
+                if ctx.state.detail_retry_requested.remove(&key) {
+                    // A refresh makes schema failures obsolete, not server-wide
+                    // rate limits or transport failures. Keep the retry due, but
+                    // let the normal loader wait for network backoff to expire.
+                    if let Err(error) = result
+                        && !error.contains("invalid JSON/schema")
+                    {
+                        self.network_error(ctx, error);
+                    }
+                    if ctx.state.config.route.as_ref() == Some(&key) {
+                        ctx.state.detail_pending = None;
+                        ctx.state.next_details = Duration::ZERO;
+                        ctx.link().send(Msg::LoadDetails);
+                    }
+                    return Update::full();
+                }
+                if let Err(error) = &result
+                    && error.contains("invalid JSON/schema")
+                {
+                    ctx.state
+                        .detail_schema_errors
+                        .insert(key.clone(), error.clone());
+                }
                 if let Ok(details) = &result {
+                    ctx.state.detail_schema_errors.remove(&key);
                     ctx.state.shared_details.insert(
                         key.clone(),
                         (
@@ -459,8 +495,11 @@ impl Component for Cronk {
                     );
                 }
                 if ctx.state.config.route.as_ref() == Some(&key) {
-                    ctx.state.next_details =
-                        ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs);
+                    ctx.state.next_details = if ctx.state.detail_schema_errors.contains_key(&key) {
+                        Duration::MAX
+                    } else {
+                        ctx.elapsed() + Duration::from_secs(ctx.state.config.detail_refresh_secs)
+                    };
                     return self
                         .update(Msg::DetailsLoaded(key, ctx.state.detail_epoch, result), ctx);
                 } else if let Err(error) = result {
@@ -473,11 +512,13 @@ impl Component for Cronk {
                         "GitLab backoff is active; refresh will resume automatically".into();
                 } else {
                     ctx.state.error = ctx.state.navigation_error.clone();
-                    if let Some(key) = ctx.state.config.route.as_ref()
-                        && let Some((_, due)) = ctx.state.shared_details.get_mut(key)
-                    {
-                        *due = Duration::ZERO;
+                    ctx.state.user_schema_error = false;
+                    ctx.state.user_retry_requested |= ctx.state.user_pending;
+                    if ctx.state.user.id == 0 {
+                        ctx.link().send(Msg::LoadUser);
                     }
+                    let key = ctx.state.config.route.clone();
+                    self.retry_detail_schemas(ctx, key.as_ref());
                     self.queue_lists(ctx);
                     ctx.link().send(Msg::LoadDetails);
                     ctx.link().send(Msg::LoadTraces);
@@ -518,7 +559,10 @@ impl Component for Cronk {
                 }));
             }
             Msg::LoadUser => {
-                if ctx.state.user_pending || ctx.elapsed() < ctx.state.blocked_until {
+                if ctx.state.user_pending
+                    || ctx.state.user_schema_error
+                    || ctx.elapsed() < ctx.state.blocked_until
+                {
                     return Update::none();
                 }
                 let Some(api) = self.api.clone() else {
@@ -588,6 +632,11 @@ impl Component for Cronk {
                     || ctx.elapsed() < ctx.state.blocked_until
                 {
                     return Update::none();
+                }
+                if let Some(error) = ctx.state.detail_schema_errors.get(&key) {
+                    ctx.state.error = Some(format!("{error} · Refresh to retry this item"));
+                    ctx.state.next_details = Duration::MAX;
+                    return Update::full();
                 }
                 if ctx.state.detail_requests.contains_key(&key) {
                     ctx.state.detail_pending = Some((key, ctx.state.detail_epoch));
@@ -758,7 +807,18 @@ impl Component for Cronk {
                         ctx.state.status = "Detail updated".into();
                         ctx.link().send(Msg::LoadTraces);
                     }
-                    Err(error) => self.network_error(ctx, error),
+                    Err(error) => {
+                        if error.contains("invalid JSON/schema") {
+                            ctx.state.detail_schema_errors.insert(key, error.clone());
+                            ctx.state.next_details = Duration::MAX;
+                            self.network_error(
+                                ctx,
+                                format!("{error} · Refresh to retry this item"),
+                            );
+                        } else {
+                            self.network_error(ctx, error);
+                        }
+                    }
                 }
             }
             Msg::LoadTraces => return self.load_traces(ctx),
@@ -850,6 +910,8 @@ impl Component for Cronk {
                         ctx.state.sync_progress.clear();
                         ctx.state.shared_details.clear();
                         ctx.state.detail_requests.clear();
+                        ctx.state.detail_schema_errors.clear();
+                        ctx.state.detail_retry_requested.clear();
                         ctx.state.tab_cache.clear();
                         ctx.state.detail_epoch += 1;
                         ctx.state.detail_pending = None;
@@ -1728,6 +1790,12 @@ impl Cronk {
         ctx.state
             .detail_requests
             .retain(|key, _| visible.contains(&key.project));
+        ctx.state
+            .detail_schema_errors
+            .retain(|key, _| visible.contains(&key.project));
+        ctx.state
+            .detail_retry_requested
+            .retain(|key| visible.contains(&key.project));
         ctx.state.sync_progress.retain(|id, _| visible.contains(id));
         ctx.state.tab_cache.retain(|key, _| {
             config
@@ -1864,20 +1932,74 @@ impl Cronk {
         }
     }
 
+    fn retry_detail_schemas(&self, ctx: &mut Context<Self>, key: Option<&ItemKey>) {
+        if let Some(api) = &self.api {
+            api.retry_schema_errors(key);
+        }
+        let matches = |candidate: &ItemKey| key.is_none_or(|key| key == candidate);
+        ctx.state
+            .detail_schema_errors
+            .retain(|candidate, _| !matches(candidate));
+        ctx.state.detail_retry_requested.extend(
+            ctx.state
+                .detail_requests
+                .keys()
+                .filter(|candidate| matches(candidate))
+                .cloned(),
+        );
+        for (candidate, (_, due)) in &mut ctx.state.shared_details {
+            if matches(candidate) {
+                *due = Duration::ZERO;
+            }
+        }
+        for cache in ctx.state.tab_cache.values_mut() {
+            if cache
+                .details
+                .as_ref()
+                .is_none_or(|details| matches(&details.item.key))
+            {
+                cache.next_details = Duration::ZERO;
+            }
+        }
+        if ctx.state.config.route.as_ref().is_some_and(matches) {
+            ctx.state.next_details = Duration::ZERO;
+        }
+    }
+
     fn apply_user(&self, ctx: &mut Context<Self>, result: Result<User, String>) {
         ctx.state.user_pending = false;
+        if std::mem::take(&mut ctx.state.user_retry_requested) {
+            ctx.state.user_schema_error = false;
+            if let Err(error) = result
+                && !error.contains("invalid JSON/schema")
+            {
+                self.network_error(ctx, error);
+            }
+            ctx.link().send(Msg::LoadUser);
+            return;
+        }
         match result {
             Ok(user) => {
+                ctx.state.user_schema_error = false;
                 ctx.state.user = user;
                 ctx.state
                     .restore_selection(ctx.state.navigation_hydration_complete());
                 self.persist(ctx);
             }
-            Err(error) => self.network_error(ctx, error),
+            Err(error) => {
+                ctx.state.user_schema_error = error.contains("invalid JSON/schema");
+                self.network_error(ctx, error);
+            }
         }
     }
 
     pub(super) fn network_error(&self, ctx: &mut Context<Self>, error: String) {
+        // A bad resource schema is not a server outage or a rate limit. Blocking
+        // unrelated list/detail/trace requests cannot make that response valid.
+        if error.contains("invalid JSON/schema") {
+            ctx.state.error = Some(error);
+            return;
+        }
         ctx.state.failures = (ctx.state.failures + 1).min(6);
         let seconds = 5 * (1u64 << ctx.state.failures);
         let retry_after = retry_after(&error, std::time::SystemTime::now());

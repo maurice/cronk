@@ -259,6 +259,8 @@ impl Cronk {
         self.clear_detail_content(ctx);
         ctx.state.shared_details.clear();
         ctx.state.detail_requests.clear();
+        ctx.state.detail_schema_errors.clear();
+        ctx.state.detail_retry_requested.clear();
         ctx.state.tab_cache.clear();
         ctx.state.sync_progress.clear();
         ctx.state.list_epoch += 1;
@@ -266,6 +268,8 @@ impl Cronk {
         ctx.state.user = validation.user;
         ctx.state.user_epoch += 1;
         ctx.state.user_pending = false;
+        ctx.state.user_schema_error = false;
+        ctx.state.user_retry_requested = false;
         ctx.state.remember_selection();
         ctx.state
             .navigation_restoring

@@ -72,6 +72,61 @@ const TRACE_BYTES: usize = 256 * 1024;
 const TRACE_SKIP_LIMIT: u64 = 8 * 1024 * 1024;
 const TRACE_STATES: usize = 64;
 
+/// Serde's full message can quote private response values. Only expose fixed
+/// type descriptions, never the unexpected value or arbitrary custom messages.
+fn json_error_summary(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    match error.classify() {
+        Category::Syntax => "malformed JSON".into(),
+        Category::Eof => "incomplete JSON".into(),
+        Category::Io => "JSON read failure".into(),
+        Category::Data => {
+            let message = error.to_string();
+            if message.starts_with("missing field ") {
+                return "missing required field".into();
+            }
+            let Some(types) = message.strip_prefix("invalid type: ") else {
+                return "response does not match the expected schema".into();
+            };
+            let actual = [
+                "null",
+                "string",
+                "integer",
+                "boolean",
+                "floating point",
+                "sequence",
+                "map",
+            ]
+            .into_iter()
+            .find(|kind| types.starts_with(kind))
+            .unwrap_or("unexpected value");
+            let expected = types
+                .split_once(", expected ")
+                .map(|(_, expected)| expected.split(" at line ").next().unwrap_or(expected));
+            let expected = expected.filter(|expected| {
+                matches!(
+                    *expected,
+                    "a string"
+                        | "a boolean"
+                        | "a sequence"
+                        | "a map"
+                        | "u64"
+                        | "u32"
+                        | "usize"
+                        | "i64"
+                        | "i32"
+                        | "f64"
+                        | "f32"
+                )
+            });
+            match expected {
+                Some(expected) => format!("invalid type: {actual}, expected {expected}"),
+                None => format!("invalid type: {actual}"),
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GitLab {
     client: Client,
@@ -157,6 +212,8 @@ struct Cache {
     order: VecDeque<String>,
     bytes: usize,
     generation: u64,
+    core_schema_errors: HashMap<ItemKey, String>,
+    schema_generation: u64,
 }
 
 impl Cache {
@@ -203,6 +260,8 @@ impl Cache {
         self.entries.clear();
         self.order.clear();
         self.bytes = 0;
+        self.core_schema_errors.clear();
+        self.schema_generation = self.schema_generation.wrapping_add(1);
         self.generation = self.generation.wrapping_add(1);
     }
 }
@@ -788,18 +847,82 @@ impl GitLab {
     }
 
     fn decode<T: DeserializeOwned>(&self, url: &Url, doc: &Document) -> Result<T> {
-        serde_json::from_slice(&doc.body).map_err(|error| {
+        let mut deserializer = serde_json::Deserializer::from_slice(&doc.body);
+        let value = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            let source = error.inner();
+            // Syntax/EOF failures can be under unknown response-supplied map
+            // keys. Only data/schema errors have useful schema-field context.
+            let field = if source.is_data() {
+                format!(" at field {}", self.redacted(&error.path().to_string()))
+            } else {
+                String::new()
+            };
             anyhow!(
-                "{}: invalid JSON/schema at line {}, column {}",
+                "{}: invalid JSON/schema{field}: {} at line {}, column {}",
                 self.context(&Method::GET, url),
+                json_error_summary(source),
+                source.line(),
+                source.column()
+            )
+        })?;
+        // Preserve from_slice's rejection of trailing JSON/data.
+        deserializer.end().map_err(|error| {
+            anyhow!(
+                "{}: invalid JSON/schema: {} at line {}, column {}",
+                self.context(&Method::GET, url),
+                json_error_summary(&error),
                 error.line(),
                 error.column()
             )
-        })
+        })?;
+        Ok(value)
     }
 
     fn get<T: DeserializeOwned>(&self, url: &Url) -> Result<T> {
         self.decode(url, &self.document(url)?)
+    }
+
+    fn core_schema_error(&self, key: &ItemKey) -> Option<String> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .core_schema_errors
+            .get(key)
+            .cloned()
+    }
+
+    fn core_item(&self, key: &ItemKey) -> Result<ApiItem> {
+        let revision = {
+            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(error) = cache.core_schema_errors.get(key) {
+                return Err(anyhow!("{error}"));
+            }
+            cache.schema_generation
+        };
+        let result = self.get(&self.item_url(key, &[]));
+        if let Err(error) = &result
+            && error.to_string().contains("invalid JSON/schema")
+        {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.schema_generation == revision {
+                cache
+                    .core_schema_errors
+                    .insert(key.clone(), error.to_string());
+            }
+        }
+        result
+    }
+
+    /// Explicit refresh permits retrying deterministic core failures. The
+    /// generation guard prevents an older read from restoring suppression.
+    pub fn retry_schema_errors(&self, key: Option<&ItemKey>) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(key) = key {
+            cache.core_schema_errors.remove(key);
+        } else {
+            cache.core_schema_errors.clear();
+        }
+        cache.schema_generation = cache.schema_generation.wrapping_add(1);
     }
 
     fn pages<T: DeserializeOwned>(&self, url: Url, result: &mut Vec<T>) -> Result<()> {
@@ -966,7 +1089,12 @@ impl GitLab {
     pub fn clear_content_cache(&self) -> Result<()> {
         self.persistent
             .as_ref()
-            .map_or(Ok(()), |cache| cache.clear())
+            .map_or(Ok(()), |cache| cache.clear())?;
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invalidate();
+        Ok(())
     }
 
     pub fn current_user(&self) -> Result<User> {
@@ -1204,7 +1332,7 @@ impl GitLab {
                 for key in cache.missing(project.id, kind, plan)? {
                     // Offset pagination is not an atomic snapshot: an updated item
                     // may have moved out of the bounded import window. Verify it.
-                    match self.get::<ApiItem>(&self.item_url(&key, &[])) {
+                    match self.core_item(&key) {
                         Ok(raw) => {
                             let item = raw.into_item(project.id, kind);
                             let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -1299,8 +1427,10 @@ impl GitLab {
                 items[index].pipeline = None;
                 items[index].unresolved = None;
             }
-            if items[index].pipeline.is_none() {
-                match self.get::<ApiItem>(&self.item_url(&items[index].key, &[])) {
+            if items[index].pipeline.is_none()
+                && self.core_schema_error(&items[index].key).is_none()
+            {
+                match self.core_item(&items[index].key) {
                     Ok(raw) => {
                         let enriched = raw.into_item(project.id, ItemKind::MergeRequest);
                         items[index].pipeline = enriched.pipeline;
@@ -1365,7 +1495,7 @@ impl GitLab {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .generation;
-        let raw: ApiItem = self.get(&self.item_url(key, &[]))?;
+        let raw = self.core_item(key)?;
         let mut details = previous.unwrap_or_default();
         let colors: HashMap<_, _> = details
             .item
@@ -1496,10 +1626,11 @@ impl GitLab {
             }
             DetailPart::Pipeline => {
                 let mut pipeline = raw.head_pipeline.clone();
-                let head_sha = raw
-                    .sha
-                    .clone()
-                    .or_else(|| raw.diff_refs.as_ref().map(|refs| refs.head_sha.clone()));
+                let head_sha = raw.sha.clone().or_else(|| {
+                    raw.diff_refs
+                        .as_ref()
+                        .and_then(|refs| refs.head_sha.clone())
+                });
                 if pipeline.is_none() {
                     if let Some(sha) = head_sha.filter(|sha| !sha.is_empty()) {
                         let (pipelines, complete) = self.optional::<ApiPipeline>(
@@ -2161,7 +2292,8 @@ struct Title {
 
 #[derive(Clone, Deserialize)]
 struct DiffRefs {
-    head_sha: String,
+    #[serde(default)]
+    head_sha: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -3502,6 +3634,61 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_preserves_schema_failed_items_without_repeating_core_http() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/issues/1" => {
+                let mut item = raw_item(1, "opened");
+                item["title"] = Value::Null;
+                Reply::json(item)
+            }
+            _ => Reply::json(json!([])),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = mock.client();
+        api.enable_persistence(&dir.path().join("config.toml"))
+            .unwrap();
+        let cache = api.persistent.as_ref().unwrap();
+        let plan = cache.plan(7, ItemKind::Issue, false).unwrap();
+        let item = serde_json::from_value::<ApiItem>(raw_item(1, "opened"))
+            .unwrap()
+            .into_item(7, ItemKind::Issue);
+        cache
+            .page(7, ItemKind::Issue, &plan, std::slice::from_ref(&item))
+            .unwrap();
+        cache.finish(7, ItemKind::Issue, &plan, &[]).unwrap();
+        for _ in 0..3 {
+            assert!(
+                api.sync_project(&project(), true, |_, _| {})
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid JSON/schema")
+            );
+            assert_eq!(api.cached_items(7).unwrap().len(), 1);
+        }
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/projects/7/issues/1")
+                .count(),
+            1
+        );
+        api.retry_schema_errors(Some(&item.key));
+        assert!(api.sync_project(&project(), true, |_, _| {}).is_err());
+        assert_eq!(api.cached_items(7).unwrap().len(), 1);
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/projects/7/issues/1")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn progressive_details_publish_core_first_and_persist_completed_sections() {
         let mock = Mock::new(|request| match request.url().path() {
             "/api/v4/projects/7/issues/1" => Reply::json(raw_item(1, "opened")),
@@ -3738,6 +3925,65 @@ mod tests {
         let invalid = Mock::new(|_| Reply::json(json!({"id": "test-private-secret"})));
         let error = format!("{:#}", invalid.client().current_user().unwrap_err());
         assert!(error.contains("invalid JSON/schema") && !error.contains("test-private-secret"));
+    }
+
+    #[test]
+    fn schema_errors_identify_fields_and_types_without_response_values() {
+        let mock = Mock::new(|_| {
+            let mut item = raw_item(1, "opened");
+            item["diff_refs"] = json!({"head_sha": 123});
+            Reply::json(item)
+        });
+        let error = mock
+            .client()
+            .details(&key(ItemKind::MergeRequest))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GET /api/v4/projects/7/merge_requests/1"));
+        assert!(error.contains("field diff_refs.head_sha"), "{error}");
+        assert!(
+            error.contains("invalid type: integer, expected a string"),
+            "{error}"
+        );
+        assert!(error.contains("line 1, column"));
+        assert!(!error.contains("123"));
+
+        let mock = Mock::new(|_| Reply::json(json!([{"id": "private-response-value"}])));
+        let client = mock.client();
+        let error = client
+            .get::<Vec<User>>(&client.url(&["users"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("field [0].id"), "{error}");
+        assert!(
+            error.contains("invalid type: string, expected u64"),
+            "{error}"
+        );
+        assert!(!error.contains("private-response-value"));
+
+        for body in [b"{\"id\": 1".as_slice(), b"{not JSON", b"{\"id\": 1} {}"] {
+            let body = body.to_vec();
+            let mock = Mock::new(move |_| Reply::bytes(200, body.clone()));
+            let error = mock.client().current_user().unwrap_err().to_string();
+            assert!(error.contains("invalid JSON/schema"), "{error}");
+            assert!(error.contains("line 1, column"), "{error}");
+        }
+    }
+
+    #[test]
+    fn malformed_unknown_field_paths_do_not_expose_response_keys() {
+        for body in [
+            br#"{"id":1,"private-customer@example.org":}"#.as_slice(),
+            br#"{"id":1,"private-customer@example.org":"#,
+        ] {
+            let body = body.to_vec();
+            let mock = Mock::new(move |_| Reply::bytes(200, body.clone()));
+            let error = mock.client().current_user().unwrap_err().to_string();
+            assert!(error.contains("invalid JSON/schema"), "{error}");
+            assert!(error.contains("line 1, column"), "{error}");
+            assert!(!error.contains("private-customer"), "{error}");
+            assert!(!error.contains("at field"), "{error}");
+        }
     }
 
     #[test]
@@ -4038,11 +4284,560 @@ mod tests {
     }
 
     #[test]
+    fn current_user_schema_failure_does_not_poll_or_block_details() {
+        use crate::{
+            config::Config,
+            ui::{Cronk, Msg, Scope},
+        };
+        use tui_lipan::{TestBackend, prelude::*};
+        let mut user_reads = 0;
+        let mock = Mock::new(move |request| match request.url().path() {
+            "/api/v4/user" => {
+                user_reads += 1;
+                Reply::json(if user_reads == 1 {
+                    json!({"id": null})
+                } else {
+                    json!({"id": 1})
+                })
+            }
+            "/api/v4/projects/7/issues/1" => Reply::json(raw_item(1, "opened")),
+            _ => Reply::json(json!([])),
+        });
+        let mut ui = TestBackend::new_with_app(
+            App::new().focus_policy(FocusPolicy::Manual),
+            Cronk {
+                config: Config {
+                    onboarding: false,
+                    ..Config::default()
+                },
+                path: None,
+                api: Some(mock.client()),
+                demo: false,
+            },
+            (),
+        );
+        ui.pump().unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if ui.state().user_schema_error {
+                break;
+            }
+        }
+        assert!(ui.state().user_schema_error);
+        assert!(!ui.state().user_pending);
+        assert_eq!(ui.state().blocked_until, Duration::ZERO);
+        for _ in 0..3 {
+            ui.advance(Duration::from_secs(1));
+            ui.dispatch(Msg::LoadUser).unwrap();
+            ui.settle(Duration::from_millis(25)).unwrap();
+        }
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/user")
+                .count(),
+            1
+        );
+
+        ui.state_mut().config.projects = vec![project()];
+        let item = serde_json::from_value::<ApiItem>(raw_item(1, "opened"))
+            .unwrap()
+            .into_item(7, ItemKind::Issue);
+        ui.state_mut().items = vec![item.clone()];
+        ui.state_mut().config.route = Some(item.key);
+        ui.state_mut().scope = Scope::Section;
+        ui.dispatch(Msg::LoadDetails).unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if ui.state().detail_requests.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(ui.state().details.as_ref().unwrap().loaded.len(), 3);
+        ui.dispatch(Msg::Refresh).unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if ui.state().user.id == 1 {
+                break;
+            }
+        }
+        assert_eq!(ui.state().user.id, 1);
+        assert!(!ui.state().user_schema_error);
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/user")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn refresh_during_blocked_core_load_retries_once_without_stale_suppression() {
+        use crate::{
+            config::Config,
+            ui::{Cronk, Msg, Scope},
+        };
+        use tui_lipan::{TestBackend, prelude::*};
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = reads.clone();
+        let mock = Mock::concurrent(move |request| match request.url().path() {
+            "/api/v4/user" => Reply::json(json!({"id": 1})),
+            "/api/v4/projects/7/merge_requests/1" => {
+                let mut item = raw_item(1, "opened");
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    blocked_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                    item["diff_refs"] = json!({"head_sha": 123});
+                }
+                Reply::json(item)
+            }
+            _ => Reply::json(json!([])),
+        });
+        let api = mock.client();
+        let mut ui = TestBackend::new_with_app(
+            App::new().focus_policy(FocusPolicy::Manual),
+            Cronk {
+                config: Config {
+                    onboarding: false,
+                    ..Config::default()
+                },
+                path: None,
+                api: Some(api.clone()),
+                demo: false,
+            },
+            (),
+        );
+        ui.pump().unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if !ui.state().user_pending {
+                break;
+            }
+        }
+        let item = serde_json::from_value::<ApiItem>(raw_item(1, "opened"))
+            .unwrap()
+            .into_item(7, ItemKind::MergeRequest);
+        let mr = item.key.clone();
+        ui.state_mut().config.projects = vec![project()];
+        ui.state_mut().items = vec![item];
+        ui.state_mut().config.route = Some(mr.clone());
+        ui.state_mut().scope = Scope::Section;
+        ui.dispatch(Msg::LoadDetails).unwrap();
+        blocked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Coalesce repeated explicit refreshes until the pending request ends.
+        ui.dispatch(Msg::Refresh).unwrap();
+        ui.dispatch(Msg::Refresh).unwrap();
+        let pending_retry = ui.state().detail_retry_requested.contains(&mr);
+        let reads_before_release = reads.load(Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if ui.state().detail_requests.is_empty()
+                && ui
+                    .state()
+                    .details
+                    .as_ref()
+                    .is_some_and(|d| d.loaded.len() == 5)
+            {
+                break;
+            }
+        }
+        assert!(pending_retry);
+        assert_eq!(reads_before_release, 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        assert!(ui.state().detail_retry_requested.is_empty());
+        assert!(!ui.state().detail_schema_errors.contains_key(&mr));
+        assert!(api.core_schema_error(&mr).is_none());
+        assert_eq!(ui.state().details.as_ref().unwrap().loaded.len(), 5);
+        assert!(ui.state().next_details < Duration::MAX);
+        assert_eq!(ui.state().blocked_until, Duration::ZERO);
+    }
+
+    #[test]
+    fn queued_user_and_detail_refreshes_honor_retry_after_before_replacement_http() {
+        use crate::{
+            config::Config,
+            ui::{Cronk, Msg, Scope},
+        };
+        use tui_lipan::{TestBackend, prelude::*};
+        for user_load in [true, false] {
+            let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = Mutex::new(release_rx);
+            let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = reads.clone();
+            let target = if user_load {
+                "/api/v4/user"
+            } else {
+                "/api/v4/projects/7/merge_requests/1"
+            };
+            let mock = Mock::concurrent(move |request| {
+                let path = request.url().path().to_owned();
+                if path == target && counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    blocked_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                    return Reply::bytes(429, "private response").header("Retry-After", "3600");
+                }
+                match path.as_str() {
+                    "/api/v4/user" => Reply::json(json!({"id": 1})),
+                    "/api/v4/projects/7/merge_requests/1" => Reply::json(raw_item(1, "opened")),
+                    _ => Reply::json(json!([])),
+                }
+            });
+            let mut ui = TestBackend::new_with_app(
+                App::new().focus_policy(FocusPolicy::Manual),
+                Cronk {
+                    config: Config {
+                        onboarding: false,
+                        ..Config::default()
+                    },
+                    path: None,
+                    api: Some(mock.client()),
+                    demo: false,
+                },
+                (),
+            );
+            ui.pump().unwrap();
+            if !user_load {
+                for _ in 0..80 {
+                    ui.settle(Duration::from_millis(25)).unwrap();
+                    if !ui.state().user_pending {
+                        break;
+                    }
+                }
+                let item = serde_json::from_value::<ApiItem>(raw_item(1, "opened"))
+                    .unwrap()
+                    .into_item(7, ItemKind::MergeRequest);
+                ui.state_mut().config.projects = vec![project()];
+                ui.state_mut().config.route = Some(item.key.clone());
+                ui.state_mut().items = vec![item];
+                ui.state_mut().scope = Scope::Section;
+                ui.dispatch(Msg::LoadDetails).unwrap();
+            }
+            blocked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            ui.dispatch(Msg::Refresh).unwrap();
+            release_tx.send(()).unwrap();
+            for _ in 0..80 {
+                ui.settle(Duration::from_millis(25)).unwrap();
+                if ui.state().blocked_until >= Duration::from_secs(3600) {
+                    break;
+                }
+            }
+            assert!(ui.state().blocked_until >= Duration::from_secs(3600));
+            assert_eq!(ui.state().failures, 1);
+            ui.advance(Duration::from_secs(1));
+            ui.settle(Duration::from_millis(25)).unwrap();
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                1,
+                "replacement must wait for Retry-After"
+            );
+            assert!(!ui.state().user_schema_error);
+            assert!(ui.state().detail_schema_errors.is_empty());
+
+            ui.advance(Duration::from_secs(3600));
+            for _ in 0..80 {
+                ui.settle(Duration::from_millis(25)).unwrap();
+                if if user_load {
+                    ui.state().user.id == 1
+                } else {
+                    ui.state()
+                        .details
+                        .as_ref()
+                        .is_some_and(|d| d.loaded.len() == 5)
+                } {
+                    break;
+                }
+            }
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                2,
+                "queued retry must resume after backoff"
+            );
+            if user_load {
+                assert_eq!(ui.state().user.id, 1);
+            } else {
+                assert_eq!(ui.state().details.as_ref().unwrap().loaded.len(), 5);
+            }
+        }
+    }
+
+    #[test]
+    fn dashboard_and_detail_loading_share_core_schema_suppression() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/merge_requests" => Reply::json(json!([raw_item(1, "opened")])),
+            "/api/v4/projects/7/merge_requests/1" => {
+                let mut item = raw_item(1, "opened");
+                item["diff_refs"] = json!({"head_sha": 123});
+                Reply::json(item)
+            }
+            _ => Reply::json(json!([])),
+        });
+        let client = mock.client();
+        let mr = key(ItemKind::MergeRequest);
+        assert!(
+            client
+                .sync_project(&project(), false, |_, _| {})
+                .unwrap_err()
+                .to_string()
+                .contains("invalid JSON/schema")
+        );
+        for _ in 0..3 {
+            let items = client.sync_project(&project(), false, |_, _| {}).unwrap();
+            assert_eq!(items.len(), 1);
+            assert!(items[0].pipeline.is_none());
+            assert_eq!(items[0].unresolved, Some(0));
+            assert!(
+                client
+                    .details(&mr)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid JSON/schema")
+            );
+        }
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/projects/7/merge_requests/1")
+                .count(),
+            1
+        );
+        client.retry_schema_errors(Some(&mr));
+        assert!(client.details(&mr).is_err());
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/projects/7/merge_requests/1")
+                .count(),
+            2
+        );
+        client.clear_content_cache().unwrap();
+        assert!(client.details(&mr).is_err());
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/projects/7/merge_requests/1")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn schema_failed_detail_does_not_retry_or_block_other_http_requests() {
+        use crate::{
+            config::Config,
+            ui::{Cronk, Msg, Scope},
+        };
+        use tui_lipan::{TestBackend, prelude::*};
+        let mut mr_reads = 0;
+        let mock = Mock::new(move |request| match request.url().path() {
+            "/api/v4/user" => Reply::json(json!({"id": 1})),
+            "/api/v4/projects/7/merge_requests/1" => {
+                mr_reads += 1;
+                let mut item = raw_item(1, "opened");
+                item["diff_refs"] = if mr_reads == 1 {
+                    json!({"head_sha": 123})
+                } else {
+                    json!({"head_sha": null})
+                };
+                Reply::json(item)
+            }
+            "/api/v4/projects/7/issues/1" => Reply::json(raw_item(1, "opened")),
+            _ => Reply::json(json!([])),
+        });
+        let mut ui = TestBackend::new_with_app(
+            App::new().focus_policy(FocusPolicy::Manual),
+            Cronk {
+                config: Config {
+                    onboarding: false,
+                    projects: vec![project()],
+                    ..Config::default()
+                },
+                path: None,
+                api: Some(mock.client()),
+                demo: false,
+            },
+            (),
+        );
+        ui.pump().unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if ui.state().list_pending.is_empty() && !ui.state().user_pending {
+                break;
+            }
+        }
+        ui.state_mut().items = vec![
+            serde_json::from_value::<ApiItem>(raw_item(1, "opened"))
+                .unwrap()
+                .into_item(7, ItemKind::MergeRequest),
+            serde_json::from_value::<ApiItem>(raw_item(1, "opened"))
+                .unwrap()
+                .into_item(7, ItemKind::Issue),
+        ];
+        let mr = key(ItemKind::MergeRequest);
+        ui.state_mut().config.route = Some(mr.clone());
+        ui.state_mut().scope = Scope::Section;
+        ui.dispatch(Msg::LoadDetails).unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if ui.state().detail_schema_errors.contains_key(&mr) {
+                break;
+            }
+        }
+        assert!(ui.state().detail_schema_errors.contains_key(&mr));
+        assert_eq!(ui.state().blocked_until, Duration::ZERO);
+        for _ in 0..3 {
+            ui.dispatch(Msg::LoadDetails).unwrap();
+        }
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/projects/7/merge_requests/1")
+                .count(),
+            1
+        );
+
+        let issue = key(ItemKind::Issue);
+        ui.state_mut().config.route = Some(issue.clone());
+        ui.state_mut().detail_epoch += 1;
+        ui.state_mut().details = None;
+        ui.dispatch(Msg::LoadDetails).unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if ui.state().detail_requests.is_empty() {
+                break;
+            }
+        }
+        let details = ui.state().details.as_ref().unwrap();
+        assert_eq!(details.item.key, issue);
+        assert_eq!(details.loaded.len(), 3);
+
+        ui.state_mut().config.route = Some(mr.clone());
+        ui.state_mut().detail_epoch += 1;
+        ui.state_mut().details = None;
+        ui.dispatch(Msg::LoadDetails).unwrap();
+        assert_eq!(ui.state().next_details, Duration::MAX);
+        ui.dispatch(Msg::Refresh).unwrap();
+        for _ in 0..80 {
+            ui.settle(Duration::from_millis(25)).unwrap();
+            if ui.state().detail_requests.is_empty() {
+                break;
+            }
+        }
+        assert!(!ui.state().detail_schema_errors.contains_key(&mr));
+        let details = ui.state().details.as_ref().unwrap();
+        assert_eq!(details.item.key, mr);
+        assert_eq!(details.loaded.len(), 5);
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.url().path() == "/api/v4/projects/7/merge_requests/1")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn nullable_or_missing_diff_head_sha_preserves_other_detail_sections() {
+        for refs in [
+            Value::Null,
+            json!({}),
+            json!({"head_sha": null}),
+            json!({"head_sha": ""}),
+        ] {
+            let mock = Mock::new(move |request| match request.url().path() {
+                "/api/v4/projects/7/merge_requests/1" => {
+                    let mut item = raw_item(1, "opened");
+                    item["diff_refs"] = refs.clone();
+                    Reply::json(item)
+                }
+                "/api/v4/projects/7/merge_requests/1/notes" => {
+                    Reply::json(json!([{"id": 1, "body": "Activity"}]))
+                }
+                "/api/v4/projects/7/merge_requests/1/diffs" => {
+                    Reply::json(json!([{"old_path": "file", "new_path": "file", "diff": "patch"}]))
+                }
+                _ => Reply::json(json!([])),
+            });
+            let details = mock
+                .client()
+                .details_progress(&key(ItemKind::MergeRequest), None, |_, _| {})
+                .unwrap();
+            assert_eq!(details.loaded.len(), 5);
+            assert_eq!(details.notes.len(), 1);
+            assert_eq!(details.diffs.len(), 1);
+            assert!(details.jobs.is_empty());
+            assert!(
+                details
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("Head pipeline unknown"))
+            );
+            assert!(
+                !mock
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.url().path().ends_with("/pipelines"))
+            );
+        }
+    }
+
+    #[test]
+    fn diff_head_sha_is_used_when_top_level_sha_is_missing() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/merge_requests/1" => {
+                let mut item = raw_item(1, "opened");
+                item["diff_refs"] = json!({"head_sha": "head-sha"});
+                Reply::json(item)
+            }
+            "/api/v4/projects/7/merge_requests/1/pipelines" => {
+                Reply::json(json!([{"id": 2, "sha": "head-sha", "status": "success"}]))
+            }
+            "/api/v4/projects/7/pipelines/2" => {
+                Reply::json(json!({"id": 2, "sha": "head-sha", "status": "success"}))
+            }
+            _ => Reply::json(json!([])),
+        });
+        let details = mock.client().details(&key(ItemKind::MergeRequest)).unwrap();
+        assert_eq!(details.item.pipeline.unwrap().id, 2);
+        assert!(details.warnings.is_empty());
+    }
+
+    #[test]
     fn latest_head_pipeline_is_selected_by_sha_not_list_order() {
         let mock = Mock::new(|request| match request.url().path() {
             "/api/v4/projects/7/merge_requests/1" => {
                 let mut item = raw_item(1, "opened");
                 item["sha"] = json!("head-sha");
+                item["diff_refs"] = json!({"head_sha": null});
                 Reply::json(item)
             }
             "/api/v4/projects/7/merge_requests/1/pipelines" => {

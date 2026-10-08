@@ -548,7 +548,7 @@ fn scrollbar_hover_is_local_and_does_not_scroll_or_activate() {
         mouse(&mut ui, x, y, MouseKind::Moved);
         assert_ne!(ui.capture_frame().cell(x, y).bg, before.bg);
         assert_eq!(serde_json::to_value(&ui.state().config).unwrap(), config);
-        mouse(&mut ui, x - 2, y, MouseKind::Moved);
+        mouse(&mut ui, x - 1, y, MouseKind::Moved);
         assert_eq!(ui.capture_frame().cell(x, y), &before);
         mouse(&mut ui, x, y, MouseKind::Moved);
         mouse(&mut ui, 0, 0, MouseKind::Moved);

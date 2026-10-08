@@ -129,6 +129,7 @@ impl Component for Cronk {
             demo: is_demo,
             scope,
             items,
+            starred_stubs: Vec::new(),
             user: if is_demo {
                 demo::user()
             } else {
@@ -191,6 +192,7 @@ impl Component for Cronk {
             lookup_inflight: None,
         };
         state.reset_current_iterations();
+        state.refresh_starred_stubs();
         state.remember_selection();
         if is_demo || state.config.active_tab == 1 {
             state.restore_selection(true);
@@ -863,7 +865,7 @@ impl Component for Cronk {
                 }
             }
             Msg::Tab(index) => {
-                if index >= ctx.state.tab_names().len() || ctx.state.dialog.is_some() {
+                if index >= ctx.state.config.tab_count() || ctx.state.dialog.is_some() {
                     return Update::none();
                 }
                 if index == ctx.state.config.active_tab {
@@ -876,6 +878,44 @@ impl Component for Cronk {
                     self.switch_tab(ctx, index);
                 }
                 self.persist(ctx);
+            }
+            Msg::ToggleStar(key) => {
+                let title = ctx
+                    .state
+                    .star_target()
+                    .filter(|(target, _)| *target == key)
+                    .map(|(_, title)| title)
+                    .or_else(|| {
+                        ctx.state
+                            .items
+                            .iter()
+                            .chain(&ctx.state.starred_stubs)
+                            .find(|i| i.key == key)
+                            .map(|i| i.title.clone())
+                    })
+                    .unwrap_or_default();
+                self.toggle_star(ctx, &key, &title);
+            }
+            Msg::MoveStar(delta) => {
+                if ctx.state.dialog.is_none()
+                    && ctx.state.scope == Scope::List
+                    && ctx.state.starred_active()
+                {
+                    // Swap with the neighbour actually shown, so filters stay consistent.
+                    let at = ctx.state.scroll.selected;
+                    let keys = at.checked_add_signed(delta).and_then(|to| {
+                        Some((
+                            ctx.state.visible_item_at(at)?.key.clone(),
+                            ctx.state.visible_item_at(to)?.key.clone(),
+                        ))
+                    });
+                    if let Some((a, b)) = keys
+                        && ctx.state.config.swap_stars(&a, &b)
+                    {
+                        self.move_selection(ctx, delta);
+                        self.persist(ctx);
+                    }
+                }
             }
             Msg::Move(delta) => {
                 if ctx.state.dialog.is_some() {
@@ -1559,7 +1599,19 @@ impl Component for Cronk {
         } else if key.mods.alt || ctrl || key.mods.super_key {
             None
         } else if let Some(index) = tab_shortcut(key) {
-            Some(Msg::Tab(index))
+            // Number keys address saved views only; Starred has its own Shift+S.
+            (index < 4 + ctx.state.config.views.len()).then_some(Msg::Tab(index))
+        } else if matches!(
+            (key.code, key.mods.shift),
+            (KeyCode::Char('S'), _) | (KeyCode::Char('s'), true)
+        ) {
+            ctx.state.config.starred_tab().map(Msg::Tab)
+        } else if matches!(key.code, KeyCode::Up | KeyCode::Down)
+            && key.mods == KeyMods::SHIFT
+            && ctx.state.scope == Scope::List
+            && ctx.state.starred_active()
+        {
+            Some(Msg::MoveStar(if key.code == KeyCode::Up { -1 } else { 1 }))
         } else {
             match key.code {
                 KeyCode::Left if key.mods == KeyMods::NONE => {
@@ -1567,7 +1619,7 @@ impl Component for Cronk {
                 }
                 KeyCode::Right if key.mods == KeyMods::NONE => {
                     let next = ctx.state.config.active_tab + 1;
-                    (next < ctx.state.tab_names().len()).then_some(Msg::Tab(next))
+                    (next < ctx.state.config.tab_count()).then_some(Msg::Tab(next))
                 }
                 KeyCode::Down | KeyCode::Char('j') => Some(Msg::Move(1)),
                 KeyCode::Up | KeyCode::Char('k') => Some(Msg::Move(-1)),
@@ -1595,7 +1647,7 @@ impl Component for Cronk {
                 KeyCode::End => Some(Msg::Move(isize::MAX)),
                 KeyCode::Char(' ') => Some(Msg::ToggleProject),
                 KeyCode::Char('/') => Some(Msg::Action(Action::Filter)),
-                KeyCode::Char('s') => Some(Msg::Action(Action::SaveView)),
+                KeyCode::Char('s') => Some(Msg::Action(Action::ToggleStar)),
                 KeyCode::Char('n') => Some(Msg::Action(
                     if ctx.state.kind() == Some(ItemKind::MergeRequest) {
                         Action::NewMergeRequest
@@ -1628,6 +1680,13 @@ impl Component for Cronk {
 
 impl Cronk {
     pub(super) fn persist(&self, ctx: &mut Context<Self>) -> bool {
+        ctx.state.refresh_starred_stubs();
+        if ctx.state.config.active_tab >= ctx.state.config.tab_count() {
+            // The Starred tab vanished (for example its project was hidden).
+            let gone = ctx.state.config.active_tab;
+            self.switch_tab(ctx, 0);
+            self.forget_tab(ctx, gone);
+        }
         let key = ctx.state.tab_key();
         ctx.state
             .config
@@ -1636,6 +1695,16 @@ impl Cronk {
         let tab = navigation(&ctx.state);
         ctx.state.config.tab_states.insert(key, tab);
         prune_tab_routes(&mut ctx.state.config);
+        // Per-tab leftovers of a vanished tab (for example Starred) must not be
+        // inherited by whichever saved view later takes its index.
+        let tab_count = ctx.state.config.tab_count();
+        let live = |key: &String| key.parse::<usize>().map_or(true, |index| index < tab_count);
+        ctx.state.config.filters.retain(|key, _| live(key));
+        ctx.state.config.selections.retain(|key, _| live(key));
+        ctx.state.navigation_selections.retain(|key, _| live(key));
+        ctx.state.navigation_restoring.retain(live);
+        ctx.state.navigation_routes_restoring.retain(live);
+        ctx.state.tab_cache.retain(|key, _| live(key));
         ctx.state.invalidate_hidden_navigation();
         if ctx.state.config.route.as_ref().is_some_and(|route| {
             !ctx.state
@@ -1883,6 +1952,37 @@ impl Cronk {
             }
             Update::full()
         }
+    }
+
+    /// Drop all remembered state for a tab index that is vanishing or being reused.
+    fn forget_tab(&self, ctx: &mut Context<Self>, index: usize) {
+        let key = index.to_string();
+        let state = &mut ctx.state;
+        state.config.filters.remove(&key);
+        state.config.selections.remove(&key);
+        state.config.tab_states.remove(&key);
+        state.navigation_selections.remove(&key);
+        state.navigation_restoring.remove(&key);
+        state.navigation_routes_restoring.remove(&key);
+        state.tab_cache.remove(&key);
+    }
+
+    /// Star or unstar an item, adding or removing the Starred tab as needed.
+    fn toggle_star(&self, ctx: &mut Context<Self>, key: &ItemKey, title: &str) {
+        let before = ctx.state.config.starred_tab();
+        ctx.state.config.toggle_star(key, title);
+        ctx.state.refresh_starred_stubs();
+        // The last star is gone: leave and forget the vanished tab.
+        if let Some(tab) = before
+            && ctx.state.config.starred_tab().is_none()
+        {
+            if ctx.state.config.active_tab == tab {
+                self.switch_tab(ctx, 0);
+            }
+            self.forget_tab(ctx, tab);
+        }
+        self.normalize(ctx);
+        self.persist(ctx);
     }
 
     fn switch_tab(&self, ctx: &mut Context<Self>, index: usize) {
@@ -2443,19 +2543,33 @@ impl Cronk {
                     self.show_dialog(ctx, DialogKind::Filter, "Filter view", "Space-separated terms are ANDed, including repeated fields: label:foo label:bar (both labels). No OR or grouping with brackets/parentheses. Quote values with spaces: label:\"needs review\" · prefix - to exclude: -label:blocked.", vec![FormField::new("Query", &query, false)]);
                 }
             }
+            Action::ToggleStar => {
+                if let Some((key, title)) = ctx.state.star_target() {
+                    self.close_dialog(ctx);
+                    self.toggle_star(ctx, &key, &title);
+                } else {
+                    self.dialog_error(ctx, "Select or open an issue or merge request to star");
+                }
+            }
             Action::SaveView => {
                 if ctx.state.kind().is_none() { self.dialog_error(ctx, "Save views from Issues or Merge Requests"); }
                 else { self.show_dialog(ctx, DialogKind::SaveView, "Save as a tab", "The current filter becomes a persistent view", vec![FormField::new("Tab name", "", false)]); }
             }
             Action::RenameView | Action::DeleteView => {
-                if let Some(index) = ctx.state.config.active_tab.checked_sub(4) {
+                if let Some(index) = ctx
+                    .state
+                    .config
+                    .active_tab
+                    .checked_sub(4)
+                    .filter(|i| *i < ctx.state.config.views.len())
+                {
                     if let Some(view) = ctx.state.config.views.get(index) {
                         let name = view.name.clone();
                         if matches!(action, Action::RenameView) {
                             self.show_dialog(ctx, DialogKind::RenameView, "Rename saved tab", "Enter saves · Esc cancels", vec![FormField::new("Tab name", &name, false)]);
                         } else { self.show_dialog(ctx, DialogKind::Confirm(Confirmation::DeleteView(index)), "Remove saved tab?", "Only the local view is removed, not GitLab data", vec![]); }
                     }
-                } else { self.dialog_error(ctx, "The four built-in tabs cannot be renamed or removed"); }
+                } else { self.dialog_error(ctx, "The built-in and Starred tabs cannot be renamed or removed"); }
             }
             Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Search by name · Enter chooses a suggestion, then adds · Full paths and IDs also work · Blank alias keeps GitLab's short name", vec![FormField::lookup("Project", "", Completion::new(LookupKind::Projects, 0, false)), FormField::new("Short alias (optional)", "", false)]),
             Action::RemoveProject => {
@@ -2620,6 +2734,10 @@ impl Cronk {
                     ctx.state.config.views[index].name = name.into();
                 } else if let Some(kind) = ctx.state.kind() {
                     let query = ctx.state.query_text().to_owned();
+                    // The Starred tab sits after the saved views; this new view takes its index.
+                    if let Some(starred) = ctx.state.config.starred_tab() {
+                        self.forget_tab(ctx, starred);
+                    }
                     ctx.state.config.views.push(SavedView {
                         name: name.into(),
                         kind,
@@ -2796,11 +2914,9 @@ fn navigation(state: &State) -> TabState {
 }
 
 fn prune_tab_routes(config: &mut Config) {
+    let tab_count = config.tab_count();
     config.tab_states.retain(|key, tab| {
-        if !key
-            .parse::<usize>()
-            .is_ok_and(|index| index < 4 + config.views.len())
-        {
+        if !key.parse::<usize>().is_ok_and(|index| index < tab_count) {
             return false;
         }
         if tab.route.as_ref().is_some_and(|route| {

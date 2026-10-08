@@ -42,6 +42,10 @@ pub struct Config {
     pub token_env: String,
     pub projects: Vec<Project>,
     pub views: Vec<SavedView>,
+    /// Starred issues and merge requests, in display order. Portable: items are
+    /// identified by project path rather than the installation-specific ID.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub starred: Vec<StarredItem>,
     pub theme: String,
     /// Disable transient click flashes without disabling static hover feedback.
     pub animations: bool,
@@ -76,6 +80,18 @@ pub struct TabState {
     pub content_offset: usize,
     pub expanded: BTreeSet<u64>,
     pub collapsed: BTreeSet<u64>,
+}
+
+/// A starred issue or merge request. `title` is only a display fallback for
+/// items that are not currently loaded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StarredItem {
+    pub project: String,
+    pub kind: ItemKind,
+    pub iid: u64,
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +130,7 @@ impl Default for Config {
             token_env: "GITLAB_TOKEN".into(),
             projects: Vec::new(),
             views: Vec::new(),
+            starred: Vec::new(),
             theme: "midnight".into(),
             animations: true,
             user_display: UserDisplay::default(),
@@ -363,6 +380,7 @@ impl Config {
             && self.token_env == other.token_env
             && self.projects == other.projects
             && self.views == other.views
+            && self.starred == other.starred
             && self.theme == other.theme
             && self.animations == other.animations
             && self.user_display == other.user_display
@@ -372,6 +390,86 @@ impl Config {
             && self.list_refresh_secs == other.list_refresh_secs
             && self.detail_refresh_secs == other.detail_refresh_secs
             && self.filters == other.filters
+    }
+
+    /// Index of the Starred tab: always last, and present only while something
+    /// is starred in a visible workspace project.
+    pub fn starred_tab(&self) -> Option<usize> {
+        (!self.starred_keys().is_empty()).then_some(4 + self.views.len())
+    }
+
+    /// Number of tabs, including Starred when shown.
+    pub fn tab_count(&self) -> usize {
+        4 + self.views.len() + usize::from(self.starred_tab().is_some())
+    }
+
+    pub fn is_starred(&self, key: &ItemKey) -> bool {
+        self.starred_position(key).is_some()
+    }
+
+    fn project_for_path(&self, path: &str) -> Option<&Project> {
+        self.projects
+            .iter()
+            .find(|p| p.path.eq_ignore_ascii_case(path))
+    }
+
+    fn starred_position(&self, key: &ItemKey) -> Option<usize> {
+        let project = self.projects.iter().find(|p| p.id == key.project)?;
+        self.starred.iter().position(|s| {
+            s.kind == key.kind && s.iid == key.iid && s.project.eq_ignore_ascii_case(&project.path)
+        })
+    }
+
+    /// Starred items in display order whose project is a visible workspace
+    /// project. Others stay in the file for other machines but are dormant here.
+    pub fn starred_keys(&self) -> Vec<ItemKey> {
+        self.starred
+            .iter()
+            .filter_map(|s| {
+                let project = self.project_for_path(&s.project).filter(|p| p.visible)?;
+                Some(ItemKey {
+                    project: project.id,
+                    iid: s.iid,
+                    kind: s.kind,
+                })
+            })
+            .collect()
+    }
+
+    /// Stored title fallback for a starred item.
+    pub fn starred_title(&self, key: &ItemKey) -> Option<&str> {
+        self.starred_position(key)
+            .map(|i| self.starred[i].title.as_str())
+    }
+
+    /// Toggle a star; returns whether the item is now starred. New stars go last.
+    pub fn toggle_star(&mut self, key: &ItemKey, title: &str) -> bool {
+        if let Some(index) = self.starred_position(key) {
+            self.starred.remove(index);
+            return false;
+        }
+        let Some(project) = self.projects.iter().find(|p| p.id == key.project) else {
+            return false;
+        };
+        self.starred.push(StarredItem {
+            project: project.path.clone(),
+            kind: key.kind,
+            iid: key.iid,
+            title: title.to_owned(),
+        });
+        true
+    }
+
+    /// Swap two starred items, as when reordering neighbours in the displayed
+    /// (possibly filtered) list. Returns whether the order changed.
+    pub fn swap_stars(&mut self, a: &ItemKey, b: &ItemKey) -> bool {
+        match (self.starred_position(a), self.starred_position(b)) {
+            (Some(a), Some(b)) if a != b => {
+                self.starred.swap(a, b);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn clear_navigation(&mut self) {
@@ -452,6 +550,17 @@ impl Config {
             if let Err(error) = Query::parse(&view.query) {
                 bail!("view {index} has an invalid query: {error}");
             }
+        }
+        let mut starred = BTreeSet::new();
+        for (index, item) in self.starred.iter().enumerate() {
+            ensure!(
+                !item.project.trim().is_empty() && item.iid > 0,
+                "starred item {index} needs a project path and iid"
+            );
+            ensure!(
+                starred.insert((item.project.to_lowercase(), item.kind.segment(), item.iid)),
+                "starred item {index} is a duplicate"
+            );
         }
         // Filters are workspace input, not saved view definitions. Preserve even
         // incomplete queries so saving another event cannot discard typed input.
@@ -628,6 +737,12 @@ mod tests {
                 kind: ItemKind::MergeRequest,
                 query: "reviewer:@me draft:false".into(),
             }],
+            starred: vec![StarredItem {
+                project: "team/repo".into(),
+                kind: ItemKind::Issue,
+                iid: 7,
+                title: "Seven".into(),
+            }],
             theme: "light".into(),
             animations: false,
             user_display: UserDisplay::Name,
@@ -699,6 +814,44 @@ mod tests {
         assert!(loaded.route.is_none());
         assert!(loaded.section.is_none());
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn stars_toggle_reorder_and_stay_dormant_for_unavailable_projects() {
+        let project = |id, path: &str, visible| Project {
+            id,
+            path: path.into(),
+            alias: String::new(),
+            visible,
+        };
+        let mut config = Config {
+            projects: vec![project(1, "a/one", true), project(2, "b/two", false)],
+            ..Config::default()
+        };
+        let key = |project, iid| ItemKey {
+            project,
+            iid,
+            kind: ItemKind::Issue,
+        };
+        assert!(config.starred_tab().is_none());
+        assert!(config.toggle_star(&key(1, 1), "One"));
+        assert!(config.toggle_star(&key(1, 2), "Two"));
+        assert!(config.toggle_star(&key(2, 3), "Hidden"));
+        assert_eq!(config.starred_tab(), Some(4));
+        assert_eq!(config.tab_count(), 5);
+        assert_eq!(config.starred_keys(), vec![key(1, 1), key(1, 2)]);
+        assert!(config.swap_stars(&key(1, 1), &key(1, 2)));
+        assert_eq!(config.starred_keys(), vec![key(1, 2), key(1, 1)]);
+        assert!(!config.swap_stars(&key(1, 1), &key(1, 1)));
+        assert!(!config.swap_stars(&key(1, 1), &key(9, 9)));
+        assert!(!config.toggle_star(&key(1, 1), ""));
+        assert!(!config.toggle_star(&key(1, 2), ""));
+        // The hidden project's star remains for other machines but adds no tab.
+        assert!(config.starred_tab().is_none());
+        assert_eq!(config.starred.len(), 1);
+        config.validate().unwrap();
+        config.starred.push(config.starred[0].clone());
+        assert!(config.validate().is_err(), "duplicates are rejected");
     }
 
     #[test]

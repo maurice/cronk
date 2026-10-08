@@ -82,6 +82,11 @@ pub(super) fn hover_style() -> Style {
     Style::new().transform_bg(ColorTransform::elevate(0.08))
 }
 
+/// Whether the pointer is currently over the surface registered with `click(.., key, ..)`.
+pub(super) fn hovered(ctx: &Context<Cronk>, key: &str) -> bool {
+    ctx.state.feedback.hovered.contains(key)
+}
+
 pub(super) fn style(ctx: &Context<Cronk>, key: &str, base: Style) -> Style {
     if ctx.state.config.animations && ctx.state.feedback.flashes.contains_key(key) {
         base.patch(Style::new().transform_bg(ColorTransform::elevate(0.18)))

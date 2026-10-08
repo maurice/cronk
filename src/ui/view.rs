@@ -174,12 +174,17 @@ fn vertical_scrollbar(ctx: &Context<Cronk>, key: &str, colors: Colors) -> Scroll
     let track = interaction::style(ctx, key, Style::new().fg(colors.muted).bg(colors.surface));
     ScrollbarConfig::new()
         .variant(ScrollbarVariant::Standalone)
-        .gap(1)
+        .gap(CONTENT_GAP)
         .thumb('█')
         .thumb_style(thumb)
         .thumb_focus_style(thumb)
         .track_style(track)
 }
+
+/// Blank cells between scrolling content and what follows it: the scrollbar track
+/// (`vertical_scrollbar` uses the same gap) or, without one, the pane edge. It
+/// mirrors the one-cell gutter on the left.
+const CONTENT_GAP: u16 = 1;
 
 fn content_padding(left: u16) -> Padding {
     Padding {
@@ -365,6 +370,35 @@ fn dot_tooltip(
             ),
     )
     .key(key)
+}
+
+/// The star toggle: one fixed cell at the right edge of an item's first line (list
+/// rows and the detail breadcrumb), so it is always in the same place. Yellow when
+/// starred; otherwise grey and, in lists, only revealed while the row is hovered.
+fn star_button(
+    ctx: &Context<Cronk>,
+    id: impl Into<String>,
+    item: &ItemKey,
+    reveal: bool,
+    style: Style,
+    colors: Colors,
+) -> Element {
+    let id = id.into();
+    let starred = ctx.state.config.is_starred(item);
+    let (symbol, color, help) = if starred {
+        ('★', colors.yellow, "Click to remove from ★ Starred")
+    } else if reveal {
+        ('★', colors.muted, "Click to add to ★ Starred")
+    } else {
+        (' ', colors.muted, "Click to add to ★ Starred")
+    };
+    let item = item.clone();
+    click(
+        ctx,
+        id.clone(),
+        dot_tooltip(ctx, format!("{id}-tip"), symbol, color, help, style),
+        move || Msg::ToggleStar(item.clone()),
+    )
 }
 
 fn status_dot(
@@ -609,6 +643,8 @@ fn tab_bar(ctx: &Context<Cronk>, colors: Colors) -> Element {
     let mut tabs = HStack::new().height(Length::Px(1)).gap(1);
     let mut offset = 0;
     let mut active_range = (0, 0);
+    let starred_tab = ctx.state.config.starred_tab();
+    let mut starred = None;
     for (index, name) in ctx.state.tab_names().into_iter().enumerate() {
         let active = index == ctx.state.config.active_tab;
         let style = if active {
@@ -618,7 +654,11 @@ fn tab_bar(ctx: &Context<Cronk>, colors: Colors) -> Element {
         };
         let style = interaction::style(ctx, &format!("workspace-tab-{index}"), style);
         let mut spans = vec![Span::new(" ")];
-        if index < 4 {
+        if starred_tab == Some(index) {
+            spans.push(Span::new("★ ").fg(colors.yellow));
+            spans.push(Span::new("S").style(Style::new().underline()));
+            spans.push(Span::new("tarred"));
+        } else if index < 4 {
             spans.push(Span::new(name[..1].to_owned()).style(Style::new().underline()));
             spans.push(Span::new(name[1..].to_owned()));
         } else {
@@ -637,7 +677,7 @@ fn tab_bar(ctx: &Context<Cronk>, colors: Colors) -> Element {
         if active {
             active_range = (offset, offset + width);
         }
-        tabs = tabs.child(click(
+        let tab = click(
             ctx,
             format!("workspace-tab-{index}"),
             HStack::new()
@@ -646,11 +686,18 @@ fn tab_bar(ctx: &Context<Cronk>, colors: Colors) -> Element {
                 .style(style)
                 .child(Text::from_spans(spans).style(style).height(Length::Px(1))),
             move || Msg::Tab(index),
-        ));
+        );
+        if starred_tab == Some(index) {
+            // Pinned to the right edge, outside the scrolling strip of ordinary tabs.
+            starred = Some((tab, width));
+            continue;
+        }
+        tabs = tabs.child(tab);
         offset += width + 1;
     }
-    ScrollView::new()
+    let strip = ScrollView::new()
         .axis(ScrollAxis::Horizontal)
+        .width(Length::Flex(1))
         .height(Length::Px(2))
         .padding((0, 1))
         .style(Style::new().bg(colors.surface))
@@ -663,7 +710,22 @@ fn tab_bar(ctx: &Context<Cronk>, colors: Colors) -> Element {
         .child(tabs.width(Length::Px(
             offset.saturating_sub(1).min(u16::MAX as usize) as u16
         )))
-        .key("workspace-tabs")
+        .key("workspace-tabs");
+    let Some((tab, width)) = starred else {
+        return strip;
+    };
+    HStack::new()
+        .height(Length::Px(2))
+        .style(Style::new().bg(colors.surface))
+        .child(strip)
+        .child(
+            VStack::new()
+                .width(Length::Px(width as u16 + 1))
+                .height(Length::Px(2))
+                .style(Style::new().bg(colors.surface))
+                .child(tab),
+        )
+        .into()
 }
 
 /// Display name and one-line description for the theme chooser.
@@ -759,7 +821,22 @@ fn breadcrumb(ctx: &Context<Cronk>, colors: Colors) -> Element {
             spans.push(Span::new(format!("  /  {}", state.section_name())).fg(colors.accent));
         }
     }
-    row.child(rich(spans, colors.base())).into()
+    row = row.child(rich(spans, colors.base()));
+    if state.scope != Scope::List
+        && !state.project_details()
+        && let Some(key) = &state.config.route
+    {
+        row = row.child(star_button(
+            ctx,
+            "detail-star",
+            key,
+            true,
+            colors.base(),
+            colors,
+        ));
+        row = row.child(Text::new(" ").width(Length::Px(1)).style(colors.base()));
+    }
+    row.into()
 }
 
 fn context_line(state: &State, item_count: usize, colors: Colors) -> Element {
@@ -787,6 +864,10 @@ fn context_line(state: &State, item_count: usize, colors: Colors) -> Element {
                 Scope::List if state.config.active_tab == 1 => (
                     format!("{} PROJECTS", state.config.projects.len()),
                     "Space toggles visibility · Enter opens project details".to_owned(),
+                ),
+                Scope::List if state.starred_active() => (
+                    format!("{item_count} STARRED"),
+                    "Shift+↑/↓ reorder · s stars or unstars · Enter opens details".into(),
                 ),
                 Scope::List => {
                     let query = state.query_text();
@@ -898,6 +979,7 @@ fn main_list(ctx: &Context<Cronk>, items: &[&WorkItem], colors: Colors) -> Eleme
         // The child tree is already windowed. Measure it exactly so large
         // spacer heights never pollute the widget's per-row height estimates.
         .virtualize(false)
+        .padding(scrollbar_margin(len > slots))
         .height(Length::Px(
             (slots * row_height).min(u16::MAX as usize) as u16
         ))
@@ -1066,7 +1148,17 @@ fn work_row(
                 .width(Length::Px((ctx.viewport().w / 3).min(32)))
                 .height(Length::Px(1))
                 .overflow(Overflow::Ellipsis),
-        );
+        )
+        .child(star_button(
+            ctx,
+            format!("item-{}-star", item_key(&item.key)),
+            &item.key,
+            interaction::hovered(ctx, &format!("item-{}", item_key(&item.key))),
+            style,
+            colors,
+        ))
+        // Keep the star clear of the pane edge and the scrollbar.
+        .child(Text::new(" ").width(Length::Px(1)).style(style));
     let dashboard = state.config.active_tab == 0;
     let mut row = VStack::new()
         .height(Length::Px(if dashboard { 4 } else { 3 }))
@@ -1183,7 +1275,24 @@ fn empty_state(title: &str, help: &str, colors: Colors) -> Element {
         .into()
 }
 
-fn scroll_content(ctx: &Context<Cronk>, children: Vec<Element>, colors: Colors) -> ScrollView {
+/// Scrolling panes keep a `CONTENT_GAP` between their content and the right-hand
+/// scrollbar. When the content fits and there is no scrollbar, pad by the same gap
+/// so rows still don't touch the pane edge.
+fn scrollbar_margin(overflows: bool) -> Padding {
+    Padding {
+        left: 0,
+        right: if overflows { 0 } else { CONTENT_GAP },
+        top: 0,
+        bottom: 0,
+    }
+}
+
+fn scroll_content(
+    ctx: &Context<Cronk>,
+    children: Vec<Element>,
+    colors: Colors,
+    overflows: bool,
+) -> ScrollView {
     ScrollView::new()
         // Measure variable-height content before dragging so the thumb's range stays accurate.
         .virtualize(false)
@@ -1195,7 +1304,7 @@ fn scroll_content(ctx: &Context<Cronk>, children: Vec<Element>, colors: Colors) 
         .scrollbar_config(vertical_scrollbar(ctx, "detail-scrollbar", colors))
         .scroll_wheel_multiplier(3)
         .smooth_wheel_scroll(false)
-        .padding(content_padding(0))
+        .padding(scrollbar_margin(overflows))
         .style(colors.base())
         .on_scroll_to(ctx.link().callback(Msg::DetailScrolled))
         .children(children)
@@ -1359,7 +1468,9 @@ fn project_detail(ctx: &Context<Cronk>, colors: Colors) -> Element {
     }
     content.push(blank().key("detail-section-gap-0"));
     let target = state.reveal_content.then(|| state.detail_target_key());
-    let mut scroll = scroll_content(ctx, content, colors);
+    // Project details are a handful of rows; assume they fit unless the pane is tiny.
+    let overflows = content.len() + 2 > ctx.viewport().h.saturating_sub(9) as usize;
+    let mut scroll = scroll_content(ctx, content, colors, overflows);
     if let Some(target) = target {
         scroll = scroll.reveal_key(target);
     } else if let Some(offset) = state.detail_offset_request {
@@ -1857,8 +1968,14 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
     let route = details.item.key.clone();
     let epoch = state.detail_epoch;
     let callback_target = target.clone();
-    let mut scroll = scroll_content(ctx, content, colors).on_viewport_change(ctx.link().callback(
-        move |event: ScrollViewportEvent| {
+    // Until the first measurement assume a long document, as almost all are.
+    let overflows = state
+        .detail_viewport
+        .as_ref()
+        .filter(|(route, _)| *route == details.item.key)
+        .is_none_or(|(_, event)| event.metrics.len > event.metrics.visible);
+    let mut scroll = scroll_content(ctx, content, colors, overflows).on_viewport_change(
+        ctx.link().callback(move |event: ScrollViewportEvent| {
             Msg::DetailViewport(
                 Box::new(event),
                 callback_target.clone(),
@@ -1866,8 +1983,8 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                 route.clone(),
                 epoch,
             )
-        },
-    ));
+        }),
+    );
     if let Some(target) = target {
         let measured = state
             .detail_viewport
@@ -3430,6 +3547,7 @@ const HELP: &str = "\
 
 ## Workspace
 - **/** filters the current view. Save a filter as a named tab from commands.
+- **s** stars the selected/open item; **Shift+S** opens ★ Starred, **Shift+↑/↓** reorders.
 - **:** opens commands; type to search, then choose an action.
 - **r** refreshes. **?** opens this help. **q** quits outside forms.
 - The command palette exposes project creation, edits, comments,

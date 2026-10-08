@@ -84,6 +84,8 @@ pub struct TabState {
     pub content_offset: usize,
     pub expanded: BTreeSet<u64>,
     pub collapsed: BTreeSet<u64>,
+    /// Project pipeline whose jobs the cursor was inside (Projects tab only).
+    pub drilled: Option<u64>,
 }
 
 /// A starred issue or merge request. `title` is only a display fallback for
@@ -796,6 +798,7 @@ mod tests {
                     section: Some(2),
                     section_cursor: 2,
                     field: 4,
+                    drilled: None,
                     list_offset: 12,
                     content_offset: 8,
                     expanded: BTreeSet::from([91, 92]),

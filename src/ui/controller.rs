@@ -99,8 +99,18 @@ impl Component for Cronk {
             .get(&config.active_tab.to_string())
             .copied()
             .unwrap_or(0);
-        let section_last = if config.active_tab == 1 && config.project_route.is_some() {
-            2
+        let section_last = if config.active_tab == 1
+            && let Some(project) = config.project_route
+        {
+            if config
+                .projects
+                .iter()
+                .any(|p| p.id == project && p.kind_visible(ItemKind::MergeRequest))
+            {
+                2
+            } else {
+                1
+            }
         } else if config
             .route
             .as_ref()
@@ -114,6 +124,10 @@ impl Component for Cronk {
             .as_ref()
             .map_or(config.section.unwrap_or(0), |tab| tab.section_cursor)
             .min(section_last);
+        let saved_drilled = saved
+            .as_ref()
+            .and_then(|tab| tab.drilled)
+            .filter(|_| config.active_tab == 1 && config.project_route.is_some());
         let mut state = State {
             saved_config: Box::new(config.clone()),
             navigation_writer,
@@ -168,7 +182,7 @@ impl Component for Cronk {
             latest_pipeline: HashMap::new(),
             pipeline_expanded: HashSet::new(),
             pipeline_collapsed: HashSet::new(),
-            drilled: None,
+            drilled: saved_drilled,
             pipeline_epoch: 0,
             pipelines_pending: HashSet::new(),
             pipeline_detail_pending: HashSet::new(),
@@ -2849,7 +2863,7 @@ impl Cronk {
         ctx.state.detail_pending = None;
         ctx.state.trace_pending.clear();
         ctx.state.details = cache.details;
-        ctx.state.drilled = cache.drilled;
+        ctx.state.drilled = cache.drilled.or(tab.drilled);
         ctx.state.traces = cache.traces;
         ctx.state.log_views = cache.log_views;
         self.close_log_mode(ctx);
@@ -3747,6 +3761,7 @@ fn navigation(state: &State) -> TabState {
         content_offset: state.content_offset,
         expanded: state.expanded.iter().copied().collect(),
         collapsed: state.collapsed.iter().copied().collect(),
+        drilled: state.drilled,
     }
 }
 
@@ -3790,9 +3805,22 @@ fn prune_tab_routes(config: &mut Config) {
             };
             tab.section = tab.section.map(|section| section.min(last));
             tab.section_cursor = tab.section_cursor.min(last);
-        } else if tab.project_route.is_some() {
-            tab.section = tab.section.map(|_| 0);
-            tab.section_cursor = 0;
+        } else if let Some(project) = tab.project_route {
+            // Fields, Pipelines (only while merge requests are synced), Forget.
+            let last = if config
+                .projects
+                .iter()
+                .any(|p| p.id == project && p.kind_visible(ItemKind::MergeRequest))
+            {
+                2
+            } else {
+                1
+            };
+            tab.section = tab.section.map(|section| section.min(last));
+            tab.section_cursor = tab.section_cursor.min(last);
+        }
+        if tab.project_route.is_none() {
+            tab.drilled = None;
         }
         true
     });

@@ -246,6 +246,7 @@ fn tab_state(state: &State) -> TabState {
         content_offset: state.content_offset,
         expanded: state.expanded.iter().copied().collect(),
         collapsed: state.collapsed.iter().copied().collect(),
+        drilled: state.drilled,
     }
 }
 

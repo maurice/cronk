@@ -658,3 +658,41 @@ fn space_in_project_details_never_toggles_visibility_outside_a_field() {
     key(&mut ui, KeyCode::Char(' '));
     assert!(!ui.state().config.projects[0].visible);
 }
+
+#[test]
+fn tab_visits_restore_the_drilled_pipeline_and_job() {
+    let mut ui = mount(40);
+    open_pipelines(&mut ui);
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Down);
+    let drilled = ui.state().drilled.unwrap();
+    let job = ui.state().selected_job().unwrap().id;
+    ui.dispatch(Msg::Tab(2)).unwrap();
+    settle(&mut ui);
+    ui.dispatch(Msg::Tab(1)).unwrap();
+    settle(&mut ui);
+    assert_eq!(ui.state().scope, Scope::Section);
+    assert_eq!(ui.state().section_name(), "Pipelines");
+    assert_eq!(ui.state().drilled, Some(drilled));
+    assert_eq!(ui.state().selected_job().map(|j| j.id), Some(job));
+
+    // Restart: the saved tab state brings the cursor back to the same job once
+    // the (memory-only) window has loaded again.
+    let config = ui.state().config.clone();
+    let mut restarted = TestBackend::new_with_app_and_viewport(
+        App::new().focus_policy(FocusPolicy::Manual),
+        Cronk {
+            config,
+            path: None,
+            api: None,
+            demo: true,
+        },
+        (),
+        ui.viewport(),
+    );
+    settle(&mut restarted);
+    assert_eq!(restarted.state().section_name(), "Pipelines");
+    assert_eq!(restarted.state().drilled, Some(drilled));
+    assert_eq!(restarted.state().selected_job().map(|j| j.id), Some(job));
+}

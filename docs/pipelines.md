@@ -304,7 +304,7 @@ Each phase is its own branch/PR per the project workflow.
 
 Deviations from the plan above, as built:
 
-- `drilled` is **not persisted** to SQLite. It lives in `State` and survives tab switches through `TabCache`, but a restart reopens the project on its first section as before (`prune_tab_routes` is unchanged). Job expand/collapse choices are persisted as for MR jobs.
+- `drilled` is persisted in `TabState` (SQLite navigation) and restored after tab switches and restart; `prune_tab_routes` clamps the project section to the sections present for its visibility instead of resetting to Fields. The restored job cursor is provisional until page 1 and the pipeline's jobs arrive (both handlers re-align or clear it).
 - The window is kept **newest-first by `created_at`** (then id) rather than by id alone, so the demo's merge request head pipelines (which have lower synthetic ids) interleave correctly; for real GitLab data the two orders coincide.
 - The per-pipeline detail + jobs fetch runs for expanded pipelines that are active or not yet loaded, bounded to four per cycle.
 - `Msg::ProjectDetailViewport` now carries the reveal target at render time and ignores viewport events measured for a superseded target, mirroring the issue/MR detail. Without this, rapid Enter/Enter on a long project document cancelled the pending reveal (pipelines made the document long enough to expose it).

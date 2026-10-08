@@ -165,7 +165,11 @@ reviewer:@me pipeline:success draft:false
 
 Supported attributes: `project`, `label`, `state` (alias `status`), `assignee`, `author`, `reviewer`, `iteration`, `milestone`, `pipeline`, `draft`, and `kind`. All matching is case-insensitive. Labels, states, usernames and pipeline statuses are exact matches; project aliases/paths, iteration/milestone names, and free text are substring matches. `iteration:current` is a special symbolic match for each project's current iteration, which makes saved tabs follow the active sprint automatically. Use GitLab's `opened`, `closed`, or `merged` states. `@me` resolves to the authenticated username. Unknown syntax is rejected, not silently ignored.
 
-Save a filter with `s` or **Save filter as a new tab**. Rename/remove it through the command palette. Changing a saved tab's active filter persists that working filter; saving again creates another named tab. The four built-in tabs cannot be renamed/deleted.
+Save a filter with **Save filter as a new tab** in the command palette. Rename/remove it through the command palette. Changing a saved tab's active filter persists that working filter; saving again creates another named tab. The four built-in tabs cannot be renamed/deleted.
+
+### Starred items
+
+Press **s** on a selected row or in an open issue/merge request (or run **Star / unstar** from the command palette; `bookmark`, `favourite` and `favorite` find it too) to star it. Rows show a star at the right edge of their first line: grey on hover to add, always yellow when starred, and clicking it never opens the item. Detail views show the same star at the right of the breadcrumb row. While anything is starred a right-aligned **★ Starred** tab appears (shortcut **Shift+S**); it lists all starred items with the ordinary row layout and opens the ordinary details view. **Shift+Up / Shift+Down** reorder it. Stars are saved as `[[starred]]` entries in the portable config (by project path), so the list and its order travel between machines; entries for projects that are not visible in a workspace stay dormant.
 
 ## Configuration and persistence
 

@@ -1473,7 +1473,7 @@ fn save_and_rename_a_view_through_focused_keyboard_dialogs() {
     key(&mut ui, KeyCode::Char('/'));
     ui.send_paste("state:opened").unwrap();
     key(&mut ui, KeyCode::Enter);
-    key(&mut ui, KeyCode::Char('s'));
+    palette_command(&mut ui, "save filter");
     ui.send_paste("Open issues").unwrap();
     key(&mut ui, KeyCode::Enter);
     assert_eq!(ui.state().config.active_tab, 4);
@@ -2864,7 +2864,7 @@ fn config_commits_immediately_navigation_flushes_and_restart_restores_the_route(
     );
     key(&mut ui, KeyCode::Enter);
     assert_eq!(persisted(&ui, &path).filters["2"], "state:opened");
-    key(&mut ui, KeyCode::Char('s'));
+    palette_command(&mut ui, "save filter");
     ui.send_paste("Restart queue").unwrap();
     key(&mut ui, KeyCode::Enter);
     assert_eq!(persisted(&ui, &path).views[0].name, "Restart queue");

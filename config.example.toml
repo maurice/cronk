@@ -34,3 +34,12 @@ detail_refresh_secs = 10 # minimum 2; use 5 for faster details
 # name = "My iteration"
 # kind = "issue"
 # query = 'label:"team::payments" assignee:@me state:opened'
+
+# Starred issues and merge requests (press `s`, or use the command palette). Their
+# order is the order of the right-aligned "★ Starred" tab. Projects are identified
+# by path so the list works on any machine that has those projects in its workspace.
+# [[starred]]
+# project = "company/division/team/planning"
+# kind = "issue" # issue | merge_request
+# iid = 42
+# title = "Fallback title shown until the item has loaded"

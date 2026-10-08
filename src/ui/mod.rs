@@ -107,6 +107,9 @@ pub struct State {
     pub demo: bool,
     pub scope: Scope,
     pub items: Vec<WorkItem>,
+    /// Placeholder rows for starred items that are not (yet) in `items`, so
+    /// every star stays visible and removable on the Starred tab.
+    pub(super) starred_stubs: Vec<WorkItem>,
     pub user: User,
     user_formatter: UserFormatter,
     pub details: Option<Details>,
@@ -274,6 +277,7 @@ pub enum Action {
     Reply,
     Resolve,
     RetryJob,
+    ToggleStar,
     Themes,
     Help,
     Quit,
@@ -298,10 +302,22 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("Reply to selected discussion", Action::Reply),
     ("Resolve / reopen selected discussion", Action::Resolve),
     ("Retry selected job", Action::RetryJob),
+    (
+        "Star / unstar this issue or merge request",
+        Action::ToggleStar,
+    ),
     ("Choose theme", Action::Themes),
     ("Keyboard help", Action::Help),
     ("Quit", Action::Quit),
 ];
+
+/// Extra search words for commands, so users can find them by other names.
+fn command_aliases(action: Action) -> &'static [&'static str] {
+    match action {
+        Action::ToggleStar => &["bookmark", "favourite", "favorite", "starred"],
+        _ => &[],
+    }
+}
 
 pub enum Msg {
     Hover(String, bool),
@@ -335,6 +351,10 @@ pub enum Msg {
     SetupValidated(u64, Box<onboarding::Validation>),
     MutationDone(Result<(), String>),
     Tab(usize),
+    /// Star or unstar a specific issue or merge request (row/header star icon).
+    ToggleStar(ItemKey),
+    /// Reorder the selected item on the Starred tab.
+    MoveStar(isize),
     Move(isize),
     Select(usize),
     Activate(usize),
@@ -655,6 +675,7 @@ impl State {
             1 => "Projects",
             2 => "Issues",
             3 => "Merge Requests",
+            n if self.config.starred_tab() == Some(n) => "Starred",
             n => self
                 .config
                 .views
@@ -667,7 +688,54 @@ impl State {
             .into_iter()
             .map(str::to_owned)
             .chain(self.config.views.iter().map(|v| v.name.clone()))
+            .chain(self.config.starred_tab().map(|_| "Starred".to_owned()))
             .collect()
+    }
+    /// The Starred tab lists every starred item in its saved, user-chosen order.
+    pub fn starred_active(&self) -> bool {
+        self.config.starred_tab() == Some(self.config.active_tab)
+    }
+
+    /// Rebuild placeholder rows for starred items missing from `items`.
+    pub(super) fn refresh_starred_stubs(&mut self) {
+        let keys = self.config.starred_keys();
+        let loaded: HashSet<&ItemKey> = self.items.iter().map(|i| &i.key).collect();
+        let stubs: Vec<WorkItem> = keys
+            .into_iter()
+            .filter(|key| !loaded.contains(key))
+            .map(|key| WorkItem {
+                title: self.config.starred_title(&key).unwrap_or_default().into(),
+                state: "opened".into(),
+                key,
+                ..WorkItem::default()
+            })
+            .collect();
+        self.starred_stubs = stubs;
+    }
+
+    /// Item the star toggle applies to: the open item, else the selected row.
+    pub fn star_target(&self) -> Option<(ItemKey, String)> {
+        if self.scope != Scope::List {
+            let key = self.config.route.as_ref()?;
+            let title = self
+                .details
+                .as_ref()
+                .filter(|d| d.item.key == *key)
+                .map(|d| d.item.title.clone())
+                .or_else(|| {
+                    self.items
+                        .iter()
+                        .find(|i| i.key == *key)
+                        .map(|i| i.title.clone())
+                })
+                .unwrap_or_default();
+            return Some((key.clone(), title));
+        }
+        if self.config.active_tab == 1 {
+            return None;
+        }
+        self.visible_item_at(self.scroll.selected)
+            .map(|i| (i.key.clone(), i.title.clone()))
     }
     pub fn tab_key(&self) -> String {
         self.config.active_tab.to_string()
@@ -724,7 +792,27 @@ impl State {
 
     fn matching_items(&self) -> impl Iterator<Item = &WorkItem> {
         let query = Query::parse(self.query_text()).unwrap_or_default();
-        self.items.iter().filter(move |item| {
+        let starred = self.starred_active();
+        let starred_keys: HashSet<ItemKey> = if starred {
+            self.config.starred_keys().into_iter().collect()
+        } else {
+            HashSet::new()
+        };
+        let loaded: HashSet<&ItemKey> = if starred {
+            self.items.iter().map(|i| &i.key).collect()
+        } else {
+            HashSet::new()
+        };
+        let stubs = if starred {
+            &self.starred_stubs[..]
+        } else {
+            &[]
+        };
+        let stubs = stubs.iter().filter(move |item| !loaded.contains(&item.key));
+        self.items.iter().chain(stubs).filter(move |item| {
+            if starred && !starred_keys.contains(&item.key) {
+                return false;
+            }
             let Some(project) = self.project(item.key.project).filter(|p| p.visible) else {
                 return false;
             };
@@ -749,7 +837,19 @@ impl State {
 
     /// Total order of the list: dashboard urgency, or newest first elsewhere.
     fn visible_order(&self, a: &WorkItem, b: &WorkItem) -> Ordering {
-        if self.config.active_tab == 0 {
+        if self.starred_active() {
+            // Saved order, which the user controls with Shift+Up / Shift+Down.
+            let rank = |item: &WorkItem| {
+                self.project(item.key.project).and_then(|project| {
+                    self.config.starred.iter().position(|s| {
+                        s.kind == item.key.kind
+                            && s.iid == item.key.iid
+                            && s.project.eq_ignore_ascii_case(&project.path)
+                    })
+                })
+            };
+            rank(a).cmp(&rank(b))
+        } else if self.config.active_tab == 0 {
             a.attention_rank(self.user.id)
                 .cmp(&b.attention_rank(self.user.id))
                 .then(b.updated_at.cmp(&a.updated_at))
@@ -909,7 +1009,16 @@ impl State {
         let mut matches: Vec<_> = COMMANDS
             .iter()
             .copied()
-            .filter_map(|c| command_match(c.0, q).map(|in_order| (!in_order, c)))
+            .filter_map(|c| {
+                command_match(c.0, q)
+                    .or_else(|| {
+                        command_aliases(c.1)
+                            .iter()
+                            .any(|alias| command_match(alias, q).is_some())
+                            .then_some(true)
+                    })
+                    .map(|in_order| (!in_order, c))
+            })
             .collect();
         // Stable: label-order matches first, otherwise declaration order.
         matches.sort_by_key(|(out_of_order, _)| *out_of_order);

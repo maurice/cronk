@@ -490,7 +490,9 @@ fn selection_end(ui: &Ui, y: u16) -> u16 {
 }
 
 fn scrollbar_column(ui: &Ui, key: &str) -> Option<u16> {
-    let rect = ui.rect_of_key(&key.to_owned().into())?;
+    let rect = ui
+        .rect_of_key(&key.to_owned().into())
+        .unwrap_or_else(|| panic!("missing pane {key}"));
     let frame = ui.capture_frame();
     let x = (rect.x + rect.w as i16 - 1) as u16;
     (0..rect.h)
@@ -498,69 +500,78 @@ fn scrollbar_column(ui: &Ui, key: &str) -> Option<u16> {
         .then_some(x)
 }
 
-#[test]
-fn selection_ends_at_the_same_column_with_and_without_a_scrollbar() {
-    let mut ui = mount(config(), None);
-    key(&mut ui, KeyCode::Char('I'));
-    let w = ui.viewport().w;
-    let list_y = ui.rect_of_key(&"main-list-2".to_owned().into()).unwrap().y as u16;
-    assert!(
-        scrollbar_column(&ui, "main-list-2").is_some(),
-        "long list scrolls"
-    );
-    let with_bar = selection_end(&ui, list_y);
-    assert_eq!(
-        with_bar,
-        w - 3,
-        "gap + scrollbar track follow the selection"
-    );
-    // A short list has no scrollbar but keeps the same margin.
-    star(&mut ui);
-    key(&mut ui, KeyCode::Char('S'));
-    assert!(scrollbar_column(&ui, "main-list-4").is_none());
-    assert_eq!(selection_end(&ui, list_y), with_bar);
-    // The Projects list is the same widget and follows the same rule.
-    key(&mut ui, KeyCode::Char('P'));
-    let projects = ui.rect_of_key(&"main-list-1".to_owned().into()).unwrap();
-    let end = selection_end(&ui, projects.y as u16);
-    assert_eq!(end, with_bar, "projects list");
+/// Blank cells between the selection fill and the scrollbar track, or the pane edge.
+fn right_gap(ui: &Ui, pane: &str, y: u16) -> u16 {
+    let end = selection_end(ui, y);
+    let limit = scrollbar_column(ui, pane).unwrap_or(ui.viewport().w);
+    limit - end - 1
 }
 
 #[test]
-fn details_keep_the_same_right_margin_with_and_without_a_scrollbar() {
+fn lists_keep_a_one_cell_gap_before_the_scrollbar_or_the_pane_edge() {
+    let mut ui = mount(config(), None);
+    key(&mut ui, KeyCode::Char('I'));
+    let y = ui
+        .rect_of_key(&"main-list-2-scrollbar-pointer".to_owned().into())
+        .unwrap()
+        .y as u16;
+    assert!(
+        scrollbar_column(&ui, "main-list-2-scrollbar-pointer").is_some(),
+        "long list scrolls"
+    );
+    assert_eq!(
+        right_gap(&ui, "main-list-2-scrollbar-pointer", y),
+        1,
+        "with a scrollbar"
+    );
+    star(&mut ui);
+    key(&mut ui, KeyCode::Char('S'));
+    assert!(scrollbar_column(&ui, "main-list-4-scrollbar-pointer").is_none());
+    assert_eq!(
+        right_gap(&ui, "main-list-4-scrollbar-pointer", y),
+        1,
+        "without a scrollbar"
+    );
+    // The Projects list is the same widget and follows the same rule.
+    key(&mut ui, KeyCode::Char('P'));
+    let y = ui
+        .rect_of_key(&"main-list-1-scrollbar-pointer".to_owned().into())
+        .unwrap()
+        .y as u16;
+    assert_eq!(
+        right_gap(&ui, "main-list-1-scrollbar-pointer", y),
+        1,
+        "projects"
+    );
+}
+
+#[test]
+fn details_keep_a_one_cell_gap_before_the_scrollbar_or_the_pane_edge() {
+    let section = |ui: &Ui| {
+        ui.rect_of_key(&"detail-section-0".to_owned().into())
+            .unwrap()
+            .y as u16
+    };
     let mut ui = mount(config(), None);
     key(&mut ui, KeyCode::Char('I'));
     key(&mut ui, KeyCode::Enter);
-    settle(&mut ui);
-    let scroll = ui.rect_of_key(&"detail-scrollbar".to_owned().into());
-    let y = ui
-        .rect_of_key(&"detail-section-0".to_owned().into())
-        .unwrap()
-        .y as u16;
-    let with_bar = selection_end(&ui, y);
-    assert_eq!(with_bar, ui.viewport().w - 3, "{scroll:?}");
-    // Make the document fit: a very tall terminal removes the scrollbar.
+    assert!(scrollbar_column(&ui, "detail-scrollbar-pointer").is_some());
+    assert_eq!(right_gap(&ui, "detail-scrollbar-pointer", section(&ui)), 1);
+    // A very tall terminal makes the document fit, removing the scrollbar.
     let mut tall = mount_tall();
     key(&mut tall, KeyCode::Char('I'));
     key(&mut tall, KeyCode::Enter);
-    settle(&mut tall);
-    assert!(scrollbar_column(&tall, "detail-scrollbar").is_none());
-    let y = tall
-        .rect_of_key(&"detail-section-0".to_owned().into())
-        .unwrap()
-        .y as u16;
-    assert_eq!(selection_end(&tall, y), with_bar);
+    assert!(scrollbar_column(&tall, "detail-scrollbar-pointer").is_none());
+    assert_eq!(
+        right_gap(&tall, "detail-scrollbar-pointer", section(&tall)),
+        1
+    );
     // Project details are short, so they have no scrollbar either.
     let mut ui = mount(config(), None);
     key(&mut ui, KeyCode::Char('P'));
     key(&mut ui, KeyCode::Enter);
-    settle(&mut ui);
-    assert!(scrollbar_column(&ui, "detail-scrollbar").is_none());
-    let y = ui
-        .rect_of_key(&"detail-section-0".to_owned().into())
-        .unwrap()
-        .y as u16;
-    assert_eq!(selection_end(&ui, y), with_bar, "project details");
+    assert!(scrollbar_column(&ui, "detail-scrollbar-pointer").is_none());
+    assert_eq!(right_gap(&ui, "detail-scrollbar-pointer", section(&ui)), 1);
 }
 
 fn mount_tall() -> Ui {

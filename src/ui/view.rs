@@ -174,15 +174,17 @@ fn vertical_scrollbar(ctx: &Context<Cronk>, key: &str, colors: Colors) -> Scroll
     let track = interaction::style(ctx, key, Style::new().fg(colors.muted).bg(colors.surface));
     ScrollbarConfig::new()
         .variant(ScrollbarVariant::Standalone)
-        .gap(1)
+        .gap(CONTENT_GAP)
         .thumb('█')
         .thumb_style(thumb)
         .thumb_focus_style(thumb)
         .track_style(track)
 }
 
-/// Width of the standalone scrollbar: its one-cell gap plus the track.
-const SCROLLBAR_COLUMNS: u16 = 2;
+/// Blank cells between scrolling content and what follows it: the scrollbar track
+/// (`vertical_scrollbar` uses the same gap) or, without one, the pane edge. It
+/// mirrors the one-cell gutter on the left.
+const CONTENT_GAP: u16 = 1;
 
 fn content_padding(left: u16) -> Padding {
     Padding {
@@ -1273,13 +1275,13 @@ fn empty_state(title: &str, help: &str, colors: Colors) -> Element {
         .into()
 }
 
-/// Scrolling panes keep the same right margin whether or not a scrollbar is shown:
-/// a scrollbar takes `SCROLLBAR_COLUMNS` (a gap, then the track), so when the content
-/// fits we pad by the same amount instead of letting rows touch the pane edge.
+/// Scrolling panes keep a `CONTENT_GAP` between their content and the right-hand
+/// scrollbar. When the content fits and there is no scrollbar, pad by the same gap
+/// so rows still don't touch the pane edge.
 fn scrollbar_margin(overflows: bool) -> Padding {
     Padding {
         left: 0,
-        right: if overflows { 0 } else { SCROLLBAR_COLUMNS },
+        right: if overflows { 0 } else { CONTENT_GAP },
         top: 0,
         bottom: 0,
     }

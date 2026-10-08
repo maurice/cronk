@@ -85,7 +85,7 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | Mouse click / wheel | Open rows, choose tabs/sections, select fields, scroll |
 | Scrollbar track click / thumb drag | Scroll the corresponding viewport without activating its contents |
 | `Space` in Projects | Include/hide the selected project in other lists |
-| `Space` in Jobs | Expand/collapse the selected job, including running jobs |
+| `Space` on a job | Expand/collapse the selected job, including running jobs |
 | `Enter` on a job | Focus its logs (expanding if needed); arrows/page keys scroll logs |
 | `Ctrl+↑/↓`, `Ctrl+PageUp/PageDown` on a job | Scroll its logs without entering log focus |
 | `z` on a job / in its logs | Toggle zoom directly; mouse wheel and draggable scrollbar scroll zoomed logs |
@@ -100,7 +100,7 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | `c` in a detail | Add a comment |
 | `R` / `Enter` in Discussions | Reply to the selected thread |
 | `x` in Discussions | Confirm resolve/reopen |
-| `r` in Jobs | Confirm retry of the selected finished job |
+| `r` on a job | Confirm retry of the selected finished job |
 | `r` elsewhere / `Ctrl+R` | Refresh all visible projects and the open detail |
 | `Ctrl+J` in a multiline editor | Insert a newline (`Enter` submits) |
 | `?` | Keyboard guide |
@@ -114,7 +114,7 @@ Overflowing lists, detail panes, dialogs, and multiline editors show a theme-col
 
 The Dashboard shows open work where you are the author, assignee, or (for MRs) a reviewer. Each row separates **why it is here** (your role) from its **attention signals**: failed pipeline, known unresolved threads, reviewer assignment, missing reviewers on your ready MR, passing/in-progress checks, draft state, or otherwise open work. Multiple signals can appear together. It orders actionable blockers first, then review assignments and reviewer gaps, then checks in progress, drafts, other MRs, and issues. Reviewer assignment does not prove a review is still pending, and a missing discussion count is unknown rather than zero. Passing checks are not a claim that approvals, mergeability, or company policy checks are satisfied. Enter opens the real detail while preserving the Dashboard as the return destination.
 
-Issue and MR details are **one continuous document**, with one main document scrollbar and no section sidebar or split panes; expanded job logs also have their own history scrollbars. Issues show Fields, Description, and all Activity (newest first). MRs show Fields, Description, Pipeline, Jobs, every Discussion and its notes, and Changes. Nothing needs to be opened just to read a section; completed job logs remain collapsed until requested.
+Issue and MR details are **one continuous document**, with one main document scrollbar and no section sidebar or split panes; expanded job logs also have their own history scrollbars. Issues show Fields, Description, and all Activity (newest first). MRs show Fields, Description, Pipeline (summary and jobs), every Discussion and its notes, and Changes. Nothing needs to be opened just to read a section; completed job logs remain collapsed until requested.
 
 **Tab / Shift+Tab or Up / Down** select sections and bring their heading into view. The current section has a selection background; GitLab label colors stay intact. **Enter** focuses a section's actions without replacing the document: choose/edit fields, expand or retry jobs, reply to or resolve discussions, or edit the description. **Esc** returns to section navigation without resetting the viewport, then returns to the work list. **PageUp / PageDown**, the wheel, and the scrollbar scroll the whole document except when page keys are focusing job logs or the wheel is over zoomed logs. Clicking a section heading selects it; clicking a field edits it, a job toggles it, and a discussion selects its thread.
 
@@ -122,11 +122,11 @@ Issue and MR details are **one continuous document**, with one main document scr
 
 Running jobs expand automatically, so concurrent live logs remain visible together. **Space** or the job's **+/−** header toggles expansion; a manual collapse survives refreshes, tab switches, and restart. Selection styling runs alongside the entire expanded job, not just its header.
 
-In Jobs, **↑/↓** choose a job. **Enter** focuses its logs; **↑/↓**, **PageUp/PageDown**, and **Home/End** then navigate the output. **Ctrl+↑/↓** and **Ctrl+PageUp/PageDown** scroll the selected job's logs without focusing it (where the terminal reports those combinations). **z** toggles zoom straight from selection or log focus. Zoom reclaims the normal application chrome, keeping only a contextual shortcut header and log status, with a proportional, clickable/draggable scrollbar and mouse-wheel scrolling. First opening zoom follows the tail by default; an existing manually scrolled position is preserved.
+In the Pipeline section, **Enter** on the heading lands on the first job and **↑/↓** choose a job; the read-only summary rows above the jobs are skipped, like read-only fields. **Enter** focuses its logs; **↑/↓**, **PageUp/PageDown**, and **Home/End** then navigate the output. **Ctrl+↑/↓** and **Ctrl+PageUp/PageDown** scroll the selected job's logs without focusing it (where the terminal reports those combinations). **z** toggles zoom straight from selection or log focus. Zoom reclaims the normal application chrome, keeping only a contextual shortcut header and log status, with a proportional, clickable/draggable scrollbar and mouse-wheel scrolling. First opening zoom follows the tail by default; an existing manually scrolled position is preserved.
 
 At the bottom, incoming output keeps the viewport following the live tail. Scrolling away from the bottom anchors the visible source lines while new output arrives below. Returning to the bottom, or pressing **End**, resumes following. The same rule applies to inline and zoomed logs.
 
-In focused or zoomed logs, **/** opens a literal, case-insensitive search over fetched history. **Enter** jumps to a match; **n/N** move forward/backward through matching lines with wraparound. Matching substrings on the current matching line use a strong yellow background; other matches use a softer yellow. Both keep readable dark text, including across ANSI color changes, and the stronger highlight moves with **n/N**. Search does not filter or edit the log. **Esc** closes search, then zoom, then log focus, before leaving Jobs. A zoom opened directly from selection returns directly to job navigation.
+In focused or zoomed logs, **/** opens a literal, case-insensitive search over fetched history. **Enter** jumps to a match; **n/N** move forward/backward through matching lines with wraparound. Matching substrings on the current matching line use a strong yellow background; other matches use a softer yellow. Both keep readable dark text, including across ANSI color changes, and the stronger highlight moves with **n/N**. Search does not filter or edit the log. **Esc** closes search, then zoom, then log focus, before leaving the Pipeline section. A zoom opened directly from selection returns directly to job navigation.
 
 Log rendering preserves ANSI SGR colors (standard/bright, 256-color, and truecolor) and supported text styles, inline and fullscreen. Styles carry across lines and fetch chunks, including when scrolling into the middle of colored output. Cursor movement, screen clearing, clipboard/OSC commands, and other terminal controls remain stripped; this is not a terminal emulator. Programs must actually emit ANSI color codes into the job trace—colors suppressed by the CI tool cannot be recovered.
 
@@ -154,7 +154,7 @@ New issue/MR forms suggest projects from your workspace by alias or path. **Add 
 
 ![Two running jobs with concurrent live tails](docs/jobs.png)
 
-All running jobs in the open MR's head pipeline are expanded automatically and fetched independently. Finished jobs collapse unless explicitly expanded. The inline Pipeline section shows the summary; Jobs displays every job and its live tail in the same document, without duplicating logs. Select a finished job to inspect or retry it. Large pipelines still require scrolling when their panels cannot fit on one screen.
+All running jobs in the open MR's head pipeline are expanded automatically and fetched independently. Finished jobs collapse unless explicitly expanded. The inline Pipeline section shows the summary (status, trigger source, ref, run time, last update, who started it, job counts, and web URL) followed by every job and its live tail in the same document, without duplicating logs. Select a finished job to inspect or retry it. Large pipelines still require scrolling when their panels cannot fit on one screen.
 
 Logs are **near-real-time REST polling**, not a push stream. Each job keeps a byte offset, requests new data with HTTP Range, and appends only new text. UTF-8 and terminal escape sequences are handled across chunk boundaries; OSC/DCS and terminal controls are stripped. Responses are capped at 256 KiB of source bytes; the UI retains the latest 128 KiB per job. Completed logs are drained to EOF. Panels display trailing lines rather than a full searchable log archive.
 

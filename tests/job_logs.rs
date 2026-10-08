@@ -32,7 +32,7 @@ fn mount(theme: &str) -> Ui {
         projects: demo::projects(),
         active_tab: 3,
         route: Some(route),
-        section: Some(3),
+        section: Some(2),
         theme: theme.into(),
         animations: false,
         onboarding: false,
@@ -105,7 +105,7 @@ fn mount(theme: &str) -> Ui {
     ui.state_mut().log_views.clear();
     ui.state_mut().config.field = 0;
     ui.state_mut().content_offset = 0;
-    ui.dispatch(Msg::Section(3)).unwrap();
+    ui.dispatch(Msg::Section(2)).unwrap();
     settle(&mut ui);
     let job = ui.rect_of_key(&format!("job-{JOB}").into()).unwrap();
     ui.dispatch(Msg::DetailScrolled(

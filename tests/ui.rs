@@ -2158,7 +2158,7 @@ fn cache_finished_job(ui: &mut Ui, marker: &str) -> u64 {
         Ok(Box::new(details)),
     ))
     .unwrap();
-    open_section(ui, "Jobs");
+    open_section(ui, "Pipeline");
     for _ in 0..index {
         key(ui, KeyCode::Down);
     }
@@ -2232,7 +2232,6 @@ fn loading_detail_sections_render_skeletons_but_refresh_keeps_cached_content() {
     settle_layout(&mut ui);
     let text = ui.capture_frame().plain_text();
     assert!(text.contains("Loading Pipeline…"), "{text}");
-    assert!(text.contains("Loading Jobs…"), "{text}");
     assert!(text.contains("120/300"), "{text}");
     if let Ok(path) = std::env::var("CRONK_CAPTURE_PROGRESS") {
         std::fs::write(path, ui.capture_ui_snapshot().to_png_default().unwrap()).unwrap();
@@ -2249,7 +2248,6 @@ fn loading_detail_sections_render_skeletons_but_refresh_keeps_cached_content() {
         !text.contains("Loading Pipeline…"),
         "cached sections stay visible during refresh"
     );
-    assert!(!text.contains("Loading Jobs…"));
 }
 
 #[test]
@@ -2783,11 +2781,11 @@ fn a_finished_job_is_not_marked_drained_until_a_no_progress_eof_chunk() {
     let mut ui = mount(config(), None);
     key(&mut ui, KeyCode::Char('M'));
     key(&mut ui, KeyCode::Enter);
-    for _ in 0..3 {
+    for _ in 0..2 {
         key(&mut ui, KeyCode::Tab);
     }
     key(&mut ui, KeyCode::Enter);
-    assert_eq!(ui.state().section_name(), "Jobs");
+    assert_eq!(ui.state().section_name(), "Pipeline");
     let key = ui.state().config.route.clone().unwrap();
     let epoch = ui.state().detail_epoch;
     let job = ui.state().details.as_ref().unwrap().jobs[0].id;
@@ -2887,7 +2885,7 @@ fn every_tabs_navigation_flushes_and_survives_restart() {
                     assert_eq!(ui.state().config.field, 2);
                 }
                 3 => {
-                    open_section(&mut ui, "Jobs");
+                    open_section(&mut ui, "Pipeline");
                     persisted_tab(&ui, &path);
                     key(&mut ui, KeyCode::Down);
                     persisted_tab(&ui, &path);
@@ -3196,11 +3194,11 @@ fn retry_job_confirmation_uses_the_pipeline_project_and_falls_back_to_the_mr_pro
             Ok(Box::new(details)),
         ))
         .unwrap();
-        for _ in 0..3 {
+        for _ in 0..2 {
             key(&mut ui, KeyCode::Tab);
         }
         key(&mut ui, KeyCode::Enter);
-        assert_eq!(ui.state().section_name(), "Jobs");
+        assert_eq!(ui.state().section_name(), "Pipeline");
         key(&mut ui, KeyCode::Tab);
         assert_eq!(ui.state().config.field, 1);
         key(&mut ui, KeyCode::Char('r'));

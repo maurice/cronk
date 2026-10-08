@@ -105,7 +105,7 @@ impl Component for Cronk {
             .as_ref()
             .is_some_and(|k| k.kind == ItemKind::MergeRequest)
         {
-            5
+            4
         } else {
             2
         };
@@ -792,7 +792,7 @@ impl Component for Cronk {
                             .shared_details
                             .insert(key.clone(), ((*details).clone(), due));
                         ctx.state.details = Some(*details);
-                        if ctx.state.section_name() == "Jobs" {
+                        if ctx.state.section_name() == "Pipeline" {
                             if let Some(index) = ctx
                                 .state
                                 .details
@@ -1077,7 +1077,7 @@ impl Component for Cronk {
                                 );
                             }
                         }
-                        "Jobs" => {
+                        "Pipeline" => {
                             if let Some(job) = ctx
                                 .state
                                 .details
@@ -1782,7 +1782,7 @@ impl Component for Cronk {
                 )),
                 KeyCode::Char('c') => Some(Msg::Action(Action::Comment)),
                 KeyCode::Char('r') => Some(Msg::Action(
-                    if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Jobs" {
+                    if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Pipeline" {
                         Action::RetryJob
                     } else {
                         Action::Refresh
@@ -2450,7 +2450,7 @@ impl Cronk {
                     "Fields" if ctx.state.project_details() => 4,
                     "Forget this project" => 1,
                     "Fields" => ctx.state.fields().len(),
-                    "Jobs" => ctx.state.details.as_ref().map_or(0, |d| d.jobs.len()),
+                    "Pipeline" => ctx.state.details.as_ref().map_or(0, |d| d.jobs.len()),
                     "Discussions" => ctx
                         .state
                         .details
@@ -2855,14 +2855,14 @@ impl Cronk {
                 }
             }
             Action::RetryJob => {
-                let job = if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Jobs" {
+                let job = if ctx.state.scope == Scope::Section && ctx.state.section_name() == "Pipeline" {
                     ctx.state.details.as_ref().and_then(|d| d.jobs.get(ctx.state.config.field)).cloned()
                 } else { None };
                 if let Some(job) = job.filter(Job::retryable) {
                     let project = ctx.state.details.as_ref().and_then(|d| d.jobs_project)
                         .unwrap_or_else(|| ctx.state.config.route.as_ref().map_or(0, |k| k.project));
                     self.show_dialog(ctx, DialogKind::Confirm(Confirmation::Mutate(Mutation::RetryJob { project, job: job.id })), "Retry pipeline job?", &format!("{} · this consumes GitLab runner resources", job.name), vec![]);
-                } else { self.dialog_error(ctx, "Select a finished, retryable job in the Jobs section"); }
+                } else { self.dialog_error(ctx, "Select a finished, retryable job in the Pipeline section"); }
             }
         }
         Update::full()
@@ -3173,7 +3173,7 @@ fn prune_tab_routes(config: &mut Config) {
         }
         if let Some(route) = &tab.route {
             let last = if route.kind == ItemKind::MergeRequest {
-                5
+                4
             } else {
                 2
             };

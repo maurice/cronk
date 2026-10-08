@@ -203,6 +203,89 @@ pub struct Pipeline {
     pub id: u64,
     pub status: String,
     pub web_url: String,
+    /// push, schedule, merge_request_event, web, api, trigger, pipeline, parent_pipeline, …
+    pub source: Option<String>,
+    /// Branch/tag, or `refs/merge-requests/<iid>/head` for MR pipelines.
+    #[serde(rename = "ref")]
+    pub ref_name: Option<String>,
+    pub sha: Option<String>,
+    /// `workflow:name`; GitLab sends `null` when unset.
+    pub name: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    // Only on the single-pipeline endpoint and on MR `head_pipeline`.
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    /// Run time in seconds; null while running.
+    pub duration: Option<u64>,
+    pub queued_duration: Option<u64>,
+    pub user: Option<User>,
+}
+
+impl Pipeline {
+    pub fn active(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "created" | "waiting_for_resource" | "preparing" | "pending" | "running"
+        )
+    }
+
+    /// IID for `refs/merge-requests/<iid>/head|merge` refs.
+    pub fn merge_request_iid(&self) -> Option<u64> {
+        self.ref_name
+            .as_deref()?
+            .strip_prefix("refs/merge-requests/")?
+            .split('/')
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    /// Short ref for display: `!<iid>` for MR pipelines, otherwise the branch/tag.
+    pub fn ref_label(&self) -> String {
+        match self.merge_request_iid() {
+            Some(iid) => format!("!{iid}"),
+            None => self.ref_name.clone().unwrap_or_default(),
+        }
+    }
+
+    /// Humanised trigger source. Unknown values pass through.
+    pub fn source_label(&self) -> String {
+        match self.source.as_deref().unwrap_or("") {
+            "merge_request_event" => "merge request".into(),
+            "parent_pipeline" => "parent pipeline".into(),
+            "external_pull_request_event" => "external PR".into(),
+            "ondemand_dast_scan" | "ondemand_dast_validation" => "on-demand scan".into(),
+            "security_orchestration_policy" => "security policy".into(),
+            other => other.replace('_', " "),
+        }
+    }
+
+    /// Elapsed run time in seconds: GitLab's `duration` once known, or wall time since
+    /// start (or creation) while active. Finished pipelines without a duration give None.
+    pub fn elapsed_secs(&self, now_unix: i64) -> Option<u64> {
+        if let Some(duration) = self.duration {
+            return Some(duration);
+        }
+        if !self.active() {
+            return None;
+        }
+        let start = self.started_at.as_deref().or(self.created_at.as_deref())?;
+        let start = crate::dates::parse_unix(start)?;
+        Some(now_unix.saturating_sub(start).max(0) as u64)
+    }
+}
+
+/// `3m 12s`, `1h 04m`, `45s`.
+pub fn format_duration(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h {m:02}m")
+    } else if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

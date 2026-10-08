@@ -3,6 +3,9 @@
 //! remain running after 40 synthetic progress steps; two jobs run simultaneously in each
 //! running pipeline. Unknown item/job IDs are explicitly identified rather than fabricated.
 
+/// Demo "now": 2026-09-28T12:00:00Z, after every fixture timestamp.
+pub const NOW_UNIX: i64 = 1_790_596_800;
+
 use crate::model::{
     Details, Diff, Discussion, ItemKey, ItemKind, Job, Label, Note, Pipeline, Project, User,
     WorkItem,
@@ -202,6 +205,7 @@ pub fn items() -> Vec<WorkItem> {
                         "https://gitlab.demo.invalid/{}/-/pipelines/{id}",
                         project.path
                     ),
+                    ..Pipeline::default()
                 }
             });
             let mut labels = vec![

@@ -910,9 +910,10 @@ fn context_line(state: &State, item_count: usize, colors: Colors) -> Element {
 fn section_hint(section: &str) -> &'static str {
     match section {
         "Fields" => "↑ ↓ choose a field · Enter edits",
-        "Jobs" => "↑ ↓ choose · Space toggle · Enter logs · z zoom · Ctrl+↑/↓/PgUp/PgDn logs",
+        "Pipeline" => {
+            "↑ ↓ choose a job · Space toggle · Enter logs · z zoom · Ctrl+↑/↓/PgUp/PgDn logs"
+        }
         "Discussions" => "↑ ↓ choose a discussion · reply / resolve via commands",
-        "Pipeline" => "All running jobs stream together · ↑ ↓ scroll",
         "Changes" => "Unified diff · ↑ ↓ scroll",
         _ => "↑ ↓ scroll · Esc returns to section navigation",
     }
@@ -1919,8 +1920,8 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
         let selected = state.section_cursor == index;
         // Fade the broad section highlight away around the focused item on Enter,
         // and expand it again on Escape. Geometry and scroll anchors never animate.
-        let broad =
-            state.scope == Scope::Details || !matches!(*section, "Fields" | "Jobs" | "Discussions");
+        let broad = state.scope == Scope::Details
+            || !matches!(*section, "Fields" | "Pipeline" | "Discussions");
         let background = if state.config.animations {
             ctx.transition(
                 format!("detail-focus-background-{index}"),
@@ -1992,7 +1993,7 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
             "Fields" | "Description" => DetailPart::Core,
             "Activity" => DetailPart::Activity,
             "Discussions" => DetailPart::Discussions,
-            "Pipeline" | "Jobs" => DetailPart::Pipeline,
+            "Pipeline" => DetailPart::Pipeline,
             _ => DetailPart::Changes,
         };
         let missing = state.detail_pending.is_some() && !details.loaded.contains(&part);
@@ -2029,8 +2030,12 @@ fn detail_document(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> E
                             .collect()
                     }
                 }
-                "Pipeline" => pipeline(ctx, details, section_colors),
-                "Jobs" => jobs(ctx, details, section_colors),
+                "Pipeline" => {
+                    let mut rows = pipeline(ctx, details, section_colors);
+                    rows.push(blank().into());
+                    rows.extend(jobs(ctx, details, section_colors));
+                    rows
+                }
                 "Discussions" => discussions(ctx, details, section_colors),
                 "Changes" => changes(details, section_colors),
                 _ => Vec::new(),
@@ -2405,16 +2410,16 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Deta
     let mut content = Vec::new();
     if let Some(pipeline) = &details.item.pipeline {
         let status = pipeline_status(&details.jobs, &pipeline.status);
-        content.push(
-            DetailRow::from(rich(
-                vec![
-                    Span::new(format!("Pipeline #{}   ", pipeline.id)).bold(),
-                    Span::new(status_label(&status).to_owned()).fg(colors.status(&status).1),
-                ],
-                colors.base(),
-            ))
-            .with_status("detail-pipeline-status", "Pipeline", &status),
-        );
+        let mut spans = vec![
+            Span::new(format!("Pipeline #{}   ", pipeline.id)).bold(),
+            Span::new(status_label(&status).to_owned()).fg(colors.status(&status).1),
+        ];
+        spans.extend(pipeline_facts(ctx, pipeline, colors));
+        content.push(DetailRow::from(rich(spans, colors.base())).with_status(
+            "detail-pipeline-status",
+            "Pipeline",
+            &status,
+        ));
         content.push(metadata("Web URL", pipeline.web_url.clone(), colors).into());
     } else {
         content.push(
@@ -2472,6 +2477,37 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Deta
             .into(),
     );
     content
+}
+
+/// `  ·  push · main · 3m 12s · 2 min ago · by @alex`: only the facts GitLab supplied.
+fn pipeline_facts(ctx: &Context<Cronk>, pipeline: &Pipeline, colors: Colors) -> Vec<Span> {
+    let now = ctx.state.now_unix();
+    let mut facts = Vec::new();
+    let source = pipeline.source_label();
+    if !source.is_empty() {
+        facts.push(source);
+    }
+    let reference = pipeline.ref_label();
+    if !reference.is_empty() {
+        facts.push(reference);
+    }
+    if let Some(secs) = pipeline.elapsed_secs(now) {
+        facts.push(format_duration(secs));
+    }
+    if let Some(updated) = pipeline
+        .updated_at
+        .as_deref()
+        .filter(|updated| !updated.is_empty())
+    {
+        facts.push(crate::dates::format_relative(updated, now));
+    }
+    if let Some(user) = &pipeline.user {
+        facts.push(format!("by {}", ctx.state.render_user(user)));
+    }
+    if facts.is_empty() {
+        return Vec::new();
+    }
+    vec![Span::new(format!("   {}", facts.join(" · "))).fg(colors.muted)]
 }
 
 fn job_header(job: &Job, expanded: bool, colors: Colors) -> Vec<Span> {
@@ -2709,9 +2745,10 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRo
         ];
     }
     let mut content = Vec::new();
+    let section = ctx.state.section_index("Pipeline").unwrap_or(0);
     for (index, job) in details.jobs.iter().enumerate() {
         let selected = ctx.state.scope == Scope::Section
-            && ctx.state.section_name() == "Jobs"
+            && ctx.state.section_name() == "Pipeline"
             && ctx.state.config.field == index;
         let expanded = ctx.state.job_expanded(job);
         let id = job.id;
@@ -2732,7 +2769,7 @@ fn jobs(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<DetailRo
                 rich(job_header(job, expanded, colors), style),
                 selected,
                 move || {
-                    link.send(Msg::Section(3));
+                    link.send(Msg::Section(section));
                     link.send(Msg::Select(index));
                     Msg::ToggleJob(id)
                 },
@@ -2768,6 +2805,7 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<D
         return vec![line("No discussions yet.", colors.base().fg(colors.muted)).into()];
     }
     let mut content = Vec::new();
+    let section = ctx.state.section_index("Discussions").unwrap_or(0);
     for (index, discussion) in details.discussions.iter().enumerate() {
         let selected = ctx.state.scope == Scope::Section
             && ctx.state.section_name() == "Discussions"
@@ -2811,7 +2849,7 @@ fn discussions(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<D
                     ),
                 selected,
                 move || {
-                    link.send(Msg::Section(4));
+                    link.send(Msg::Section(section));
                     Msg::Select(index)
                 },
             )

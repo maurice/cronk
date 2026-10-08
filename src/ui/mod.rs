@@ -641,7 +641,7 @@ impl State {
     }
 
     pub fn selected_job(&self) -> Option<&Job> {
-        (self.scope == Scope::Section && self.section_name() == "Jobs")
+        (self.scope == Scope::Section && self.section_name() == "Pipeline")
             .then(|| self.details.as_ref()?.jobs.get(self.config.field))
             .flatten()
     }
@@ -785,6 +785,16 @@ impl State {
             3 => Some(ItemKind::MergeRequest),
             n if n >= 4 => self.config.views.get(n - 4).map(|v| v.kind),
             _ => None,
+        }
+    }
+    /// Wall-clock seconds for relative times; fixed in demo mode so captures are deterministic.
+    pub fn now_unix(&self) -> i64 {
+        if self.demo {
+            crate::demo::NOW_UNIX
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64)
         }
     }
     pub fn is_current_user(&self, id: u64) -> bool {
@@ -955,13 +965,16 @@ impl State {
                 "Fields",
                 "Description",
                 "Pipeline",
-                "Jobs",
                 "Discussions",
                 "Changes",
             ]
         } else {
             &["Fields", "Description", "Activity"]
         }
+    }
+    /// Index of a named section in the current detail view.
+    pub fn section_index(&self, name: &str) -> Option<usize> {
+        self.sections().iter().position(|s| *s == name)
     }
     pub fn section_name(&self) -> &str {
         self.sections()
@@ -974,7 +987,7 @@ impl State {
             match self.section_name() {
                 "Forget this project" => return "project-remove".into(),
                 "Fields" => return format!("edit-field-{}", self.config.field),
-                "Jobs" => {
+                "Pipeline" => {
                     if let Some(job) = self
                         .details
                         .as_ref()

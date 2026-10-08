@@ -1772,7 +1772,7 @@ impl GitLab {
                         if complete {
                             pipeline = pipelines
                                 .into_iter()
-                                .filter(|p| p.sha.as_deref() == Some(sha.as_str()))
+                                .filter(|p| p.pipeline.sha.as_deref() == Some(sha.as_str()))
                                 .max_by_key(|p| p.pipeline.id);
                             if let Some(summary) = &pipeline {
                                 let project = summary.project_id.unwrap_or(key.project);
@@ -2392,8 +2392,6 @@ fn edit_value(key: &ItemKey, field: &str, value: &str) -> Result<Value> {
 struct ApiPipeline {
     #[serde(flatten)]
     pipeline: Pipeline,
-    #[serde(default)]
-    sha: Option<String>,
     #[serde(default)]
     project_id: Option<u64>,
 }

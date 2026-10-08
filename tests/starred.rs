@@ -266,10 +266,15 @@ fn star_is_in_the_same_column_on_every_row_and_in_details() {
         columns.iter().all(|c| c.is_some() && *c == columns[0]),
         "{columns:?}"
     );
+    assert_eq!(
+        columns[0].map(|x| x + 4),
+        Some(ui.viewport().w as i16),
+        "two free cells between the star and the scrollbar/edge"
+    );
     key(&mut ui, KeyCode::Enter);
     let detail = ui.rect_of_key(&"detail-star".to_owned().into()).unwrap();
     assert_eq!(
-        detail.x + 3,
+        detail.x + 4,
         ui.viewport().w as i16,
         "right edge with padding"
     );

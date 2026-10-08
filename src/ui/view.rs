@@ -829,6 +829,7 @@ fn breadcrumb(ctx: &Context<Cronk>, colors: Colors) -> Element {
             colors.base(),
             colors,
         ));
+        row = row.child(Text::new(" ").width(Length::Px(1)).style(colors.base()));
     }
     row.into()
 }
@@ -1149,7 +1150,9 @@ fn work_row(
             interaction::hovered(ctx, &format!("item-{}", item_key(&item.key))),
             style,
             colors,
-        ));
+        ))
+        // Keep the star clear of the pane edge and the scrollbar.
+        .child(Text::new(" ").width(Length::Px(1)).style(style));
     let dashboard = state.config.active_tab == 0;
     let mut row = VStack::new()
         .height(Length::Px(if dashboard { 4 } else { 3 }))

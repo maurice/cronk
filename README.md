@@ -86,6 +86,8 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | Scrollbar track click / thumb drag | Scroll the corresponding viewport without activating its contents |
 | `Space` in Projects | Include/hide the selected project in other lists |
 | `Space` on a job | Expand/collapse the selected job, including running jobs |
+| `Space` on a project pipeline | Expand/collapse that pipeline's summary |
+| `Enter` on a project pipeline | Open its jobs; `Esc` returns to the pipeline row |
 | `Enter` on a job | Focus its logs (expanding if needed); arrows/page keys scroll logs |
 | `Ctrl+↑/↓`, `Ctrl+PageUp/PageDown` on a job | Scroll its logs without entering log focus |
 | `z` on a job / in its logs | Toggle zoom directly; mouse wheel and draggable scrollbar scroll zoomed logs |
@@ -132,11 +134,21 @@ Log rendering preserves ANSI SGR colors (standard/bright, 256-color, and truecol
 
 Complete fetched history is retained in memory for scrolling and search; only visible lines are rendered. Search covers output fetched so far, not bytes still being loaded. Log positions are retained across tab visits, but log history, searches, and log-focus/zoom state are not written to disk. Large traces consequently use more memory until their item cache is discarded.
 
-Project rows open a project details view. A green solid status dot means both issues and merge requests are visible; a half-filled green dot means only one type is visible; a grey outline means the project is hidden. Click the dot or press **Space** to toggle overall visibility. The details page has editable local alias and visibility controls, including separate issues and merge requests preferences. Click a visibility field or focus it and press **Space** or **Enter** to toggle that control. Overall visibility preserves these preferences when switched off. Hidden item types disappear from work lists and stop syncing, while cached data is retained for re-enabling. The list and details show separate counts of open, visible issues and merge requests, with no counts for hidden projects. Fields use the same left-aligned label column as issue/MR details. Below them is a placeholder for project-wide pipelines, followed by a red **Forget this project** button that removes the project from Cronk only. Re-selecting the Projects tab or pressing **Shift+P** returns to its list. Alias editing and forgetting a project live in details, not the command palette. When adding a project, leaving the optional alias blank keeps GitLab's short display name as the starting local alias; an empty alias later falls back to the full path.
+Project rows open a project details view. A green solid status dot means both issues and merge requests are visible; a half-filled green dot means only one type is visible; a grey outline means the project is hidden. Click the dot or press **Space** to toggle overall visibility. The details page has editable local alias and visibility controls, including separate issues and merge requests preferences. Click a visibility field or focus it and press **Space** or **Enter** to toggle that control. Overall visibility preserves these preferences when switched off. Hidden item types disappear from work lists and stop syncing, while cached data is retained for re-enabling. The list and details show separate counts of open, visible issues and merge requests, with no counts for hidden projects. Fields use the same left-aligned label column as issue/MR details. Below them are the project's recent **Pipelines** (see below), followed by a red **Forget this project** button that removes the project from Cronk only. Re-selecting the Projects tab or pressing **Shift+P** returns to its list. Alias editing and forgetting a project live in details, not the command palette. When adding a project, leaving the optional alias blank keeps GitLab's short display name as the starting local alias; an empty alias later falls back to the full path.
 
 ![Projects with full, partial, and hidden visibility](docs/projects.png)
 
-![Project visibility controls, pipeline placeholder, and forget action](docs/project-details.png)
+![Project visibility controls, pipelines, and forget action](docs/project-details.png)
+
+### Project pipelines
+
+Pipelines imply code, and code implies merge requests, so a project's pipelines are synced whenever its **Merge requests** visibility is on (the field says so); with it off the section is omitted and nothing is requested. The section lists the **20 newest pipelines** regardless of trigger: scheduled, pushes after a merge, web, API, triggers and merge request pipelines (shown as `!iid`). Each row shows status, ref, source, run time or elapsed time, last update and the workflow name. The newest pipeline is expanded by default; an expanded pipeline fetches its details and jobs once (and again while active) to show who started it, the web URL and job-state counts. **Space** expands or collapses a pipeline, **Enter** opens its jobs with exactly the same live-log behavior as a merge request (running and hard-failed jobs expand, Space/Enter/z/r work, `Esc` steps back to the pipeline row), and the footer row loads **20 older pipelines** per press, up to 100; anything older stays on GitLab. Clicking a pipeline selects and toggles it.
+
+Project pipelines are **memory-only**: nothing about them is written to the content cache, so an open project refreshes its window at `detail_refresh_secs` and older pages are dropped when the project is reopened. Independently, a slow background probe fetches only the **newest pipeline** of every merge-request-visible project (one `per_page=1` request each, every `pipeline_refresh_secs`, default twice `list_refresh_secs`) so Projects rows show `◐ pipeline running · main · 2 min ago` without opening them. Probe failures back off quietly instead of raising the error banner. The open project is skipped by the probe because its own first page keeps the indicator current.
+
+![Project pipelines with the newest expanded](docs/project-pipelines.png)
+
+![A project pipeline drilled into its jobs](docs/project-pipeline-jobs.png)
 
 ## Name-based field completion
 
@@ -194,6 +206,7 @@ theme = "midnight"
 animations = true
 list_refresh_secs = 60
 detail_refresh_secs = 10
+# pipeline_refresh_secs = 120  # newest-pipeline probe; default 2 × list_refresh_secs, minimum 30
 
 [[projects]]
 id = 1234

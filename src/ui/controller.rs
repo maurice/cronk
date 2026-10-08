@@ -1397,6 +1397,9 @@ impl Component for Cronk {
                     ctx.state.pipeline_epoch += 1;
                     ctx.state.next_pipelines = Duration::ZERO;
                     ctx.state.next_probe = Duration::ZERO;
+                    if ctx.state.pipelines_section_present() {
+                        ctx.link().send(Msg::LoadPipelines);
+                    }
                     self.persist(ctx);
                     self.normalize(ctx);
                     self.restart_project_sync(ctx);
@@ -1845,6 +1848,11 @@ impl Component for Cronk {
                         ("Fields", 1) => Some(Msg::ToggleProject),
                         ("Fields", 2) => Some(Msg::ToggleProjectKind(ItemKind::Issue)),
                         ("Fields", 3) => Some(Msg::ToggleProjectKind(ItemKind::MergeRequest)),
+                        ("Pipelines", row) if ctx.state.drilled.is_none() => ctx
+                            .state
+                            .open_project_pipelines()
+                            .and_then(|w| w.pipelines.get(row))
+                            .map(|p| Msg::TogglePipeline(p.id)),
                         _ => None,
                     }
                 }
@@ -2264,18 +2272,24 @@ impl Cronk {
         if epoch != ctx.state.pipeline_epoch {
             return Update::none();
         }
-        // Keep the selected row identity while the window shifts.
-        let selected = (ctx.state.config.project_route == Some(project)
+        // Keep the selected row identity (a pipeline, or the footer) while the window shifts.
+        let on_rows = ctx.state.config.project_route == Some(project)
             && ctx.state.scope == Scope::Section
             && ctx.state.section_name() == "Pipelines"
-            && ctx.state.drilled.is_none())
-        .then(|| {
-            ctx.state
+            && ctx.state.drilled.is_none();
+        let selected = on_rows
+            .then(|| {
+                ctx.state
+                    .open_project_pipelines()
+                    .and_then(|w| w.pipelines.get(ctx.state.config.field))
+                    .map(|p| p.id)
+            })
+            .flatten();
+        let on_footer = on_rows
+            && ctx
+                .state
                 .open_project_pipelines()
-                .and_then(|w| w.pipelines.get(ctx.state.config.field))
-                .map(|p| p.id)
-        })
-        .flatten();
+                .is_some_and(|w| w.can_load_more() && ctx.state.config.field == w.pipelines.len());
         let window = ctx.state.project_pipelines.entry(project).or_default();
         match result {
             Ok(pipelines) => {
@@ -2289,6 +2303,8 @@ impl Cronk {
                     && let Some(index) = window.position(id)
                 {
                     ctx.state.config.field = index;
+                } else if on_footer {
+                    ctx.state.config.field = window.row_count().saturating_sub(1);
                 }
                 if ctx.state.config.project_route == Some(project) {
                     ctx.state.status = "Pipelines updated".into();

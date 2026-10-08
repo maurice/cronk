@@ -456,6 +456,68 @@ impl WorkItem {
 }
 
 #[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_cached_pipelines_and_null_fields_decode() {
+        let legacy: Pipeline =
+            serde_json::from_str(r#"{"id":7,"status":"success","web_url":"u"}"#).unwrap();
+        assert_eq!(legacy.source, None);
+        assert_eq!(legacy.ref_label(), "");
+        let nulls: Pipeline = serde_json::from_str(
+            r#"{"id":8,"status":"running","web_url":"u","name":null,"ref":null,"user":null,"duration":null}"#,
+        )
+        .unwrap();
+        assert_eq!(nulls.name, None);
+        assert!(nulls.active());
+    }
+
+    #[test]
+    fn merge_request_refs_sources_and_elapsed_time() {
+        let mut pipeline = Pipeline {
+            ref_name: Some("refs/merge-requests/104/merge".into()),
+            source: Some("merge_request_event".into()),
+            status: "running".into(),
+            created_at: Some("2026-09-28T11:50:00Z".into()),
+            ..Pipeline::default()
+        };
+        let now = crate::dates::parse_unix("2026-09-28T12:00:00Z").unwrap();
+        assert_eq!(pipeline.merge_request_iid(), Some(104));
+        assert_eq!(pipeline.ref_label(), "!104");
+        assert_eq!(pipeline.source_label(), "merge request");
+        assert_eq!(
+            pipeline.elapsed_secs(now),
+            Some(600),
+            "wall time since creation"
+        );
+        pipeline.started_at = Some("2026-09-28T11:55:00Z".into());
+        assert_eq!(
+            pipeline.elapsed_secs(now),
+            Some(300),
+            "start beats creation"
+        );
+        pipeline.status = "success".into();
+        assert_eq!(
+            pipeline.elapsed_secs(now),
+            None,
+            "finished without duration: unknown"
+        );
+        pipeline.duration = Some(3725);
+        assert_eq!(
+            format_duration(pipeline.elapsed_secs(now).unwrap()),
+            "1h 02m"
+        );
+        assert_eq!(format_duration(192), "3m 12s");
+        assert_eq!(format_duration(45), "45s");
+        pipeline.ref_name = Some("main".into());
+        pipeline.source = Some("parent_pipeline".into());
+        assert_eq!(pipeline.ref_label(), "main");
+        assert_eq!(pipeline.source_label(), "parent pipeline");
+    }
+}
+
+#[cfg(test)]
 mod dashboard_tests {
     use super::*;
 

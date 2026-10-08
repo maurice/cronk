@@ -4035,7 +4035,8 @@ const HELP: &str = "\
 - Ctrl+↑/↓ and Ctrl+PgUp/PgDn scroll the selected job without focusing it.
 - z zooms a selected/focused job. Zoom offers a draggable scrollbar and mouse-wheel scrolling.
 - / searches loaded log history (literal, case-insensitive); n/N move between matching lines.
-- Esc closes search, then zoom, then log focus, before leaving Jobs.
+- Esc closes search, then zoom, then log focus, before leaving the job list.
+- Project pipelines: Space expands, Enter opens jobs; the footer loads older ones.
 - Scrolling away from the bottom pauses following; End resumes following incoming output.
 - Fetched log history stays in memory until the item's cache is discarded; it is never saved to disk.
 - **DEMO** uses fictional offline data, never a live GitLab workspace.

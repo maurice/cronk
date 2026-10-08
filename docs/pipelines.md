@@ -2,7 +2,7 @@
 
 Design for filling in the **Pipelines** placeholder in project details, and for tidying up the **Pipeline** / **Jobs** sections of merge request details so both views share one pipeline renderer and one job interaction model.
 
-Status: design, not implemented. Decisions already taken are marked **decided**; the rest are proposals.
+Status: implemented on the `project-pipelines-design` branch; this document records the design and the deviations noted under **Implementation notes** at the end.
 
 ## Goals
 
@@ -299,3 +299,14 @@ Each phase is its own branch/PR per the project workflow.
 - Should drilling into a pipeline from the Projects tab remember per-pipeline job collapses in SQLite (as MR jobs do), or is session memory enough given pipelines are ephemeral? Proposal: reuse the existing persisted `collapsed`/`expanded` sets because the code path is shared and the cost is a few integers.
 - MR-event pipelines: show `!104` as a hyperlink to the MR in Cronk (route change) or only to GitLab? Proposal: GitLab URL first; in-app route later.
 - Should the probe also feed the Dashboard (e.g. "default-branch pipeline failed on project X")? Out of scope here, but the data would be available.
+
+## Implementation notes
+
+Deviations from the plan above, as built:
+
+- `drilled` is **not persisted** to SQLite. It lives in `State` and survives tab switches through `TabCache`, but a restart reopens the project on its first section as before (`prune_tab_routes` is unchanged). Job expand/collapse choices are persisted as for MR jobs.
+- The window is kept **newest-first by `created_at`** (then id) rather than by id alone, so the demo's merge request head pipelines (which have lower synthetic ids) interleave correctly; for real GitLab data the two orders coincide.
+- The per-pipeline detail + jobs fetch runs for expanded pipelines that are active or not yet loaded, bounded to four per cycle.
+- `Msg::ProjectDetailViewport` now carries the reveal target at render time and ignores viewport events measured for a superseded target, mirroring the issue/MR detail. Without this, rapid Enter/Enter on a long project document cancelled the pending reveal (pipelines made the document long enough to expose it).
+- `State.saved_config` and `State.onboarding` are boxed, and `.cargo/config.toml` sets `RUST_MIN_STACK` for test binaries: tui-lipan's recursive layout keeps `State`/`Config`-sized frames in debug builds and a merge request detail already needed ~2.1 MiB, just above libtest's 2 MiB default, so the suite was one field away from stack overflow before this feature.
+- Demo fixtures: project 9001 has 45 synthetic pipelines plus its 4 MR heads (three window pages); other projects fit on one short page. MR head pipelines carry source/ref/user/duration so the merged MR Pipeline summary shows them.

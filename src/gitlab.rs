@@ -3040,6 +3040,91 @@ mod tests {
     }
 
     #[test]
+    fn project_pipeline_window_and_probe_are_single_bounded_requests() {
+        let mock = Mock::new(|request| {
+            let params: HashMap<_, _> = request.url().query_pairs().into_owned().collect();
+            match request.url().path() {
+                "/api/v4/projects/7/pipelines" => {
+                    assert_eq!(params["order_by"], "id");
+                    assert_eq!(params["sort"], "desc");
+                    let page = params["page"].clone();
+                    let per_page = params["per_page"].clone();
+                    // Pagination headers must be ignored: the window is one request.
+                    Reply::json(json!([
+                        {"id":48213,"status":"running","source":"schedule","ref":"main",
+                         "sha":"abc","name":null,"web_url":"https://gl.example/p/-/pipelines/48213",
+                         "created_at":"2026-09-28T11:56:00Z","updated_at":"2026-09-28T11:58:00Z"},
+                        {"id":48207,"status":"failed","source":"merge_request_event",
+                         "ref":"refs/merge-requests/104/head","sha":"def","name":"",
+                         "web_url":"https://gl.example/p/-/pipelines/48207",
+                         "created_at":"2026-09-28T09:00:00Z","updated_at":"2026-09-28T09:05:40Z",
+                         "page_echo":page,"per_page_echo":per_page}
+                    ]))
+                    .header("x-next-page", "2")
+                    .header("x-total-pages", "900")
+                }
+                "/api/v4/projects/7/pipelines/48213" => Reply::json(json!({
+                    "id":48213,"status":"running","source":"schedule","ref":"main","sha":"abc",
+                    "name":"nightly","web_url":"https://gl.example/p/-/pipelines/48213",
+                    "created_at":"2026-09-28T11:56:00Z","updated_at":"2026-09-28T11:58:00Z",
+                    "started_at":"2026-09-28T11:56:20Z","finished_at":null,"duration":null,
+                    "queued_duration":20,
+                    "user":{"id":9,"username":"release-bot","name":"Release Bot"}
+                })),
+                "/api/v4/projects/7/pipelines/48213/jobs" => {
+                    assert_eq!(params["include_retried"], "false");
+                    Reply::json(json!([
+                        {"id":1,"name":"lint","stage":"check","status":"success","allow_failure":false,
+                         "web_url":"https://gl.example/j/1","started_at":"2026-09-28T11:56:30Z"},
+                        {"id":2,"name":"build","stage":"build","status":"running","allow_failure":false,
+                         "web_url":"https://gl.example/j/2","started_at":"2026-09-28T11:57:00Z"}
+                    ]))
+                }
+                other => panic!("unexpected {other}"),
+            }
+        });
+        let client = mock.client();
+        let page = client.project_pipelines(7, 3).unwrap();
+        assert_eq!(
+            page.len(),
+            2,
+            "exactly one page, pagination headers ignored"
+        );
+        assert_eq!(page[0].id, 48213);
+        assert_eq!(page[0].name, None, "null workflow name decodes");
+        assert_eq!(page[1].merge_request_iid(), Some(104));
+        assert_eq!(page[1].ref_label(), "!104");
+        assert_eq!(page[1].source_label(), "merge request");
+        let latest = client.latest_pipeline(7).unwrap().unwrap();
+        assert_eq!(latest.id, 48213);
+        let (full, jobs) = client.pipeline_with_jobs(7, 48213).unwrap();
+        assert_eq!(
+            full.user.as_ref().map(|u| u.username.as_str()),
+            Some("release-bot")
+        );
+        assert_eq!(full.name.as_deref(), Some("nightly"));
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].name, "build", "most recently started job first");
+        let requests = mock.requests.lock().unwrap();
+        let lists: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url().path() == "/api/v4/projects/7/pipelines")
+            .map(|r| {
+                let params: HashMap<_, _> = r.url().query_pairs().into_owned().collect();
+                (params["page"].clone(), params["per_page"].clone())
+            })
+            .collect();
+        assert_eq!(
+            lists,
+            vec![
+                ("3".to_owned(), PIPELINE_PAGE.to_string()),
+                ("1".to_owned(), "1".to_owned())
+            ],
+            "window page 3 and a per_page=1 probe, nothing else"
+        );
+    }
+
+    #[test]
     fn iteration_labels_show_dates_group_and_state_without_ids() {
         let entries: Vec<IterationMatch> = serde_json::from_value(json!([
             {"id":84001,"iid":84,"title":null,"start_date":"2026-09-28","due_date":"2026-10-11","state":2,

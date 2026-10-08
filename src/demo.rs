@@ -198,15 +198,7 @@ pub fn items() -> Vec<WorkItem> {
                     _ => "canceled",
                 };
                 let id = 50_000 + index as u64 * 100 + local as u64;
-                Pipeline {
-                    id,
-                    status: status.into(),
-                    web_url: format!(
-                        "https://gitlab.demo.invalid/{}/-/pipelines/{id}",
-                        project.path
-                    ),
-                    ..Pipeline::default()
-                }
+                head_pipeline(id, status, &project.path, local, index)
             });
             let mut labels = vec![
                 label("demo::fictional", "#6f42c1", "#ffffff"),
@@ -382,6 +374,35 @@ fn pipeline_jobs(pipeline: &Pipeline, base_url: &str) -> Vec<Job> {
     jobs
 }
 
+/// A merge request's head pipeline, as embedded in the MR response (full detail fields).
+fn head_pipeline(id: u64, status: &str, path: &str, slot: usize, project_index: usize) -> Pipeline {
+    let created = NOW_UNIX - ((slot as i64 + 1) * 23 * 60 + project_index as i64 * 180);
+    let duration = (status != "running").then_some(6 * 60 + 40 + slot as u64 * 11);
+    let started = created + 15;
+    Pipeline {
+        id,
+        status: status.into(),
+        web_url: format!("https://gitlab.demo.invalid/{path}/-/pipelines/{id}"),
+        source: Some("merge_request_event".into()),
+        ref_name: Some(format!("refs/merge-requests/{}/head", 101 + slot)),
+        sha: Some(format!("{id:040x}")),
+        name: None,
+        created_at: Some(timestamp(created)),
+        updated_at: Some(timestamp(
+            duration.map_or(NOW_UNIX - 5, |d| started + d as i64),
+        )),
+        started_at: Some(timestamp(started)),
+        finished_at: duration.map(|d| timestamp(started + d as i64)),
+        duration,
+        queued_duration: Some(15),
+        user: Some(if slot.is_multiple_of(2) {
+            user()
+        } else {
+            teammate()
+        }),
+    }
+}
+
 fn timestamp(unix: i64) -> String {
     chrono::DateTime::from_timestamp(unix, 0)
         .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
@@ -390,7 +411,8 @@ fn timestamp(unix: i64) -> String {
 
 /// Every recent pipeline of a demo project, newest first: scheduled, push, web and API
 /// pipelines interleaved with the merge request head pipelines so both views agree.
-/// Project 9001 has 45 entries (three window pages); the others fit on one short page.
+/// Project 9001 has 45 synthetic entries plus its 4 MR heads (three window pages); the
+/// others fit on one short page.
 fn all_project_pipelines(project: u64) -> Vec<Pipeline> {
     let Some(index) = project.checked_sub(9_001).filter(|i| *i < 5) else {
         return Vec::new();
@@ -449,27 +471,7 @@ fn all_project_pipelines(project: u64) -> Vec<Pipeline> {
         });
     }
     // Merge request head pipelines sit between the first synthetic rows.
-    for (slot, head) in heads.into_iter().enumerate() {
-        let created = NOW_UNIX - ((slot as i64 + 1) * 23 * 60 + index as i64 * 180);
-        let duration = (head.status != "running").then_some(6 * 60 + 40 + slot as u64 * 11);
-        let started = created + 15;
-        pipelines.push(Pipeline {
-            source: Some("merge_request_event".into()),
-            ref_name: Some(format!("refs/merge-requests/{}/head", 101 + slot)),
-            sha: Some(format!("{:040x}", head.id)),
-            name: None,
-            created_at: Some(timestamp(created)),
-            updated_at: Some(timestamp(
-                duration.map_or(NOW_UNIX - 5, |d| started + d as i64),
-            )),
-            started_at: Some(timestamp(started)),
-            finished_at: duration.map(|d| timestamp(started + d as i64)),
-            duration,
-            queued_duration: Some(15),
-            user: Some(if slot % 2 == 0 { user() } else { teammate() }),
-            ..head
-        });
-    }
+    pipelines.extend(heads);
     pipelines.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     pipelines
 }

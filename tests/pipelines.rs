@@ -94,6 +94,41 @@ fn click(ui: &mut Ui, key: &str) {
 }
 
 #[test]
+fn project_pipeline_running_job_first_unfocused_click_keeps_logs_open() {
+    let mut ui = mount(60);
+    open_pipelines(&mut ui);
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Enter);
+    let pipeline = ui.state().drilled.unwrap();
+    let job = ui.state().selected_job().unwrap().clone();
+    assert!(job.running());
+    assert!(ui.state().job_expanded(&job));
+    ui.state_mut().scope = Scope::Details;
+    settle(&mut ui);
+
+    click(&mut ui, &format!("job-{}", job.id));
+    assert!(ui.state().in_jobs());
+    assert_eq!(ui.state().selected_job().unwrap().id, job.id);
+    assert_eq!(ui.state().drilled, Some(pipeline));
+    assert!(ui.state().job_expanded(&job));
+    assert!(!ui.state().collapsed.contains(&job.id));
+    assert!(
+        ui.rect_of_key(&format!("trace-{}", job.id).into())
+            .is_some()
+    );
+
+    click(&mut ui, &format!("job-{}", job.id));
+    assert!(ui.state().collapsed.contains(&job.id));
+    assert!(!ui.state().job_expanded(&job));
+    ui.state_mut().scope = Scope::Details;
+    settle(&mut ui);
+    click(&mut ui, &format!("job-{}", job.id));
+    assert!(ui.state().job_expanded(&job));
+    key(&mut ui, KeyCode::Char(' '));
+    assert!(ui.state().collapsed.contains(&job.id));
+}
+
+#[test]
 fn project_pipeline_failures_pin_in_run_order_and_unfocused_click_keeps_logs_open() {
     let mut ui = mount(60);
     open_pipelines(&mut ui);

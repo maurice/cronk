@@ -212,42 +212,52 @@ fn click_job(ui: &mut Ui, id: u64) {
 }
 
 #[test]
-fn first_unfocused_failure_click_selects_without_collapsing_logs() {
-    let mut ui = mount("midnight");
-    ui.state_mut().details.as_mut().unwrap().jobs[0].allow_failure = false;
-    ui.state_mut().scope = Scope::Details;
-    settle(&mut ui);
-    assert!(
-        ui.state()
-            .job_expanded(&ui.state().details.as_ref().unwrap().jobs[0])
-    );
-    assert!(ui.rect_of_key(&format!("trace-{JOB}").into()).is_some());
+fn first_unfocused_auto_expanded_job_click_selects_without_collapsing_logs() {
+    for status in ["running", "failed"] {
+        let mut ui = mount("midnight");
+        let job = &mut ui.state_mut().details.as_mut().unwrap().jobs[0];
+        job.status = status.into();
+        job.allow_failure = false;
+        ui.state_mut().scope = Scope::Details;
+        settle(&mut ui);
+        assert!(
+            ui.state()
+                .job_expanded(&ui.state().details.as_ref().unwrap().jobs[0])
+        );
+        assert!(ui.rect_of_key(&format!("trace-{JOB}").into()).is_some());
 
-    click_job(&mut ui, JOB);
-    assert!(ui.state().in_jobs());
-    assert_eq!(ui.state().selected_job().unwrap().id, JOB);
-    assert!(!ui.state().collapsed.contains(&JOB));
-    assert!(text(&ui).contains("LINE_099"));
+        click_job(&mut ui, JOB);
+        assert!(ui.state().in_jobs());
+        assert_eq!(ui.state().selected_job().unwrap().id, JOB);
+        assert!(!ui.state().collapsed.contains(&JOB), "{status}");
+        assert!(text(&ui).contains("LINE_099"), "{status}");
 
-    click_job(&mut ui, JOB);
-    assert!(ui.state().collapsed.contains(&JOB));
-    assert!(!text(&ui).contains("LINE_099"));
+        click_job(&mut ui, JOB);
+        assert!(ui.state().collapsed.contains(&JOB), "{status}");
+        assert!(!text(&ui).contains("LINE_099"), "{status}");
 
-    ui.state_mut().scope = Scope::Details;
-    settle(&mut ui);
-    click_job(&mut ui, JOB);
-    assert!(!ui.state().collapsed.contains(&JOB));
-    assert!(text(&ui).contains("LINE_099"));
+        ui.state_mut().scope = Scope::Details;
+        settle(&mut ui);
+        click_job(&mut ui, JOB);
+        assert!(!ui.state().collapsed.contains(&JOB), "{status}");
+        // Reopening running logs can fetch fresh demo output; verify the panel
+        // reopens rather than requiring the original synthetic trace text.
+        assert!(ui.rect_of_key(&format!("trace-{JOB}").into()).is_some());
+    }
 }
 
 #[test]
-fn focused_failure_header_click_still_collapses_logs() {
-    let mut ui = mount("midnight");
-    ui.state_mut().details.as_mut().unwrap().jobs[0].allow_failure = false;
-    settle(&mut ui);
-    click_job(&mut ui, JOB);
-    assert!(ui.state().collapsed.contains(&JOB));
-    assert!(!text(&ui).contains("LINE_099"));
+fn focused_auto_expanded_job_header_click_still_collapses_logs() {
+    for status in ["running", "failed"] {
+        let mut ui = mount("midnight");
+        let job = &mut ui.state_mut().details.as_mut().unwrap().jobs[0];
+        job.status = status.into();
+        job.allow_failure = false;
+        settle(&mut ui);
+        click_job(&mut ui, JOB);
+        assert!(ui.state().collapsed.contains(&JOB), "{status}");
+        assert!(!text(&ui).contains("LINE_099"), "{status}");
+    }
 }
 
 #[test]

@@ -9,7 +9,9 @@
 //!
 //! Dashboard reads enrich at most 12 recently updated open MRs missing a pipeline or exact
 //! discussion count, with up to one MR-detail request each (only for a missing pipeline)
-//! and a shared budget of 12 discussion pages. Counts are populated only after every page
+//! and a shared budget of 12 discussion pages. The MR list separately fetches core data for
+//! missing metrics only as rows enter its render window, at most four concurrently; terminal
+//! MR results are persisted in the content cache. Counts are populated only after every page
 //! has loaded; budget exhaustion or an unsupported endpoint leaves None, never a partial
 //! count or an inferred zero. Paginated reads are not atomic server snapshots.
 //! Optional dashboard enrichment HTTP 403/404/405/501 leaves missing fields unknown; other
@@ -1182,6 +1184,30 @@ impl GitLab {
             .map_or_else(|| Ok(Vec::new()), |cache| cache.items(project))
     }
 
+    /// One-row lazy fetch for merge-request list metrics; unlike full details,
+    /// this reads only the MR core response and does not fetch jobs/discussions.
+    pub fn mr_pipeline_metrics(&self, key: &ItemKey) -> Result<WorkItem> {
+        if key.kind != ItemKind::MergeRequest {
+            bail!("Pipeline list metrics require a merge-request key");
+        }
+        let mut item = self.core_item(key)?.into_item(key.project, key.kind);
+        item.pipeline_metrics_fetched = true;
+        Ok(item)
+    }
+
+    /// Store one successfully checked terminal MR in the persistent content cache.
+    pub fn cache_mr_pipeline_metrics(&self, item: &WorkItem) -> Result<()> {
+        if item.key.kind != ItemKind::MergeRequest
+            || !matches!(item.state.as_str(), "merged" | "closed")
+        {
+            return Ok(());
+        }
+        if let Some(cache) = &self.persistent {
+            cache.merge_mr_pipeline_metrics(item)?;
+        }
+        Ok(())
+    }
+
     pub fn cached_details(&self, key: &ItemKey) -> Result<Option<Details>> {
         self.persistent
             .as_ref()
@@ -1628,6 +1654,7 @@ impl GitLab {
             // bounded dashboard candidates independently of the list delta feed.
             if self.persistent.is_some() {
                 items[index].pipeline = None;
+                items[index].pipeline_metrics_fetched = false;
                 items[index].unresolved = None;
             }
             if items[index].pipeline.is_none()
@@ -1637,6 +1664,7 @@ impl GitLab {
                     Ok(raw) => {
                         let enriched = raw.into_item(project.id, ItemKind::MergeRequest);
                         items[index].pipeline = enriched.pipeline;
+                        items[index].pipeline_metrics_fetched = true;
                         items[index].unresolved = enriched.unresolved.or(items[index].unresolved);
                     }
                     Err(error) if unsupported_enrichment(&error) => continue,
@@ -2531,6 +2559,10 @@ struct ApiItem {
     #[serde(default)]
     updated_at: String,
     #[serde(default)]
+    merged_at: Option<String>,
+    #[serde(default)]
+    closed_at: Option<String>,
+    #[serde(default)]
     web_url: String,
     #[serde(default)]
     draft: bool,
@@ -2551,6 +2583,7 @@ struct ApiItem {
 
 impl ApiItem {
     fn into_item(self, project: u64, kind: ItemKind) -> WorkItem {
+        let pipeline_metrics_fetched = self.head_pipeline.is_some();
         WorkItem {
             key: ItemKey {
                 project,
@@ -2626,9 +2659,12 @@ impl ApiItem {
             source_branch: self.source_branch.unwrap_or_default(),
             target_branch: self.target_branch.unwrap_or_default(),
             updated_at: self.updated_at,
+            merged_at: self.merged_at,
+            closed_at: self.closed_at,
             web_url: self.web_url,
             draft: self.draft || self.work_in_progress,
             pipeline: self.head_pipeline.map(|p| p.pipeline),
+            pipeline_metrics_fetched,
             // A boolean about merge-blocking discussions is not an exact thread count.
             unresolved: self.unresolved_discussions_count,
         }
@@ -4805,6 +4841,63 @@ mod tests {
             "3m 12s · 2 min ago"
         );
         assert_eq!(mock.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn terminal_mr_metrics_are_loaded_on_demand_and_survive_list_refreshes() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/issues" => Reply::json(json!([])),
+            "/api/v4/projects/7/merge_requests" => {
+                let mut item = raw_item(1, "merged");
+                item["merged_at"] = json!("2026-09-27T11:00:00Z");
+                Reply::json(json!([item]))
+            }
+            "/api/v4/projects/7/merge_requests/1" => {
+                let mut item = raw_item(1, "merged");
+                item["merged_at"] = json!("2026-09-27T11:00:00Z");
+                item["head_pipeline"] = json!({
+                    "id": 77,
+                    "status": "success",
+                    "duration": 192,
+                    "updated_at": "2026-09-27T10:58:00Z"
+                });
+                Reply::json(item)
+            }
+            other => panic!("unexpected request {other}"),
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("config.toml");
+        let mut client = mock.client();
+        client.enable_persistence(&workspace).unwrap();
+        let listed = client.sync_project(&project(), false, |_, _| {}).unwrap();
+        assert!(listed[0].pipeline.is_none());
+        assert!(!listed[0].pipeline_metrics_fetched);
+
+        let key = key(ItemKind::MergeRequest);
+        let fresh = client.mr_pipeline_metrics(&key).unwrap();
+        let mut enriched = listed[0].clone();
+        enriched.pipeline = fresh.pipeline;
+        enriched.merged_at = fresh.merged_at;
+        enriched.pipeline_metrics_fetched = true;
+        client.cache_mr_pipeline_metrics(&enriched).unwrap();
+
+        let refreshed = client.sync_project(&project(), false, |_, _| {}).unwrap();
+        assert_eq!(refreshed[0].pipeline.as_ref().unwrap().id, 77);
+        assert_eq!(
+            refreshed[0].merged_at.as_deref(),
+            Some("2026-09-27T11:00:00Z")
+        );
+        assert!(refreshed[0].pipeline_metrics_fetched);
+        assert_eq!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.url().path() == "/api/v4/projects/7/merge_requests/1")
+                .count(),
+            1,
+            "terminal metrics are fetched once and retained by SQLite sync"
+        );
     }
 
     #[test]

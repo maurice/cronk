@@ -1026,7 +1026,11 @@ fn list_spacers(rows: &mut Vec<Element>, mut height: usize) {
     }
 }
 
-fn list_render_window(offset: usize, slots: usize, len: usize) -> std::ops::Range<usize> {
+pub(super) fn list_render_window(
+    offset: usize,
+    slots: usize,
+    len: usize,
+) -> std::ops::Range<usize> {
     offset.saturating_sub(slots)..offset.saturating_add(slots.saturating_mul(2)).min(len)
 }
 
@@ -1095,15 +1099,25 @@ fn work_row(
                     .height(Length::Px(1))
                     .style(style.fg(colors.status(&pipeline.status).1)),
             );
-        let timing = pipeline.timing_label(state.now_unix());
+    } else if item.key.kind == ItemKind::MergeRequest && item.pipeline_metrics_fetched {
         labels_line = labels_line.child(
-            Text::new(if timing.is_empty() {
-                "  ·  ".into()
-            } else {
-                format!("  {timing}  ·  ")
-            })
-            .height(Length::Px(1))
-            .style(style.fg(colors.muted)),
+            Text::new("  no pipeline")
+                .height(Length::Px(1))
+                .style(style.fg(colors.muted)),
+        );
+    }
+    let timing = item.list_pipeline_timing(state.now_unix());
+    if !timing.is_empty() {
+        labels_line = labels_line.child(
+            Text::new(format!("  {timing}  ·  "))
+                .height(Length::Px(1))
+                .style(style.fg(colors.muted)),
+        );
+    } else if item.pipeline.is_some() || item.pipeline_metrics_fetched {
+        labels_line = labels_line.child(
+            Text::new("  ·  ")
+                .height(Length::Px(1))
+                .style(style.fg(colors.muted)),
         );
     }
     labels_line = labels_line.child(user_tooltip(

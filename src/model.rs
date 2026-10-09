@@ -326,14 +326,75 @@ pub struct WorkItem {
     pub source_branch: String,
     pub target_branch: String,
     pub updated_at: String,
+    pub merged_at: Option<String>,
+    pub closed_at: Option<String>,
     pub web_url: String,
     pub draft: bool,
     pub pipeline: Option<Pipeline>,
+    /// A detail request has checked this MR's pipeline, including a confirmed absence.
+    /// Persisted so terminal MRs do not trigger the same request on every visit.
+    pub pipeline_metrics_fetched: bool,
     // None means GitLab has not supplied this information, not zero discussions.
     pub unresolved: Option<usize>,
 }
 
 impl WorkItem {
+    /// Pipeline run time plus the most useful age for the merge-request list.
+    /// For terminal MRs, report when the MR merged/closed rather than when its
+    /// pipeline last changed; open MRs keep the pipeline's last-update age.
+    pub fn list_pipeline_timing(&self, now_unix: i64) -> String {
+        let terminal = if self.key.kind == ItemKind::MergeRequest {
+            match self.state.as_str() {
+                "merged" => self.merged_at.as_deref().map(|date| ("merged", date)),
+                "closed" => self.closed_at.as_deref().map(|date| ("closed", date)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some((event, date)) = terminal.filter(|(_, date)| !date.is_empty()) {
+            let mut times = Vec::new();
+            if let Some(secs) = self
+                .pipeline
+                .as_ref()
+                .and_then(|p| p.elapsed_secs(now_unix))
+            {
+                times.push(format_duration(secs));
+            }
+            times.push(format!(
+                "{event} {}",
+                crate::dates::format_relative(date, now_unix)
+            ));
+            return times.join(" · ");
+        }
+        self.pipeline
+            .as_ref()
+            .map_or_else(String::new, |pipeline| pipeline.timing_label(now_unix))
+    }
+
+    /// Retain immutable terminal-MR metrics when a list refresh omits the
+    /// detail-only fields that were fetched previously.
+    pub fn preserve_terminal_pipeline_metrics(&mut self, previous: &Self) {
+        if self.key.kind != ItemKind::MergeRequest
+            || !matches!(self.state.as_str(), "merged" | "closed")
+            || self.state != previous.state
+            || !matches!(previous.state.as_str(), "merged" | "closed")
+            || !(previous.pipeline_metrics_fetched || previous.pipeline.is_some())
+        {
+            return;
+        }
+        if self.pipeline.is_none() {
+            self.pipeline = previous.pipeline.clone();
+        }
+        if self.merged_at.is_none() {
+            self.merged_at.clone_from(&previous.merged_at);
+        }
+        if self.closed_at.is_none() {
+            self.closed_at.clone_from(&previous.closed_at);
+        }
+        self.pipeline_metrics_fetched = true;
+    }
+
     pub fn dashboard_roles(&self, current_user: u64) -> Vec<&'static str> {
         if current_user == 0 {
             return Vec::new();
@@ -524,6 +585,45 @@ mod pipeline_tests {
         assert_eq!(pipeline.timing_label(now), "3m 00s");
         pipeline.started_at = Some("2026-09-28T12:01:00Z".into());
         assert_eq!(pipeline.timing_label(now), "0s");
+    }
+
+    #[test]
+    fn terminal_merge_request_timing_uses_the_merge_or_close_timestamp() {
+        let now = crate::dates::parse_unix("2026-09-28T12:00:00Z").unwrap();
+        let mut merged = WorkItem {
+            key: ItemKey {
+                kind: ItemKind::MergeRequest,
+                ..ItemKey::default()
+            },
+            state: "merged".into(),
+            merged_at: Some("2026-09-26T12:00:00Z".into()),
+            pipeline: Some(Pipeline {
+                status: "success".into(),
+                duration: Some(192),
+                updated_at: Some("2026-09-26T11:58:00Z".into()),
+                ..Pipeline::default()
+            }),
+            ..WorkItem::default()
+        };
+        assert_eq!(
+            merged.list_pipeline_timing(now),
+            "3m 12s · merged 2 days ago"
+        );
+        merged.state = "closed".into();
+        merged.merged_at = None;
+        merged.closed_at = Some("2026-09-27T12:00:00Z".into());
+        merged.pipeline = None;
+        assert_eq!(merged.list_pipeline_timing(now), "closed yesterday");
+        let issue = WorkItem {
+            key: ItemKey {
+                kind: ItemKind::Issue,
+                ..ItemKey::default()
+            },
+            state: "closed".into(),
+            closed_at: Some("2026-09-27T12:00:00Z".into()),
+            ..WorkItem::default()
+        };
+        assert_eq!(issue.list_pipeline_timing(now), "");
     }
 
     #[test]

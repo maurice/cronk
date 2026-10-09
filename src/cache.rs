@@ -162,12 +162,30 @@ impl ContentCache {
         items: &[WorkItem],
     ) -> Result<()> {
         let project = i64::try_from(project)?;
-        let rows = items
-            .iter()
-            .map(|item| Ok((i64::try_from(item.key.iid)?, serde_json::to_string(item)?)))
-            .collect::<Result<Vec<_>>>()?;
         let mut db = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let tx = db.transaction()?;
+        let mut rows = Vec::with_capacity(items.len());
+        for item in items {
+            let mut fresh = item.clone();
+            if kind == ItemKind::MergeRequest && matches!(fresh.state.as_str(), "merged" | "closed")
+            {
+                let body: Option<String> = tx
+                    .query_row(
+                        "SELECT body FROM items WHERE project=? AND kind=? AND iid=?",
+                        params![project, kind.segment(), i64::try_from(fresh.key.iid)?],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(body) = body {
+                    let previous: WorkItem = serde_json::from_str(&body)?;
+                    fresh.preserve_terminal_pipeline_metrics(&previous);
+                }
+            }
+            rows.push((
+                i64::try_from(fresh.key.iid)?,
+                serde_json::to_string(&fresh)?,
+            ));
+        }
         {
             let mut statement = tx.prepare_cached(
                 "INSERT INTO items(project,kind,iid,body,seen) VALUES(?,?,?,?,?)
@@ -185,6 +203,49 @@ impl ContentCache {
             tx.execute(
                 "UPDATE sync SET cursor=? WHERE project=? AND kind=?",
                 params![last.updated_at, project, kind.segment()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn merge_mr_pipeline_metrics(&self, item: &WorkItem) -> Result<()> {
+        if item.key.kind != ItemKind::MergeRequest
+            || !matches!(item.state.as_str(), "merged" | "closed")
+        {
+            return Ok(());
+        }
+        let mut db = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = db.transaction()?;
+        let project = i64::try_from(item.key.project)?;
+        let iid = i64::try_from(item.key.iid)?;
+        let body: Option<String> = tx
+            .query_row(
+                "SELECT body FROM items WHERE project=? AND kind=? AND iid=?",
+                params![project, item.key.kind.segment(), iid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(body) = body {
+            let mut cached: WorkItem = serde_json::from_str(&body)?;
+            if item.pipeline.is_some() {
+                cached.pipeline.clone_from(&item.pipeline);
+            }
+            if item.merged_at.is_some() {
+                cached.merged_at.clone_from(&item.merged_at);
+            }
+            if item.closed_at.is_some() {
+                cached.closed_at.clone_from(&item.closed_at);
+            }
+            cached.pipeline_metrics_fetched = true;
+            tx.execute(
+                "UPDATE items SET body=? WHERE project=? AND kind=? AND iid=?",
+                params![
+                    serde_json::to_string(&cached)?,
+                    project,
+                    item.key.kind.segment(),
+                    iid
+                ],
             )?;
         }
         tx.commit()?;

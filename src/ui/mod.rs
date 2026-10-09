@@ -165,6 +165,8 @@ pub struct State {
     pub error: Option<String>,
     pub list_pending: HashSet<u64>,
     pub detail_pending: Option<(ItemKey, u64)>,
+    /// Merge-request list rows whose one-shot pipeline metrics fetch is in flight.
+    pub mr_metrics_pending: HashSet<ItemKey>,
     pub trace_pending: HashSet<(u64, u64)>,
     pub mutation_pending: bool,
     pub user_pending: bool,
@@ -464,6 +466,10 @@ pub enum Msg {
         u64,
         Result<(Vec<WorkItem>, Option<CurrentIteration>), String>,
     ),
+    /// Request missing metrics for MRs in the current rendered list window.
+    LoadVisibleMrMetrics,
+    MrMetricsLoaded(ItemKey, String, Result<Box<WorkItem>, String>),
+    MrMetricsCached(ItemKey, Result<(), String>),
     DetailsLoaded(ItemKey, u64, Result<Box<Details>, String>),
     TraceLoaded(JobSource, u64, u64, bool, Result<TraceChunk, String>),
     /// Page 1 of the open project's pipelines plus expanded pipeline details.

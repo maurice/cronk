@@ -1110,7 +1110,7 @@ fn work_row(
             Text::new(if people[0].roles().is_empty() {
                 String::new()
             } else {
-                format!(" (also {})", people[0].roles())
+                format!(" (+ {})", people[0].roles())
             })
             .height(Length::Px(1))
             .overflow(Overflow::Ellipsis)

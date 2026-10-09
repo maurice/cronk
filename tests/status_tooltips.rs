@@ -181,8 +181,8 @@ fn list_people_keep_hover_details_and_allow_row_activation() {
             item.assignees = vec![item.author.clone(), assigned.clone()];
             item.reviewers = vec![item.author.clone(), assigned.clone(), reviewing.clone()];
             let (user, suffix) = match (role, tab) {
-                ("author", 2) => (item.author.clone(), " (also assigned)"),
-                ("author", _) => (item.author.clone(), " (also assigned, reviewing)"),
+                ("author", 2) => (item.author.clone(), " (+ assigned)"),
+                ("author", _) => (item.author.clone(), " (+ assigned, reviewing)"),
                 ("person-0", 2) => (assigned, " (assigned)"),
                 ("person-0", _) => (assigned, " (assigned, reviewing)"),
                 ("person-1", _) => (reviewing, " (reviewing)"),

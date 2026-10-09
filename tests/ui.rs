@@ -976,7 +976,7 @@ fn work_lists_merge_author_and_people_roles_by_identity() {
                     let suffix = if roles.is_empty() {
                         String::new()
                     } else {
-                        format!(" (also {})", roles.join(", "))
+                        format!(" (+ {})", roles.join(", "))
                     };
                     let title = format!(
                         "{}{}  Tidy metadata  by {}{suffix}",
@@ -1074,7 +1074,7 @@ fn work_list_long_titles_and_author_roles_do_not_wrap_or_repeat_people() {
             );
             if width >= 80 {
                 assert!(
-                    lines[title_index].contains("You (also assigned"),
+                    lines[title_index].contains("You (+ assigned"),
                     "{}",
                     frame.plain_text()
                 );

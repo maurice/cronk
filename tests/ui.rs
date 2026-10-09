@@ -907,6 +907,51 @@ fn header_shows_build_revision_on_the_right() {
 }
 
 #[test]
+fn header_uses_configured_account_label_without_theme_or_you() {
+    for (display, pattern, expected) in [
+        (UserDisplay::Username, false, "@demo-arin"),
+        (UserDisplay::Id, false, "1"),
+        (UserDisplay::Name, false, "Arin Example (demo)"),
+        (UserDisplay::Name, true, "Arin"),
+    ] {
+        let ui = mount(
+            Config {
+                user_display: display,
+                user_name_pattern: pattern.then(|| r"^(?P<first>\S+).*".into()),
+                user_name_format: pattern.then(|| "$first".into()),
+                ..config()
+            },
+            None,
+        );
+        let header = ui.capture_frame().to_lines()[0].clone();
+        assert!(
+            header
+                .trim_end()
+                .ends_with(&format!("{expected}  ·  {}", build_info::display_version())),
+            "{header}"
+        );
+        assert!(!header.contains(&ui.state().config.theme), "{header}");
+        assert!(!header.contains("You"), "{header}");
+        assert_eq!(ui.state().render_user(&ui.state().user), "You");
+    }
+}
+
+#[test]
+fn header_without_account_shows_only_version_on_the_right() {
+    let mut ui = mount(config(), None);
+    ui.state_mut().user = User::default();
+    ui.render();
+    let header = ui.capture_frame().to_lines()[0].clone();
+    assert!(
+        header.trim_end().ends_with(&build_info::display_version()),
+        "{header}"
+    );
+    assert!(!header.contains(&ui.state().config.theme), "{header}");
+    assert!(!header.contains("  ·  "), "{header}");
+    assert!(!header.contains("unknown"), "{header}");
+}
+
+#[test]
 fn builtin_tab_headers_underline_the_actual_first_letter_and_footer_shows_shortcuts() {
     let mut ui = mount(config(), None);
     ui.set_viewport(Rect {
@@ -3590,7 +3635,7 @@ fn small_project_viewport_snapshot() {
     let tag = build_info::display_version()
         .split_once('@')
         .map_or(build_info::display_version(), |(tag, _)| tag.to_owned());
-    assert!(lines[0].contains("You  ·  midnight"), "{}", lines[0]);
+    assert!(lines[0].contains("@demo-arin  ·  "), "{}", lines[0]);
     assert!(lines[0].contains(&format!("{tag}@")), "{}", lines[0]);
     assert_eq!(
         &lines[1..],
@@ -3633,7 +3678,7 @@ fn small_empty_filter_viewport_snapshot() {
     let tag = build_info::display_version()
         .split_once('@')
         .map_or(build_info::display_version(), |(tag, _)| tag.to_owned());
-    assert!(lines[0].contains("You  ·  midnight"), "{}", lines[0]);
+    assert!(lines[0].contains("@demo-arin  ·  "), "{}", lines[0]);
     assert!(lines[0].contains(&format!("{tag}@")), "{}", lines[0]);
     assert_eq!(
         &lines[1..],

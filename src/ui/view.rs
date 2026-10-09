@@ -757,7 +757,8 @@ fn brand(state: &State, colors: Colors) -> Element {
     let mut identity = Vec::new();
     if state.user.id != 0 || !state.user.username.is_empty() || !state.user.name.is_empty() {
         identity.push(
-            Span::new(state.render_user(&state.user)).style(colors.user_style(
+            // The header identifies the account; elsewhere the current user stays "You".
+            Span::new(state.user_formatter.render(&state.user)).style(colors.user_style(
                 state,
                 state.user.id,
                 Style::new().fg(colors.muted),
@@ -765,11 +766,7 @@ fn brand(state: &State, colors: Colors) -> Element {
         );
         identity.push(Span::new("  ·  "));
     }
-    identity.push(Span::new(format!(
-        "{}  ·  {}",
-        state.config.theme,
-        build_info::display_version()
-    )));
+    identity.push(Span::new(build_info::display_version()));
     HStack::new()
         .height(Length::Px(1))
         .padding((0, 2))

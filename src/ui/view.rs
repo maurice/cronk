@@ -1069,9 +1069,6 @@ fn work_row(
     };
     let style = interaction::style(ctx, &format!("item-{}", item_key(&item.key)), style);
     let mut title = vec![Span::new(format!("{}  ", item_id(&item.key))).fg(colors.accent)];
-    if item.draft {
-        title.push(Span::new("Draft · ").fg(colors.yellow));
-    }
     title.push(Span::new(item.title.clone()).bold());
     let mut labels = vec![Span::new("   ")];
     labels.extend(label_spans(&item.labels, colors));

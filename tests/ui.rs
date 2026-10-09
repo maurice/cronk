@@ -809,6 +809,43 @@ fn dialogs_and_palette_type_direct_shortcuts_without_switching_tabs() {
 }
 
 #[test]
+fn merge_request_list_renders_title_without_an_extra_draft_annotation() {
+    for theme in ["midnight", "dracula", "light"] {
+        for (draft, title) in [
+            (true, "Draft: Foo bar"),
+            (true, "WIP: Foo bar"),
+            (true, "Foo bar"),
+            (false, "Draft: literal title"),
+        ] {
+            let mut cfg = config();
+            cfg.active_tab = 3;
+            cfg.theme = theme.into();
+            cfg.animations = false;
+            let mut ui = mount(cfg, None);
+            let mut item = demo::items()
+                .into_iter()
+                .find(|item| item.key.kind == ItemKind::MergeRequest)
+                .unwrap();
+            item.title = title.into();
+            item.draft = draft;
+            let iid = item.key.iid;
+            ui.state_mut().items = vec![item];
+            for _ in 0..3 {
+                settle_layout(&mut ui);
+            }
+            let text = ui.capture_frame().plain_text();
+            let row = text
+                .lines()
+                .find(|row| row.contains(title))
+                .unwrap_or_else(|| panic!("missing title in {theme}:\n{text}"));
+            assert!(row.contains(&format!("!{iid}  {title}")), "{theme}: {row}");
+            assert!(!row.contains("Draft · "), "{theme}: {row}");
+            assert_eq!(ui.state().items[0].draft, draft);
+        }
+    }
+}
+
+#[test]
 fn issue_and_mr_fields_share_left_aligned_labels_and_value_columns() {
     for width in [80, 120] {
         let mut columns = Vec::new();

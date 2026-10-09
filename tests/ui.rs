@@ -809,7 +809,7 @@ fn dialogs_and_palette_type_direct_shortcuts_without_switching_tabs() {
 }
 
 #[test]
-fn work_lists_put_authors_after_titles_and_show_assignees_and_reviewers_below() {
+fn work_lists_put_authors_after_titles_and_label_other_peoples_roles() {
     for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
         for display in [UserDisplay::Username, UserDisplay::Name, UserDisplay::Id] {
             for (assignees, reviewers) in [(0, 0), (1, 2), (2, 0), (0, 1), (2, 2)] {
@@ -857,24 +857,26 @@ fn work_lists_put_authors_after_titles_and_show_assignees_and_reviewers_below() 
                         item.key.iid,
                         ui.state().render_user(&author)
                     );
-                    let people = |users: &[User]| {
-                        if users.is_empty() {
-                            "-".to_owned()
-                        } else {
-                            users
-                                .iter()
-                                .map(|user| ui.state().render_user(user))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        }
+                    let role_labels = |users: &[User], role: &str| {
+                        users
+                            .iter()
+                            .map(|user| format!("{} ({role})", ui.state().render_user(user)))
+                            .collect::<Vec<_>>()
                     };
-                    let mut metadata = format!(
-                        "{}  ·  {}",
-                        if labels { "bug" } else { "" },
-                        people(&item.assignees)
-                    );
+                    let mut people = role_labels(&item.assignees, "assigned");
                     if kind == ItemKind::MergeRequest {
-                        metadata.push_str(&format!(" / {}", people(&item.reviewers)));
+                        people.extend(role_labels(&item.reviewers, "reviewing"));
+                    }
+                    let mut metadata = if labels {
+                        "bug".to_owned()
+                    } else {
+                        String::new()
+                    };
+                    if !people.is_empty() {
+                        if labels {
+                            metadata.push_str("  ·  ");
+                        }
+                        metadata.push_str(&people.join(", "));
                     }
                     ui.state_mut().items = vec![item];
                     for _ in 0..3 {
@@ -901,7 +903,127 @@ fn work_lists_put_authors_after_titles_and_show_assignees_and_reviewers_below() 
 }
 
 #[test]
-fn work_list_long_titles_and_labels_keep_people_and_field_separators_visible() {
+fn work_lists_merge_author_and_people_roles_by_identity() {
+    for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
+        for display in [UserDisplay::Username, UserDisplay::Name, UserDisplay::Id] {
+            for author_is_current in [false, true] {
+                for author_roles in 0..4 {
+                    let mut cfg = config();
+                    cfg.active_tab = if kind == ItemKind::Issue { 2 } else { 3 };
+                    cfg.user_display = display;
+                    cfg.animations = false;
+                    let mut ui = mount_with_viewport(
+                        cfg,
+                        None,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            w: 180,
+                            h: 24,
+                        },
+                    );
+                    let mut item = demo::items()
+                        .into_iter()
+                        .find(|item| item.key.kind == kind)
+                        .unwrap();
+                    let author = if author_is_current {
+                        ui.state().user.clone()
+                    } else {
+                        User {
+                            id: 50,
+                            username: "originator".into(),
+                            name: "Originator".into(),
+                            ..User::default()
+                        }
+                    };
+                    let bob = User {
+                        id: 51,
+                        username: "bob".into(),
+                        name: "Bob".into(),
+                        ..User::default()
+                    };
+                    let carol = User {
+                        id: 52,
+                        username: "carol".into(),
+                        name: "Carol".into(),
+                        ..User::default()
+                    };
+                    item.title = "Tidy metadata".into();
+                    item.author = author.clone();
+                    item.assignees = vec![bob.clone(), bob.clone()];
+                    let mut bob_review_snapshot = bob.clone();
+                    bob_review_snapshot.username = "renamed-bob".into();
+                    item.reviewers = vec![bob_review_snapshot, carol.clone(), carol.clone()];
+                    if author_roles & 1 != 0 {
+                        item.assignees.push(author.clone());
+                    }
+                    if author_roles & 2 != 0 {
+                        let mut author_review_snapshot = author.clone();
+                        author_review_snapshot.name = "Renamed author".into();
+                        item.reviewers.push(author_review_snapshot);
+                    }
+                    item.labels.truncate(1);
+                    item.labels[0].name = "bug".into();
+                    item.pipeline = None;
+                    item.pipeline_metrics_fetched = false;
+                    let mut roles = Vec::new();
+                    if author_roles & 1 != 0 {
+                        roles.push("assigned");
+                    }
+                    if kind == ItemKind::MergeRequest && author_roles & 2 != 0 {
+                        roles.push("reviewing");
+                    }
+                    let suffix = if roles.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (also {})", roles.join(", "))
+                    };
+                    let title = format!(
+                        "{}{}  Tidy metadata  by {}{suffix}",
+                        kind.symbol(),
+                        item.key.iid,
+                        ui.state().render_user(&author)
+                    );
+                    let metadata = if kind == ItemKind::Issue {
+                        format!("bug  ·  {} (assigned)", ui.state().render_user(&bob))
+                    } else {
+                        format!(
+                            "bug  ·  {} (assigned, reviewing), {} (reviewing)",
+                            ui.state().render_user(&bob),
+                            ui.state().render_user(&carol)
+                        )
+                    };
+                    ui.state_mut().items = vec![item];
+                    for _ in 0..3 {
+                        settle_layout(&mut ui);
+                    }
+                    let frame = ui.capture_frame();
+                    let lines = frame.to_lines();
+                    let title_index = lines
+                        .iter()
+                        .position(|line| line.contains(&title))
+                        .unwrap_or_else(|| panic!("missing {title:?}:\n{}", frame.plain_text()));
+                    assert_eq!(
+                        lines[title_index + 1]
+                            .trim_start_matches(['▕', ' '])
+                            .trim_end(),
+                        metadata,
+                        "{}",
+                        frame.plain_text()
+                    );
+                    assert!(
+                        !lines[title_index + 1].contains(&ui.state().render_user(&author)),
+                        "{}",
+                        frame.plain_text()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn work_list_long_titles_and_author_roles_do_not_wrap_or_repeat_people() {
     for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
         for width in [48, 80, 120] {
             let mut cfg = config();
@@ -941,16 +1063,22 @@ fn work_list_long_titles_and_labels_keep_people_and_field_separators_visible() {
                 .unwrap_or_else(|| panic!("{}", frame.plain_text()));
             assert!(lines[title_index].contains('…'), "{}", frame.plain_text());
             assert!(
-                lines[title_index + 1]
-                    .trim_end()
-                    .ends_with(if kind == ItemKind::Issue {
-                        "  ·  You"
-                    } else {
-                        "  ·  You / You"
-                    }),
+                !lines[title_index + 1].contains("You"),
                 "{}",
                 frame.plain_text()
             );
+            assert!(
+                !lines[title_index + 1].contains('·'),
+                "{}",
+                frame.plain_text()
+            );
+            if width >= 80 {
+                assert!(
+                    lines[title_index].contains("You (also assigned"),
+                    "{}",
+                    frame.plain_text()
+                );
+            }
             assert!(
                 lines[title_index + 2].trim().is_empty(),
                 "rows must not wrap:\n{}",
@@ -1007,8 +1135,8 @@ fn merge_request_list_dense_metadata_and_long_author_names_truncate_without_wrap
         );
         let metadata = &lines[title_index + 1];
         assert!(metadata.contains("running  "), "{}", frame.plain_text());
-        assert!(metadata.contains("  ·  You, "), "{}", frame.plain_text());
-        assert!(metadata.contains(" / "), "{}", frame.plain_text());
+        assert!(metadata.contains("  ·  You"), "{}", frame.plain_text());
+        assert!(!metadata.contains(" / "), "{}", frame.plain_text());
         assert!(
             lines[title_index + 2].trim().is_empty(),
             "{}",
@@ -1042,7 +1170,7 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
             "failed  2 min ago",
         ),
         ("success", Some(192), None, None, "success  3m 12s"),
-        ("failed", None, None, None, "failed  ·"),
+        ("failed", None, None, None, "failed"),
     ] {
         let mut cfg = config();
         cfg.active_tab = 3;
@@ -1082,11 +1210,11 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
             metadata.trim_start_matches(['▕', ' ']).starts_with("bug  "),
             "{text}"
         );
-        let expected = format!("{}  ·  - / -", expected.trim_end_matches("  ·"));
         assert!(
-            metadata.trim_end().ends_with(&expected),
+            metadata.trim_end().ends_with(expected),
             "missing {expected:?}:\n{text}"
         );
+        assert!(!metadata.contains("  ·  "), "{text}");
         assert!(!text.contains("None"));
     }
 }
@@ -1145,8 +1273,14 @@ fn terminal_merge_request_without_pipeline_still_shows_when_it_closed() {
         settle_layout(&mut ui);
     }
     let text = ui.capture_frame().plain_text();
+    let metadata = text
+        .lines()
+        .find(|line| line.contains("no pipeline"))
+        .unwrap();
     assert!(
-        text.contains("no pipeline  closed 2 days ago  ·  - / -"),
+        metadata
+            .trim_end()
+            .ends_with("no pipeline  closed 2 days ago"),
         "{text}"
     );
 }
@@ -1164,7 +1298,16 @@ fn merge_request_list_renders_title_without_an_extra_draft_annotation() {
             cfg.active_tab = 3;
             cfg.theme = theme.into();
             cfg.animations = false;
-            let mut ui = mount(cfg, None);
+            let mut ui = mount_with_viewport(
+                cfg,
+                None,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 120,
+                    h: 24,
+                },
+            );
             let mut item = demo::items()
                 .into_iter()
                 .find(|item| item.key.kind == ItemKind::MergeRequest)

@@ -1,7 +1,7 @@
 use cronk::{
     config::Config,
     demo,
-    model::{ItemKey, ItemKind},
+    model::{ItemKey, ItemKind, User},
     ui::{Cronk, Msg, Scope},
 };
 use tui_lipan::{
@@ -158,19 +158,34 @@ fn list_status_and_pipeline_dots_have_hover_only_explanations_in_every_theme() {
 fn list_people_keep_hover_details_and_allow_row_activation() {
     for tab in [2, 3] {
         for role in if tab == 2 {
-            vec!["author", "assignee-0"]
+            vec!["author", "person-0"]
         } else {
-            vec!["author", "assignee-0", "reviewer-0", "reviewer-1"]
+            vec!["author", "person-0", "person-1"]
         } {
             let mut ui = mount("midnight", tab, None);
             let mut item = ui.state().visible_items()[0].clone();
             item.title = "Short title".into();
             item.labels.clear();
-            let user = match role {
-                "author" => item.author.clone(),
-                "assignee-0" => item.assignees[0].clone(),
-                "reviewer-0" => item.reviewers[0].clone(),
-                "reviewer-1" => item.reviewers[1].clone(),
+            let assigned = User {
+                id: 50,
+                username: "bob".into(),
+                name: "Bob".into(),
+                ..User::default()
+            };
+            let reviewing = User {
+                id: 51,
+                username: "carol".into(),
+                name: "Carol".into(),
+                ..User::default()
+            };
+            item.assignees = vec![item.author.clone(), assigned.clone()];
+            item.reviewers = vec![item.author.clone(), assigned.clone(), reviewing.clone()];
+            let (user, suffix) = match (role, tab) {
+                ("author", 2) => (item.author.clone(), " (also assigned)"),
+                ("author", _) => (item.author.clone(), " (also assigned, reviewing)"),
+                ("person-0", 2) => (assigned, " (assigned)"),
+                ("person-0", _) => (assigned, " (assigned, reviewing)"),
+                ("person-1", _) => (reviewing, " (reviewing)"),
                 _ => unreachable!(),
             };
             ui.state_mut().items = vec![item.clone()];
@@ -186,6 +201,12 @@ fn list_people_keep_hover_details_and_allow_row_activation() {
             assert_eq!(
                 trigger.w as usize,
                 ui.state().render_user(&user).chars().count()
+                    + if role == "author" { 0 } else { suffix.len() }
+            );
+            assert!(
+                ui.capture_frame()
+                    .plain_text()
+                    .contains(&format!("{}{suffix}", ui.state().render_user(&user)))
             );
             let title_row = rect(
                 &ui,

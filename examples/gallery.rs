@@ -18,6 +18,7 @@ fn main() -> anyhow::Result<()> {
     for (name, tab, route, section, theme) in [
         ("dashboard", 0, None, None, "midnight"),
         ("projects", 1, None, None, "midnight"),
+        ("merge-requests", 3, None, None, "midnight"),
         ("project-details", 1, None, None, "midnight"),
         ("project-details-light", 1, None, None, "light"),
         ("project-details-partial", 1, None, None, "midnight"),

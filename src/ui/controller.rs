@@ -370,6 +370,8 @@ impl Component for Cronk {
                         ctx.link().send(Msg::LoadProbes);
                     }
                 }
+                // A full update also refreshes local elapsed/relative pipeline
+                // times, even when network sync is not due or is in backoff.
                 return Update::with_command(Command::after(
                     Duration::from_secs(1),
                     |link: CommandLink<Msg>| link.send(Msg::Tick),

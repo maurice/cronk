@@ -4771,6 +4771,43 @@ mod tests {
     }
 
     #[test]
+    fn mr_list_enrichment_retains_pipeline_timings_without_pipeline_detail_requests() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/issues" => Reply::json(json!([])),
+            "/api/v4/projects/7/merge_requests" => {
+                let mut item = raw_item(1, "opened");
+                item["unresolved_discussions_count"] = json!(0);
+                Reply::json(json!([item]))
+            }
+            "/api/v4/projects/7/merge_requests/1" => {
+                let mut item = raw_item(1, "opened");
+                item["unresolved_discussions_count"] = json!(0);
+                item["head_pipeline"] = json!({
+                    "id": 77, "status": "success", "duration": 192,
+                    "started_at": "2026-09-28T11:54:48Z",
+                    "finished_at": "2026-09-28T11:58:00Z",
+                    "updated_at": "2026-09-28T11:58:00Z"
+                });
+                Reply::json(item)
+            }
+            other => panic!("unexpected request {other}"),
+        });
+        let items = mock.client().list_project(&project()).unwrap();
+        let pipeline = items[0].pipeline.as_ref().unwrap();
+        assert_eq!(pipeline.duration, Some(192));
+        assert_eq!(pipeline.started_at.as_deref(), Some("2026-09-28T11:54:48Z"));
+        assert_eq!(
+            pipeline.finished_at.as_deref(),
+            Some("2026-09-28T11:58:00Z")
+        );
+        assert_eq!(
+            pipeline.timing_label(crate::demo::NOW_UNIX),
+            "3m 12s · 2 min ago"
+        );
+        assert_eq!(mock.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
     fn dashboard_enrichment_is_bounded_and_unknown_does_not_mean_zero() {
         let mock = Mock::new(|request| {
             let url = request.url();

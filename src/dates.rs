@@ -75,6 +75,41 @@ pub fn format_range(start: Option<&str>, due: Option<&str>) -> String {
     format_range_with(start, due, locale_from_env())
 }
 
+/// Unix seconds for an RFC 3339 timestamp such as GitLab's `2026-09-28T10:15:00.000Z`.
+pub fn parse_unix(timestamp: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(timestamp.trim())
+        .ok()
+        .map(|t| t.timestamp())
+}
+
+/// Coarse relative time (`just now`, `2 min ago`, `3 h ago`, `yesterday`, `5 days ago`),
+/// falling back to the locale date after a month. `now` is explicit so captures stay deterministic.
+pub fn format_relative(timestamp: &str, now_unix: i64) -> String {
+    let Some(then) = parse_unix(timestamp) else {
+        return timestamp.to_owned();
+    };
+    let delta = now_unix - then;
+    if delta < 45 {
+        "just now".into()
+    } else if delta < 90 {
+        "1 min ago".into()
+    } else if delta < 3600 {
+        format!("{} min ago", (delta + 30) / 60)
+    } else if delta < 7200 {
+        "1 h ago".into()
+    } else if delta < 86_400 {
+        format!("{} h ago", delta / 3600)
+    } else if delta < 2 * 86_400 {
+        "yesterday".into()
+    } else if delta < 31 * 86_400 {
+        format!("{} days ago", delta / 86_400)
+    } else {
+        chrono::DateTime::from_timestamp(then, 0)
+            .map(|t| format_date(t.date_naive(), locale_from_env()))
+            .unwrap_or_else(|| timestamp.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +136,17 @@ mod tests {
     #[test]
     fn missing_or_unparseable_dates_are_shown_plainly() {
         assert_eq!(format_range_with(None, Some("soon"), None), "? - soon");
+    }
+
+    #[test]
+    fn relative_times_are_coarse() {
+        let now = parse_unix("2026-09-28T12:00:00Z").unwrap();
+        let rel = |t: &str| format_relative(t, now);
+        assert_eq!(rel("2026-09-28T11:59:40Z"), "just now");
+        assert_eq!(rel("2026-09-28T11:58:00Z"), "2 min ago");
+        assert_eq!(rel("2026-09-28T09:10:00Z"), "2 h ago");
+        assert_eq!(rel("2026-09-27T09:10:00Z"), "yesterday");
+        assert_eq!(rel("2026-09-20T09:10:00Z"), "8 days ago");
+        assert_eq!(rel("nonsense"), "nonsense");
     }
 }

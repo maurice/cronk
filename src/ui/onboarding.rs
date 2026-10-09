@@ -267,6 +267,13 @@ impl Cronk {
         ctx.state.sync_progress.clear();
         ctx.state.list_epoch += 1;
         ctx.state.list_pending.clear();
+        // Pipeline windows and indicators belong to the previous client.
+        ctx.state.project_pipelines.clear();
+        ctx.state.latest_pipeline.clear();
+        ctx.state.drilled = None;
+        ctx.state.pipeline_expanded.clear();
+        ctx.state.pipeline_collapsed.clear();
+        self.restart_pipeline_sync(ctx);
         ctx.state.user = validation.user;
         ctx.state.user_epoch += 1;
         ctx.state.user_pending = false;

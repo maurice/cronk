@@ -366,5 +366,5 @@ fn tooltips_explain_live_logs_sync_and_diff_warnings_and_do_not_block_job_clicks
     }
     assert!(ui.state().expanded.contains(&job));
     assert_eq!(ui.state().scope, Scope::Section);
-    assert_eq!(ui.state().config.section, Some(3));
+    assert_eq!(ui.state().config.section, Some(2));
 }

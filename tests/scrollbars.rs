@@ -615,6 +615,7 @@ fn detail_fixture(details: &mut Details) {
         id: 700,
         status: "running".into(),
         web_url: "https://example.invalid/pipeline".into(),
+        ..Pipeline::default()
     });
     details.warnings.clear();
     // Deliberately interleave timestamps and tie them across different IDs. Neither
@@ -1109,7 +1110,7 @@ fn focused_detail_items_use_the_same_boundary_band_and_preserve_it_on_reversal()
             let sections: &[usize] = if matches!(screen, Screen::Issue) {
                 &[0]
             } else {
-                &[0, 3, 4]
+                &[0, 2, 3]
             };
             for &section in sections {
                 select_detail_section(&mut ui, area, section);
@@ -1120,14 +1121,14 @@ fn focused_detail_items_use_the_same_boundary_band_and_preserve_it_on_reversal()
                         let len = ui.state().fields().len();
                         ((0..len).map(|i| format!("edit-field-{i}")).collect(), len)
                     }
-                    3 => {
+                    2 => {
                         let jobs = &ui.state().details.as_ref().unwrap().jobs;
                         (
                             jobs.iter().map(|j| format!("job-{}", j.id)).collect(),
                             jobs.len(),
                         )
                     }
-                    4 => {
+                    3 => {
                         let discussions = &ui.state().details.as_ref().unwrap().discussions;
                         (
                             discussions
@@ -1544,7 +1545,7 @@ fn wheel_to_detail_text(ui: &mut Ui, area: Rect, marker: &str) {
 fn detail_job_clicks_and_keyboard_actions_expand_inline_logs() {
     let (mut ui, viewport_key) = detail_mount(Screen::MergeRequest, "midnight", 80, 26);
     let area = detail_area(&ui, &viewport_key);
-    select_detail_section(&mut ui, area, 3);
+    select_detail_section(&mut ui, area, 2);
     page_to_detail_key(&mut ui, area, "job-30002");
     assert!(!ui.state().expanded.contains(&30_002));
     click_detail_key(&mut ui, area, "job-30002");
@@ -1555,7 +1556,7 @@ fn detail_job_clicks_and_keyboard_actions_expand_inline_logs() {
     if ui.state().scope == Scope::Section {
         key(&mut ui, KeyCode::Esc);
     }
-    select_detail_section(&mut ui, area, 3);
+    select_detail_section(&mut ui, area, 2);
     key(&mut ui, KeyCode::Enter);
     assert_eq!(ui.state().scope, Scope::Section);
     key(&mut ui, KeyCode::Down);
@@ -1575,12 +1576,12 @@ fn detail_job_clicks_and_keyboard_actions_expand_inline_logs() {
 fn detail_discussion_click_focuses_the_correct_inline_thread_for_reply_and_resolve() {
     let (mut ui, viewport_key) = detail_mount(Screen::MergeRequest, "midnight", 80, 26);
     let area = detail_area(&ui, &viewport_key);
-    select_detail_section(&mut ui, area, 4);
+    select_detail_section(&mut ui, area, 3);
     page_to_detail_key(&mut ui, area, "discussion-scroll-thread-2");
     click_detail_key(&mut ui, area, "discussion-scroll-thread-2");
     assert_eq!(ui.state().scope, Scope::Section);
-    assert_eq!(ui.state().config.section, Some(4));
-    assert_eq!(ui.state().section_cursor, 4);
+    assert_eq!(ui.state().config.section, Some(3));
+    assert_eq!(ui.state().section_cursor, 3);
     assert_eq!(ui.state().config.field, 2);
     assert!(ui.state().dialog.is_none());
     key(&mut ui, KeyCode::Char('R'));

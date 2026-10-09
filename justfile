@@ -33,8 +33,11 @@ lint:
     {{mise}} cargo clippy --locked --all-targets -- -D warnings
 
 # Nextest with any cargo/nextest args, e.g. `just test --lib -E 'test(name)'`.
+# Debug-build tests render whole detail documents through tui-lipan's recursive
+# layout, which needs ~2.1 MiB of stack: just above libtest's 2 MiB thread default.
+# The installed binary renders on the main thread (8 MiB on Linux) and is unaffected.
 test *args:
-    {{mise}} cargo nextest run --locked "$@"
+    RUST_MIN_STACK=8388608 {{mise}} cargo nextest run --locked "$@"
 
 test-all:
     just test --all-targets

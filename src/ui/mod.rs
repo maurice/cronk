@@ -9,6 +9,7 @@ pub use logs::{LogView, TraceIndex};
 
 pub use completion::Completion;
 
+use crate::gitlab::Pipelines;
 use crate::{
     config::{Config, UserFormatter},
     filter::Query,
@@ -93,7 +94,9 @@ pub enum Scope {
 
 pub struct State {
     pub config: Config,
-    pub(super) saved_config: Config,
+    // Boxed: tui-lipan's recursive layout keeps `State`-sized frames in debug
+    // builds, so large rarely-touched fields live on the heap.
+    pub(super) saved_config: Box<Config>,
     pub(super) navigation_writer: Option<crate::navigation::Writer>,
     pub(super) navigation_snapshot: Option<crate::navigation::Snapshot>,
     pub(super) navigation_selections: BTreeMap<String, crate::navigation::Selection>,
@@ -133,12 +136,30 @@ pub struct State {
     pub expanded: HashSet<u64>,
     pub collapsed: HashSet<u64>,
     pub log_views: HashMap<u64, LogView>,
+    /// Memory-only recent pipeline windows per project (never cached on disk).
+    pub project_pipelines: HashMap<u64, ProjectPipelines>,
+    /// Newest pipeline per project from the background probe or page 1.
+    pub latest_pipeline: HashMap<u64, Pipeline>,
+    pub pipeline_expanded: HashSet<u64>,
+    pub pipeline_collapsed: HashSet<u64>,
+    /// Project pipeline whose jobs the cursor is inside (Pipelines section).
+    pub drilled: Option<u64>,
+    pub pipeline_epoch: u64,
+    /// (project, page) list requests in flight.
+    pub pipelines_pending: HashSet<(u64, usize)>,
+    /// Pipeline ids whose detail + jobs are in flight.
+    pub pipeline_detail_pending: HashSet<u64>,
+    pub probe_pending: HashSet<u64>,
+    /// Projects whose pipelines returned 403/404: skipped until refresh or a visibility change.
+    pub pipelines_unavailable: HashMap<u64, String>,
+    pub next_pipelines: Duration,
+    pub next_probe: Duration,
     pub log_focus: Option<u64>,
     pub log_zoom: bool,
     pub log_zoom_from_focus: bool,
     pub log_search: Option<TextInput>,
     pub dialog: Option<Dialog>,
-    pub onboarding: onboarding::SetupState,
+    pub onboarding: Box<onboarding::SetupState>,
     pub current_iterations: HashMap<u64, Option<CurrentIteration>>,
     pub status: String,
     pub error: Option<String>,
@@ -162,9 +183,103 @@ pub struct State {
     pub lookup_inflight: Option<u64>,
 }
 
+/// One pipeline's detail, its jobs, and any warnings from the jobs request.
+pub type LoadedPipeline = (Pipeline, Vec<Job>, Vec<String>);
+
+/// Jobs of one pipeline plus the pipeline `updated_at` they were fetched for, so a
+/// pipeline that finished since is fetched again instead of showing stale states.
+#[derive(Clone, Debug, Default)]
+pub struct PipelineJobs {
+    pub jobs: Vec<Job>,
+    pub stamp: Option<String>,
+}
+
+/// Recent pipelines of one project. Only expanded or drilled pipelines carry jobs.
+#[derive(Clone, Debug, Default)]
+pub struct ProjectPipelines {
+    /// Newest first, deduplicated by id.
+    pub pipelines: Vec<Pipeline>,
+    pub pages_loaded: usize,
+    /// The last page was short: there is nothing older to load.
+    pub exhausted: bool,
+    pub jobs: HashMap<u64, PipelineJobs>,
+    /// Page 1 has arrived at least once; distinguishes "none" from "not fetched".
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
+impl ProjectPipelines {
+    pub fn get(&self, id: u64) -> Option<&Pipeline> {
+        self.pipelines.iter().find(|p| p.id == id)
+    }
+    pub fn position(&self, id: u64) -> Option<usize> {
+        self.pipelines.iter().position(|p| p.id == id)
+    }
+    /// Whether a footer row offering older pipelines is shown.
+    pub fn can_load_more(&self) -> bool {
+        self.loaded && !self.exhausted && self.pages_loaded < crate::gitlab::PIPELINE_PAGES
+    }
+    /// Cursor rows: pipelines plus the optional footer.
+    pub fn row_count(&self) -> usize {
+        self.pipelines.len() + usize::from(self.can_load_more())
+    }
+    /// Apply one page. Page 1 is authoritative for the window head: rows that left
+    /// the newest twenty are dropped (except expanded/drilled ones, which the user is
+    /// looking at) so a long session cannot grow the window without bound. Older
+    /// pages are unioned by id, because offset pagination is not a snapshot.
+    pub fn merge(&mut self, page: usize, fresh: Vec<Pipeline>, keep: &HashSet<u64>) {
+        let short = fresh.len() < crate::gitlab::PIPELINE_PAGE;
+        if page == 1 && self.pages_loaded <= 1 {
+            let fresh_ids: HashSet<u64> = fresh.iter().map(|p| p.id).collect();
+            self.pipelines
+                .retain(|p| fresh_ids.contains(&p.id) || keep.contains(&p.id));
+            self.jobs
+                .retain(|id, _| fresh_ids.contains(id) || keep.contains(id));
+            self.exhausted = short;
+        } else if page >= self.pages_loaded && short {
+            self.exhausted = true;
+        }
+        for pipeline in fresh {
+            match self.pipelines.iter_mut().find(|p| p.id == pipeline.id) {
+                Some(existing) => {
+                    // The list endpoint omits detail-only fields; keep the ones that never
+                    // change, and the timings while the pipeline itself is unchanged.
+                    let same = existing.updated_at == pipeline.updated_at;
+                    let previous = std::mem::replace(existing, pipeline);
+                    existing.user = existing.user.take().or(previous.user);
+                    existing.started_at = existing.started_at.take().or(previous.started_at);
+                    if same {
+                        existing.duration = existing.duration.or(previous.duration);
+                        existing.finished_at = existing.finished_at.take().or(previous.finished_at);
+                        existing.queued_duration =
+                            existing.queued_duration.or(previous.queued_duration);
+                    }
+                }
+                None => self.pipelines.push(pipeline),
+            }
+        }
+        // GitLab's id order is creation order; keep the window newest first.
+        self.pipelines
+            .sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        self.pages_loaded = self.pages_loaded.max(page);
+        self.loaded = true;
+        self.error = None;
+    }
+}
+
+/// Which collection of jobs the job cursor, traces and log views refer to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum JobSource {
+    /// A merge request's head pipeline (jobs may live in a fork project).
+    Item(ItemKey),
+    /// A drilled-in project pipeline.
+    Pipeline { project: u64, pipeline: u64 },
+}
+
 #[derive(Default)]
 pub(super) struct TabCache {
     details: Option<Details>,
+    drilled: Option<u64>,
     traces: HashMap<u64, Trace>,
     log_views: HashMap<u64, LogView>,
     next_details: Duration,
@@ -350,7 +465,20 @@ pub enum Msg {
         Result<(Vec<WorkItem>, Option<CurrentIteration>), String>,
     ),
     DetailsLoaded(ItemKey, u64, Result<Box<Details>, String>),
-    TraceLoaded(ItemKey, u64, u64, bool, Result<TraceChunk, String>),
+    TraceLoaded(JobSource, u64, u64, bool, Result<TraceChunk, String>),
+    /// Page 1 of the open project's pipelines plus expanded pipeline details.
+    LoadPipelines,
+    LoadOlderPipelines,
+    PipelinesLoaded(u64, u64, usize, Result<Pipelines<Vec<Pipeline>>, String>),
+    PipelineLoaded(u64, u64, u64, Result<Box<LoadedPipeline>, String>),
+    /// Expand/collapse a project pipeline row.
+    TogglePipeline(u64),
+    /// Click on a project pipeline row: select it (leaving any drilled pipeline) and toggle.
+    ClickPipeline(u64),
+    /// Enter the jobs of a project pipeline.
+    DrillPipeline(u64),
+    LoadProbes,
+    ProbeLoaded(u64, u64, Result<Pipelines<Option<Box<Pipeline>>>, String>),
     ProjectResolved(Result<Project, String>),
     SetupValidate(u64),
     SetupValidated(u64, Box<onboarding::Validation>),
@@ -382,7 +510,8 @@ pub enum Msg {
     ListViewportChanged,
     ToggleProject,
     ToggleProjectKind(ItemKind),
-    ProjectDetailViewport(u64, u64, Box<ScrollViewportEvent>),
+    /// Project detail viewport: project, epoch, reveal target at render time, event.
+    ProjectDetailViewport(u64, u64, Option<String>, Box<ScrollViewportEvent>),
     ToggleJob(u64),
     FocusLog(u64),
     ZoomLog,
@@ -640,10 +769,108 @@ impl State {
         }
     }
 
+    /// The jobs the cursor, trace polling and log views currently operate on, with
+    /// the project that owns them.
+    pub fn current_jobs(&self) -> Option<(u64, &[Job])> {
+        if let Some(key) = &self.config.route {
+            let details = self.details.as_ref().filter(|d| d.item.key == *key)?;
+            return Some((
+                details.jobs_project.unwrap_or(key.project),
+                details.jobs.as_slice(),
+            ));
+        }
+        if self.project_details()
+            && let Some(project) = self.config.project_route
+            && let Some(pipeline) = self.drilled
+        {
+            let jobs = &self
+                .project_pipelines
+                .get(&project)?
+                .jobs
+                .get(&pipeline)?
+                .jobs;
+            return Some((project, jobs.as_slice()));
+        }
+        None
+    }
+
+    pub fn job_source(&self) -> Option<JobSource> {
+        if let Some(key) = &self.config.route {
+            return Some(JobSource::Item(key.clone()));
+        }
+        if self.project_details()
+            && let Some(project) = self.config.project_route
+            && let Some(pipeline) = self.drilled
+        {
+            return Some(JobSource::Pipeline { project, pipeline });
+        }
+        None
+    }
+
+    /// Whether the job cursor is active: the MR Pipeline section, or a drilled
+    /// project pipeline in the Pipelines section.
+    pub fn in_jobs(&self) -> bool {
+        self.scope == Scope::Section
+            && match self.section_name() {
+                "Pipeline" => self.config.route.is_some(),
+                "Pipelines" => self.drilled.is_some(),
+                _ => false,
+            }
+    }
+
     pub fn selected_job(&self) -> Option<&Job> {
-        (self.scope == Scope::Section && self.section_name() == "Jobs")
-            .then(|| self.details.as_ref()?.jobs.get(self.config.field))
+        self.in_jobs()
+            .then(|| self.current_jobs()?.1.get(self.config.field))
             .flatten()
+    }
+
+    /// Project details are open for a project whose pipelines are synced.
+    pub fn pipelines_section_present(&self) -> bool {
+        self.project_details() && self.section_index("Pipelines").is_some()
+    }
+
+    /// The open project's pipeline window, if the Pipelines section applies.
+    pub fn open_project_pipelines(&self) -> Option<&ProjectPipelines> {
+        let project = self
+            .config
+            .project_route
+            .filter(|_| self.project_details())?;
+        self.project_pipelines.get(&project)
+    }
+
+    /// Most recent pipeline is open by default; explicit choices win.
+    pub fn pipeline_expanded(&self, project: u64, id: u64) -> bool {
+        if self.pipeline_collapsed.contains(&id) {
+            return false;
+        }
+        if self.pipeline_expanded.contains(&id) || self.drilled == Some(id) {
+            return true;
+        }
+        self.project_pipelines
+            .get(&project)
+            .and_then(|p| p.pipelines.first())
+            .is_some_and(|first| first.id == id)
+    }
+
+    /// Project pipelines whose detail and jobs should be fetched on each cycle: expanded
+    /// ones that are active, never loaded, or changed since their jobs were fetched.
+    pub fn wanted_pipelines(&self, project: u64) -> Vec<u64> {
+        let Some(window) = self.project_pipelines.get(&project) else {
+            return Vec::new();
+        };
+        window
+            .pipelines
+            .iter()
+            .filter(|p| {
+                self.pipeline_expanded(project, p.id)
+                    && (p.active()
+                        || window
+                            .jobs
+                            .get(&p.id)
+                            .is_none_or(|loaded| loaded.stamp != p.updated_at))
+            })
+            .map(|p| p.id)
+            .collect()
     }
 
     pub fn job_expanded(&self, job: &Job) -> bool {
@@ -669,9 +896,8 @@ impl State {
                 .saturating_sub(2 + extra + usize::from(self.log_search.is_some()))
                 .max(1)
         } else {
-            self.details
-                .as_ref()
-                .and_then(|d| d.jobs.iter().find(|j| j.id == id))
+            self.current_jobs()
+                .and_then(|(_, jobs)| jobs.iter().find(|j| j.id == id))
                 .map_or(8, |j| if j.running() { 8 } else { 18 })
         }
     }
@@ -785,6 +1011,16 @@ impl State {
             3 => Some(ItemKind::MergeRequest),
             n if n >= 4 => self.config.views.get(n - 4).map(|v| v.kind),
             _ => None,
+        }
+    }
+    /// Wall-clock seconds for relative times; fixed in demo mode so captures are deterministic.
+    pub fn now_unix(&self) -> i64 {
+        if self.demo {
+            crate::demo::NOW_UNIX
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64)
         }
     }
     pub fn is_current_user(&self, id: u64) -> bool {
@@ -944,7 +1180,18 @@ impl State {
 
     pub fn sections(&self) -> &'static [&'static str] {
         if self.project_details() {
-            &["Fields", "Pipelines", "Forget this project"]
+            // Pipelines imply code, which implies merge requests: a project with MR
+            // visibility off is not synced for pipelines either.
+            if self
+                .config
+                .project_route
+                .and_then(|id| self.project(id))
+                .is_some_and(|p| p.kind_visible(ItemKind::MergeRequest))
+            {
+                &["Fields", "Pipelines", "Forget this project"]
+            } else {
+                &["Fields", "Forget this project"]
+            }
         } else if self
             .config
             .route
@@ -955,13 +1202,16 @@ impl State {
                 "Fields",
                 "Description",
                 "Pipeline",
-                "Jobs",
                 "Discussions",
                 "Changes",
             ]
         } else {
             &["Fields", "Description", "Activity"]
         }
+    }
+    /// Index of a named section in the current detail view.
+    pub fn section_index(&self, name: &str) -> Option<usize> {
+        self.sections().iter().position(|s| *s == name)
     }
     pub fn section_name(&self) -> &str {
         self.sections()
@@ -974,13 +1224,30 @@ impl State {
             match self.section_name() {
                 "Forget this project" => return "project-remove".into(),
                 "Fields" => return format!("edit-field-{}", self.config.field),
-                "Jobs" => {
+                "Pipeline" => {
                     if let Some(job) = self
                         .details
                         .as_ref()
                         .and_then(|d| d.jobs.get(self.config.field))
                     {
                         return format!("job-{}", job.id);
+                    }
+                }
+                "Pipelines" => {
+                    if let Some(job) = self.selected_job() {
+                        return format!("job-{}", job.id);
+                    }
+                    if let Some(id) = self.drilled {
+                        // Jobs still loading: aim at the pipeline row, not the list top.
+                        return format!("pipeline-{id}");
+                    }
+                    if let Some(window) = self.open_project_pipelines() {
+                        if let Some(pipeline) = window.pipelines.get(self.config.field) {
+                            return format!("pipeline-{}", pipeline.id);
+                        }
+                        if window.can_load_more() {
+                            return "pipelines-older".into();
+                        }
                     }
                 }
                 "Discussions" => {

@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
                 iid: 102,
                 kind: ItemKind::MergeRequest,
             }),
-            Some(3),
+            Some(2),
             "midnight",
         ),
         (
@@ -63,9 +63,11 @@ fn main() -> anyhow::Result<()> {
                 iid: 102,
                 kind: ItemKind::MergeRequest,
             }),
-            Some(5),
+            Some(4),
             "dracula",
         ),
+        ("project-pipelines", 1, None, Some(1), "midnight"),
+        ("project-pipeline-jobs", 1, None, Some(1), "midnight"),
     ] {
         let mut projects = demo::projects();
         if name == "project-details-partial" {
@@ -80,7 +82,7 @@ fn main() -> anyhow::Result<()> {
         }
         let config = Config {
             projects,
-            project_route: name.starts_with("project-details").then_some(9001),
+            project_route: name.starts_with("project-").then_some(9001),
             active_tab: tab,
             route,
             section,
@@ -105,6 +107,20 @@ fn main() -> anyhow::Result<()> {
             h: 40,
         });
         backend.state_mut().tick = 12;
+        if name == "projects" {
+            backend.dispatch(Msg::LoadProbes)?;
+            backend.pump()?;
+        }
+        if name.starts_with("project-pipeline") {
+            backend.dispatch(Msg::LoadPipelines)?;
+            backend.pump()?;
+            backend.dispatch(Msg::Move(2))?;
+            if name == "project-pipeline-jobs" {
+                let newest = backend.state().project_pipelines[&9001].pipelines[0].id;
+                backend.dispatch(Msg::DrillPipeline(newest))?;
+                backend.pump()?;
+            }
+        }
         backend.dispatch(Msg::LoadTraces)?;
         backend.render();
         let snapshot = backend.capture_ui_snapshot();

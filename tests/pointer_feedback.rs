@@ -484,11 +484,11 @@ fn detail_headers_fields_jobs_discussions_and_back_have_hover() {
         assert_hover(&mut ui, "breadcrumb-back");
         assert_hover(&mut ui, "detail-section-0");
         assert_hover(&mut ui, "edit-field-0");
-        ui.dispatch(Msg::Section(3)).unwrap();
+        ui.dispatch(Msg::Section(2)).unwrap();
         settle(&mut ui);
         let job = ui.state().details.as_ref().unwrap().jobs[0].id;
         assert_hover(&mut ui, &format!("job-{job}"));
-        ui.dispatch(Msg::Section(4)).unwrap();
+        ui.dispatch(Msg::Section(3)).unwrap();
         settle(&mut ui);
         let discussion = ui.state().details.as_ref().unwrap().discussions[0]
             .id

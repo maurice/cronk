@@ -287,6 +287,7 @@ fn fixture_item(n: usize, project: u64) -> WorkItem {
             id: n as u64,
             status: ["success", "failed", "running"][n % 3].into(),
             web_url: String::new(),
+            ..Pipeline::default()
         }),
         unresolved: Some(if n.is_multiple_of(4) { 2 } else { 0 }),
         ..WorkItem::default()

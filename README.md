@@ -84,8 +84,10 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | `PageUp` / `PageDown` | Page through a list or scroll the whole detail document |
 | Mouse click / wheel | Open rows, choose tabs/sections, select fields, scroll |
 | Scrollbar track click / thumb drag | Scroll the corresponding viewport without activating its contents |
-| `Space` in Projects | Include/hide the selected project in other lists |
-| `Space` in Jobs | Expand/collapse the selected job, including running jobs |
+| `Space` in the Projects list | Include/hide the selected project in other lists (in details, Space only acts on the focused field, pipeline or job) |
+| `Space` on a job | Expand/collapse the selected job, including running jobs |
+| `Space` on a project pipeline | Expand/collapse that pipeline's summary |
+| `Enter` on a project pipeline | Open its jobs; `Esc` returns to the pipeline row |
 | `Enter` on a job | Focus its logs (expanding if needed); arrows/page keys scroll logs |
 | `Ctrl+↑/↓`, `Ctrl+PageUp/PageDown` on a job | Scroll its logs without entering log focus |
 | `z` on a job / in its logs | Toggle zoom directly; mouse wheel and draggable scrollbar scroll zoomed logs |
@@ -100,7 +102,7 @@ The bundle supplements (does not replace) system trust roots and is read when th
 | `c` in a detail | Add a comment |
 | `R` / `Enter` in Discussions | Reply to the selected thread |
 | `x` in Discussions | Confirm resolve/reopen |
-| `r` in Jobs | Confirm retry of the selected finished job |
+| `r` on a job | Confirm retry of the selected finished job |
 | `r` elsewhere / `Ctrl+R` | Refresh all visible projects and the open detail |
 | `Ctrl+J` in a multiline editor | Insert a newline (`Enter` submits) |
 | `?` | Keyboard guide |
@@ -114,7 +116,7 @@ Overflowing lists, detail panes, dialogs, and multiline editors show a theme-col
 
 The Dashboard shows open work where you are the author, assignee, or (for MRs) a reviewer. Each row separates **why it is here** (your role) from its **attention signals**: failed pipeline, known unresolved threads, reviewer assignment, missing reviewers on your ready MR, passing/in-progress checks, draft state, or otherwise open work. Multiple signals can appear together. It orders actionable blockers first, then review assignments and reviewer gaps, then checks in progress, drafts, other MRs, and issues. Reviewer assignment does not prove a review is still pending, and a missing discussion count is unknown rather than zero. Passing checks are not a claim that approvals, mergeability, or company policy checks are satisfied. Enter opens the real detail while preserving the Dashboard as the return destination.
 
-Issue and MR details are **one continuous document**, with one main document scrollbar and no section sidebar or split panes; expanded job logs also have their own history scrollbars. Issues show Fields, Description, and all Activity (newest first). MRs show Fields, Description, Pipeline, Jobs, every Discussion and its notes, and Changes. Nothing needs to be opened just to read a section; completed job logs remain collapsed until requested.
+Issue and MR details are **one continuous document**, with one main document scrollbar and no section sidebar or split panes; expanded job logs also have their own history scrollbars. Issues show Fields, Description, and all Activity (newest first). MRs show Fields, Description, Pipeline (summary and jobs), every Discussion and its notes, and Changes. Nothing needs to be opened just to read a section; completed job logs remain collapsed until requested.
 
 **Tab / Shift+Tab or Up / Down** select sections and bring their heading into view. The current section has a selection background; GitLab label colors stay intact. **Enter** focuses a section's actions without replacing the document: choose/edit fields, expand or retry jobs, reply to or resolve discussions, or edit the description. **Esc** returns to section navigation without resetting the viewport, then returns to the work list. **PageUp / PageDown**, the wheel, and the scrollbar scroll the whole document except when page keys are focusing job logs or the wheel is over zoomed logs. Clicking a section heading selects it; clicking a field edits it, a job toggles it, and a discussion selects its thread.
 
@@ -122,21 +124,31 @@ Issue and MR details are **one continuous document**, with one main document scr
 
 Running jobs expand automatically, so concurrent live logs remain visible together. **Space** or the job's **+/−** header toggles expansion; a manual collapse survives refreshes, tab switches, and restart. Selection styling runs alongside the entire expanded job, not just its header.
 
-In Jobs, **↑/↓** choose a job. **Enter** focuses its logs; **↑/↓**, **PageUp/PageDown**, and **Home/End** then navigate the output. **Ctrl+↑/↓** and **Ctrl+PageUp/PageDown** scroll the selected job's logs without focusing it (where the terminal reports those combinations). **z** toggles zoom straight from selection or log focus. Zoom reclaims the normal application chrome, keeping only a contextual shortcut header and log status, with a proportional, clickable/draggable scrollbar and mouse-wheel scrolling. First opening zoom follows the tail by default; an existing manually scrolled position is preserved.
+In the Pipeline section, **Enter** on the heading lands on the first job and **↑/↓** choose a job; the read-only summary rows above the jobs are skipped, like read-only fields. **Enter** focuses its logs; **↑/↓**, **PageUp/PageDown**, and **Home/End** then navigate the output. **Ctrl+↑/↓** and **Ctrl+PageUp/PageDown** scroll the selected job's logs without focusing it (where the terminal reports those combinations). **z** toggles zoom straight from selection or log focus. Zoom reclaims the normal application chrome, keeping only a contextual shortcut header and log status, with a proportional, clickable/draggable scrollbar and mouse-wheel scrolling. First opening zoom follows the tail by default; an existing manually scrolled position is preserved.
 
 At the bottom, incoming output keeps the viewport following the live tail. Scrolling away from the bottom anchors the visible source lines while new output arrives below. Returning to the bottom, or pressing **End**, resumes following. The same rule applies to inline and zoomed logs.
 
-In focused or zoomed logs, **/** opens a literal, case-insensitive search over fetched history. **Enter** jumps to a match; **n/N** move forward/backward through matching lines with wraparound. Matching substrings on the current matching line use a strong yellow background; other matches use a softer yellow. Both keep readable dark text, including across ANSI color changes, and the stronger highlight moves with **n/N**. Search does not filter or edit the log. **Esc** closes search, then zoom, then log focus, before leaving Jobs. A zoom opened directly from selection returns directly to job navigation.
+In focused or zoomed logs, **/** opens a literal, case-insensitive search over fetched history. **Enter** jumps to a match; **n/N** move forward/backward through matching lines with wraparound. Matching substrings on the current matching line use a strong yellow background; other matches use a softer yellow. Both keep readable dark text, including across ANSI color changes, and the stronger highlight moves with **n/N**. Search does not filter or edit the log. **Esc** closes search, then zoom, then log focus, before leaving the Pipeline section. A zoom opened directly from selection returns directly to job navigation.
 
 Log rendering preserves ANSI SGR colors (standard/bright, 256-color, and truecolor) and supported text styles, inline and fullscreen. Styles carry across lines and fetch chunks, including when scrolling into the middle of colored output. Cursor movement, screen clearing, clipboard/OSC commands, and other terminal controls remain stripped; this is not a terminal emulator. Programs must actually emit ANSI color codes into the job trace—colors suppressed by the CI tool cannot be recovered.
 
 Complete fetched history is retained in memory for scrolling and search; only visible lines are rendered. Search covers output fetched so far, not bytes still being loaded. Log positions are retained across tab visits, but log history, searches, and log-focus/zoom state are not written to disk. Large traces consequently use more memory until their item cache is discarded.
 
-Project rows open a project details view. A green solid status dot means both issues and merge requests are visible; a half-filled green dot means only one type is visible; a grey outline means the project is hidden. Click the dot or press **Space** to toggle overall visibility. The details page has editable local alias and visibility controls, including separate issues and merge requests preferences. Click a visibility field or focus it and press **Space** or **Enter** to toggle that control. Overall visibility preserves these preferences when switched off. Hidden item types disappear from work lists and stop syncing, while cached data is retained for re-enabling. The list and details show separate counts of open, visible issues and merge requests, with no counts for hidden projects. Fields use the same left-aligned label column as issue/MR details. Below them is a placeholder for project-wide pipelines, followed by a red **Forget this project** button that removes the project from Cronk only. Re-selecting the Projects tab or pressing **Shift+P** returns to its list. Alias editing and forgetting a project live in details, not the command palette. When adding a project, leaving the optional alias blank keeps GitLab's short display name as the starting local alias; an empty alias later falls back to the full path.
+Project rows open a project details view. A green solid status dot means both issues and merge requests are visible; a half-filled green dot means only one type is visible; a grey outline means the project is hidden. Click the dot or press **Space** to toggle overall visibility. The details page has editable local alias and visibility controls, including separate issues and merge requests preferences. Click a visibility field or focus it and press **Space** or **Enter** to toggle that control. Overall visibility preserves these preferences when switched off. Hidden item types disappear from work lists and stop syncing, while cached data is retained for re-enabling. The list and details show separate counts of open, visible issues and merge requests, with no counts for hidden projects. Fields use the same left-aligned label column as issue/MR details. Below them are the project's recent **Pipelines** (see below), followed by a red **Forget this project** button that removes the project from Cronk only. Re-selecting the Projects tab or pressing **Shift+P** returns to its list. Alias editing and forgetting a project live in details, not the command palette. When adding a project, leaving the optional alias blank keeps GitLab's short display name as the starting local alias; an empty alias later falls back to the full path.
 
 ![Projects with full, partial, and hidden visibility](docs/projects.png)
 
-![Project visibility controls, pipeline placeholder, and forget action](docs/project-details.png)
+![Project visibility controls, pipelines, and forget action](docs/project-details.png)
+
+### Project pipelines
+
+Pipelines imply code, and code implies merge requests, so a project's pipelines are synced whenever its **Merge requests** visibility is on (the field says so); with it off the section is omitted and nothing is requested. The section lists the **20 newest pipelines** regardless of trigger: scheduled, pushes after a merge, web, API, triggers and merge request pipelines (shown as `!iid`). Each row shows status, ref, source, run time or elapsed time, last update and the workflow name. The newest pipeline is expanded by default; an expanded pipeline fetches its details and jobs once (and again while active) to show who started it, the web URL and job-state counts. **Space** expands or collapses a pipeline, **Enter** opens its jobs with exactly the same live-log behavior as a merge request (running and hard-failed jobs expand, Space/Enter/z/r work, `Esc` steps back to the pipeline row), and the footer row loads **20 older pipelines** per press, up to 100; anything older stays on GitLab. Clicking a pipeline selects and toggles it.
+
+Project pipelines are **memory-only**: nothing about them is written to the content cache, so an open project refreshes its window at `detail_refresh_secs` and older pages are dropped when the project is reopened. Independently, a slow background probe fetches only the **newest pipeline** of every merge-request-visible project (one `per_page=1` request each, every `pipeline_refresh_secs`, default twice `list_refresh_secs`) so Projects rows show `◐ pipeline running · main · 2 min ago` without opening them. Probe failures back off quietly instead of raising the error banner. The open project is skipped by the probe because its own first page keeps the indicator current.
+
+![Project pipelines with the newest expanded](docs/project-pipelines.png)
+
+![A project pipeline drilled into its jobs](docs/project-pipeline-jobs.png)
 
 ## Name-based field completion
 
@@ -154,7 +166,7 @@ New issue/MR forms suggest projects from your workspace by alias or path. **Add 
 
 ![Two running jobs with concurrent live tails](docs/jobs.png)
 
-All running jobs in the open MR's head pipeline are expanded automatically and fetched independently. Finished jobs collapse unless explicitly expanded. The inline Pipeline section shows the summary; Jobs displays every job and its live tail in the same document, without duplicating logs. Select a finished job to inspect or retry it. Large pipelines still require scrolling when their panels cannot fit on one screen.
+All running jobs in the open MR's head pipeline are expanded automatically and fetched independently. Finished jobs collapse unless explicitly expanded. The inline Pipeline section shows the summary (status, trigger source, ref, run time, last update, who started it, job counts, and web URL) followed by every job and its live tail in the same document, without duplicating logs. Select a finished job to inspect or retry it. Large pipelines still require scrolling when their panels cannot fit on one screen.
 
 Logs are **near-real-time REST polling**, not a push stream. Each job keeps a byte offset, requests new data with HTTP Range, and appends only new text. UTF-8 and terminal escape sequences are handled across chunk boundaries; OSC/DCS and terminal controls are stripped. Responses are capped at 256 KiB of source bytes; the UI retains the latest 128 KiB per job. Completed logs are drained to EOF. Panels display trailing lines rather than a full searchable log archive.
 
@@ -183,7 +195,7 @@ Default location follows the platform configuration directory (`~/.config/cronk/
 
 Portable TOML contains the GitLab URL/token environment-variable name, project IDs, full paths, local aliases, visibility, filters, saved views, starred items (by project path), themes, user-display preferences and refresh settings. `user_display` selects `username` (the default), `name`, or numeric `id`. The authenticated GitLab account always appears as **You** in the theme's yellow, regardless of these preferences (see the [demo capture](docs/current-user.png)). To format structured GitLab names, set both `user_name_pattern` (a Rust regex with named captures) and `user_name_format` (a regex replacement such as `$firstname`); a non-matching name remains unchanged. Deliberate configuration edits save immediately with a same-directory temporary file, file sync, and atomic replacement. Routine navigation, scrolling, hover and ticks do not rewrite TOML. Unix files are mode `0600`, with newly created directories `0700`. Invalid existing configuration is reported and not overwritten. **Do not run two instances against the same file**; there is no interprocess locking. Edit configuration while Cronk is stopped.
 
-Navigation lives separately in `config.state/` beside `config.toml` (`config.demo.state/` for demo). One private SQLite database per installation/mode stores active tab, selected item/project identities, routes, per-tab cursors/document offsets and explicit job expansion/collapse choices. One background worker keeps only the latest pending snapshot and commits about every **2.5 seconds** during activity, plus an orderly exit flush. Token rotation and clearing the content cache do not reset it. Saved-view reordering follows view identity; renaming inside Cronk preserves navigation, while external renaming/redefinition conservatively resets that view's local state. Old TOML navigation is imported once and removed only after the local commit succeeds. Errors are visible; after a failed exit flush, Quit again retries and allows exit with a warning if persistence is still unavailable. Unsent drafts and job-log bodies/reading positions remain memory-only. [Design, failure handling and write-count evidence](docs/navigation-state.md).
+Navigation lives separately in `config.state/` beside `config.toml` (`config.demo.state/` for demo). One private SQLite database per installation/mode stores active tab, selected item/project identities, routes, per-tab cursors/document offsets, the drilled-in project pipeline, and explicit job expansion/collapse choices. One background worker keeps only the latest pending snapshot and commits about every **2.5 seconds** during activity, plus an orderly exit flush. Token rotation and clearing the content cache do not reset it. Saved-view reordering follows view identity; renaming inside Cronk preserves navigation, while external renaming/redefinition conservatively resets that view's local state. Old TOML navigation is imported once and removed only after the local commit succeeds. Errors are visible; after a failed exit flush, Quit again retries and allows exit with a warning if persistence is still unavailable. Unsent drafts and job-log bodies/reading positions remain memory-only. [Design, failure handling and write-count evidence](docs/navigation-state.md).
 
 A minimal configuration (or use `config.example.toml` as a reference):
 
@@ -194,6 +206,7 @@ theme = "midnight"
 animations = true
 list_refresh_secs = 60
 detail_refresh_secs = 10
+# pipeline_refresh_secs = 120  # newest-pipeline probe; default 2 × list_refresh_secs, minimum 30
 
 [[projects]]
 id = 1234
@@ -213,7 +226,8 @@ Theme names are `midnight`, `dracula`, `light`, `blade-runner` (neon), `tokyo-ni
 
 - Visible project lists: incremental refresh every **60 seconds**, including while viewing details. Issues and MRs import independently so one long history does not block the other.
 - Active item details: every **10 seconds**, configurable down to 2 seconds (set 5 if preferred).
-- Running/expanded job traces: every **2 seconds**, only for the open item; batches of at most four concurrent trace requests.
+- Running/expanded job traces: every **2 seconds**, only for the open item or the drilled-in project pipeline; batches of at most four concurrent trace requests.
+- Project pipelines: while a project's details are open, one page-1 request plus detail + jobs for each expanded pipeline that is active or changed, at `detail_refresh_secs`; otherwise one `per_page=1` probe per merge-request-visible project every `pipeline_refresh_secs`. A 403/404 from the pipelines endpoint stops requests for that project until refresh or a visibility change, without triggering backoff.
 - Manual refresh: all visible projects and the active detail; does not bypass server backoff.
 - Conditional GET with ETag/Last-Modified, shared across client clones; bounded **128-entry / 16 MiB** HTTP cache. Successful writes invalidate cached validators/bodies.
 - Ordinary polls do not overlap for the same resource. Detail requests survive tab navigation and populate the shared item cache; successful writes invalidate caches and supersede older responses. Failures retain the last successful rows, detail sections, and editor drafts, and are displayed instead of becoming empty lists.

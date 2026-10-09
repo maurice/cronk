@@ -14,6 +14,7 @@ user_display = "username" # username | name | id
 # user_name_format = '$firstname'
 list_refresh_secs = 60 # minimum 15
 detail_refresh_secs = 10 # minimum 2; use 5 for faster details
+# pipeline_refresh_secs = 120 # background latest-pipeline probe; default 2 × list_refresh_secs, minimum 30
 
 [colors]
 # accent = "#9B9FFF"

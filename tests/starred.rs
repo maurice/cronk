@@ -566,8 +566,10 @@ fn details_keep_a_one_cell_gap_before_the_scrollbar_or_the_pane_edge() {
         right_gap(&tall, "detail-scrollbar-pointer", section(&tall)),
         1
     );
-    // Project details are short, so they have no scrollbar either.
-    let mut ui = mount(config(), None);
+    // Project details without synced pipelines are short, so they have no scrollbar either.
+    let mut config = config();
+    config.projects[0].merge_requests_visible = false;
+    let mut ui = mount(config, None);
     key(&mut ui, KeyCode::Char('P'));
     key(&mut ui, KeyCode::Enter);
     assert!(scrollbar_column(&ui, "detail-scrollbar-pointer").is_none());

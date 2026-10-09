@@ -32,7 +32,7 @@ Today `sections()` for an MR is `Fields, Description, Pipeline, Jobs, Discussion
 
 Behaviour:
 
-- **Enter** on the section heading enters the section with the cursor on the first job (index 0, which `sort_jobs` makes the most recently started job). Summary rows are never cursor targets, just as read-only fields are skipped in **Fields**. With zero jobs the section behaves like today's **Jobs** section: Enter enters it, `field` is clamped to 0 and ↑/↓ do nothing; PgUp/PgDn/wheel still scroll the document.
+- **Enter** on the section heading enters the section with the cursor on the first job (index 0, which `sort_jobs` makes the highest-attention job: hard failures first, then active and upcoming work). Summary rows are never cursor targets, just as read-only fields are skipped in **Fields**. With zero jobs the section behaves like today's **Jobs** section: Enter enters it, `field` is clamped to 0 and ↑/↓ do nothing; PgUp/PgDn/wheel still scroll the document.
 - `config.field` keeps indexing `details.jobs`; the summary rows are not counted.
 - Everything else (Space, Enter → `FocusLog`, `z`, `r`, Ctrl+arrows, clicking a job toggles it, `expanded`/`collapsed` persistence by job id) is unchanged.
 - Warnings currently attached to `DetailPart::Pipeline` render once at the end of the merged section (today they are duplicated under both headings because `view.rs` maps both to `DetailPart::Pipeline`).

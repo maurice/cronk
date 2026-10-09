@@ -146,6 +146,62 @@ fn project_pipeline_failures_pin_in_run_order_and_unfocused_click_keeps_logs_ope
 }
 
 #[test]
+fn project_pipeline_refresh_groups_active_upcoming_completed_and_manual_jobs() {
+    let mut ui = mount(60);
+    open_pipelines(&mut ui);
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Enter);
+    let pipeline = ui.state().drilled.unwrap();
+    let selected = ui.state().selected_job().unwrap().id;
+    let window = &ui.state().project_pipelines[&PROJECT];
+    let mut jobs = window.jobs[&pipeline].jobs[..5].to_vec();
+    let ids: Vec<_> = jobs.iter().map(|j| j.id).collect();
+    for (job, status) in jobs
+        .iter_mut()
+        .zip(["running", "pending", "success", "failed", "manual"])
+    {
+        job.status = status.into();
+        job.allow_failure = true;
+    }
+    // Even a more recent completed job must not split active/upcoming work.
+    jobs[2].started_at = Some("2025-01-01T12:00:00Z".into());
+    jobs[3].started_at = Some("2025-01-01T11:00:00Z".into());
+    cronk::model::sort_jobs(&mut jobs);
+    let full = window.pipelines[0].clone();
+    ui.dispatch(Msg::PipelineLoaded(
+        PROJECT,
+        pipeline,
+        ui.state().pipeline_epoch,
+        Ok(Box::new((full.clone(), jobs, Vec::new()))),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    let mut jobs = ui.state().project_pipelines[&PROJECT].jobs[&pipeline]
+        .jobs
+        .clone();
+    assert_eq!(jobs.iter().map(|j| j.id).collect::<Vec<_>>(), ids);
+    assert_eq!(ui.state().selected_job().unwrap().id, selected);
+    jobs[0].status = "success".into();
+    jobs[0].started_at = Some("2025-01-01T13:00:00Z".into());
+    cronk::model::sort_jobs(&mut jobs);
+    ui.dispatch(Msg::PipelineLoaded(
+        PROJECT,
+        pipeline,
+        ui.state().pipeline_epoch,
+        Ok(Box::new((full, jobs, Vec::new()))),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    let jobs = &ui.state().project_pipelines[&PROJECT].jobs[&pipeline].jobs;
+    assert_eq!(
+        jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+        [ids[1], ids[0], ids[2], ids[3], ids[4]]
+    );
+    assert_eq!(ui.state().selected_job().unwrap().id, selected);
+    assert_eq!(ui.state().config.field, 1);
+}
+
+#[test]
 fn pipelines_follow_merge_request_visibility() {
     let mut hidden = demo::projects();
     hidden[0].merge_requests_visible = false;

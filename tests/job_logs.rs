@@ -251,6 +251,26 @@ fn focused_failure_header_click_still_collapses_logs() {
 }
 
 #[test]
+fn refresh_moves_completed_jobs_below_upcoming_and_preserves_selection() {
+    let mut ui = mount("midnight");
+    let mut details = ui.state().details.as_ref().unwrap().clone();
+    details.jobs[0].status = "success".into();
+    details.jobs[0].started_at = Some("2025-01-01T10:05:00Z".into());
+    details.jobs[1].status = "pending".into();
+    cronk::model::sort_jobs(&mut details.jobs);
+    ui.dispatch(Msg::DetailsLoaded(
+        details.item.key.clone(),
+        ui.state().detail_epoch,
+        Ok(Box::new(details)),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    assert_eq!(ui.state().details.as_ref().unwrap().jobs[0].id, JOB + 1);
+    assert_eq!(ui.state().selected_job().unwrap().id, JOB);
+    assert_eq!(ui.state().config.field, 1);
+}
+
+#[test]
 fn refresh_pins_failure_and_preserves_selected_job_identity() {
     let mut ui = mount("midnight");
     let mut details = ui.state().details.as_ref().unwrap().clone();

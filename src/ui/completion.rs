@@ -11,7 +11,8 @@ pub struct Completion {
     pub resolved: HashMap<String, String>,
     pub swatches: HashMap<String, Label>,
     pub options: Vec<LookupOption>,
-    pub selected: usize,
+    /// Suggestions are unselected until explicitly navigated to or clicked.
+    pub selected: Option<usize>,
     pub open: bool,
     pub pending: bool,
     pub error: Option<String>,
@@ -32,7 +33,7 @@ impl Completion {
             resolved: HashMap::new(),
             swatches: HashMap::new(),
             options: vec![],
-            selected: 0,
+            selected: None,
             open: false,
             pending: false,
             error: None,
@@ -157,6 +158,7 @@ impl Completion {
         self.open = false;
         self.pending = false;
         self.options.clear();
+        self.selected = None;
         self.query = None;
         self.error = None;
     }
@@ -235,7 +237,7 @@ impl Cronk {
         c.pending = true;
         c.error = None;
         c.options.clear();
-        c.selected = 0;
+        c.selected = None;
         c.due = now + Duration::from_millis(300);
         let epoch = c.epoch;
         Update::with_command(Command::after(
@@ -340,7 +342,7 @@ impl Cronk {
                             );
                         }
                     }
-                    c.selected = 0;
+                    c.selected = None;
                     if c.cache.len() >= 32 {
                         c.cache.clear();
                     }

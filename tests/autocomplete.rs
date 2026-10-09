@@ -66,7 +66,11 @@ fn replace(ui: &mut Ui, text: &str) {
         mods: KeyMods::SHIFT,
     })
     .unwrap();
-    ui.send_paste(text).unwrap();
+    if text.is_empty() {
+        key(ui, KeyCode::Backspace);
+    } else {
+        ui.send_paste(text).unwrap();
+    }
     settle(ui);
 }
 fn wait(ui: &mut Ui) {
@@ -100,6 +104,123 @@ fn option(id: u64, name: &str, value: &str) -> LookupOption {
 }
 
 #[test]
+fn empty_lookup_edits_submit_without_accepting_suggestions() {
+    for (kind, field) in [
+        (ItemKind::Issue, 2),
+        (ItemKind::Issue, 3),
+        (ItemKind::Issue, 4),
+        (ItemKind::Issue, 5),
+        (ItemKind::Issue, 6),
+        (ItemKind::MergeRequest, 3),
+        (ItemKind::MergeRequest, 6),
+    ] {
+        for ready in [false, true] {
+            let mut ui = mount(kind, field);
+            replace(&mut ui, if ready { "  " } else { "" });
+            if ready {
+                wait(&mut ui);
+                assert!(!completion(&ui).options.is_empty());
+            } else {
+                assert!(completion(&ui).pending);
+                key(&mut ui, KeyCode::Down);
+            }
+            assert_eq!(completion(&ui).selected, None);
+            key(&mut ui, KeyCode::Enter);
+            assert!(value(&ui).trim().is_empty());
+            assert_eq!(ids(&ui), "");
+            assert!(
+                ui.state()
+                    .dialog
+                    .as_ref()
+                    .unwrap()
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .contains("Demo is read-only"),
+                "Enter should submit the empty value, not insert a suggestion"
+            );
+            assert!(!ui.state().mutation_pending);
+        }
+    }
+}
+
+#[test]
+fn enter_requires_explicit_selection_even_when_only_one_suggestion_matches() {
+    let mut ui = mount(ItemKind::MergeRequest, 3);
+    replace(&mut ui, "Sam Fiction");
+    wait(&mut ui);
+    assert_eq!(completion(&ui).options.len(), 1);
+    assert_eq!(completion(&ui).selected, None);
+    let rect = ui.rect_of_key(&"lookup-0-103".into()).unwrap();
+    assert_eq!(
+        ui.capture_frame().cell(rect.x as u16, rect.y as u16).symbol,
+        " "
+    );
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(value(&ui), "Sam Fiction");
+    assert!(
+        ui.state()
+            .dialog
+            .as_ref()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Choose a lookup suggestion")
+    );
+    assert!(!ui.state().mutation_pending);
+    key(&mut ui, KeyCode::Down);
+    assert_eq!(completion(&ui).selected, Some(0));
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(value(&ui), "@demo-sam");
+    assert_eq!(ids(&ui), "103");
+    assert!(!completion(&ui).open);
+    assert_eq!(completion(&ui).selected, None);
+    assert!(ui.state().dialog.as_ref().unwrap().error.is_none());
+}
+
+#[test]
+fn changing_query_resets_explicit_selection_and_up_selects_the_last_result() {
+    let mut ui = mount(ItemKind::MergeRequest, 3);
+    replace(&mut ui, "Person");
+    let epoch = completion(&ui).epoch;
+    ui.dispatch(Msg::LookupLoaded(
+        epoch,
+        0,
+        Ok(vec![
+            option(51, "Person one", "@one"),
+            option(52, "Person two", "@two"),
+        ]),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    key(&mut ui, KeyCode::Up);
+    assert_eq!(completion(&ui).selected, Some(1));
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(value(&ui), "@two");
+    assert_eq!(ids(&ui), "52");
+    replace(&mut ui, "Sam Fiction");
+    wait(&mut ui);
+    key(&mut ui, KeyCode::Down);
+    assert_eq!(completion(&ui).selected, Some(0));
+    replace(&mut ui, "");
+    assert_eq!(completion(&ui).selected, None);
+    key(&mut ui, KeyCode::Enter);
+    assert_eq!(value(&ui), "");
+    assert_eq!(ids(&ui), "");
+    assert!(
+        ui.state()
+            .dialog
+            .as_ref()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Demo is read-only")
+    );
+}
+
+#[test]
 fn suggestions_use_full_height_selection_edges_and_row_fill() {
     for field in [2, 3, 4, 5, 6] {
         assert_suggestion_selection(field);
@@ -127,12 +248,11 @@ fn assert_suggestion_selection(field: usize) {
     ui.dispatch(Msg::LookupLoaded(epoch, 0, Ok(options)))
         .unwrap();
     settle(&mut ui);
+    assert_eq!(completion(&ui).selected, None);
     for selected in [0, 1] {
-        if selected == 1 {
-            key(&mut ui, KeyCode::Down);
-        }
+        key(&mut ui, KeyCode::Down);
         let c = completion(&ui);
-        assert_eq!(c.selected, selected);
+        assert_eq!(c.selected, Some(selected));
         let rect = ui
             .rect_of_key(&format!("lookup-0-{}", c.options[selected].id).into())
             .unwrap();
@@ -175,6 +295,7 @@ fn current_user_suggestion_is_yellow_but_accepts_the_original_login_and_id() {
             Color::hex_u24(0xf0c674)
         );
     }
+    key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Enter);
     assert_eq!(value(&ui), format!("@{}", current.username));
     assert_eq!(ids(&ui), current.id.to_string());
@@ -196,6 +317,7 @@ fn people_complete_trimmed_comma_tokens_without_submitting_or_losing_previous_va
     wait(&mut ui);
     assert!(ui.capture_frame().plain_text().contains("Sam Fiction"));
     assert_eq!(completion(&ui).options.len(), 1);
+    key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Enter);
     assert_eq!(value(&ui), " @demo-arin,   @demo-sam  ");
     assert_eq!(ids(&ui), "101,103");
@@ -228,6 +350,7 @@ fn labels_require_known_choices_and_accept_colored_suggestions() {
             .iter()
             .any(|option| option.value == "type::bug" && !option.color.is_empty())
     );
+    key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Enter);
     assert_eq!(value(&ui), "demo::fictional, type::bug");
     assert_eq!(ids(&ui), "demo::fictional,type::bug");
@@ -269,6 +392,7 @@ fn milestone_iteration_epic_and_reviewers_keep_readable_current_values_and_ids()
         );
         wait(&mut ui);
         assert!(!completion(&ui).options.is_empty());
+        key(&mut ui, KeyCode::Down);
         key(&mut ui, KeyCode::Enter);
         assert!(!completion(&ui).open);
         assert!(ui.state().dialog.is_some());
@@ -302,6 +426,7 @@ fn epic_editor_resolves_same_title_choices_and_retains_draft_on_unavailable_look
     ))
     .unwrap();
     settle(&mut ui);
+    key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Enter);
     assert_eq!(value(&ui), "Same title · group 6 &1");
@@ -347,6 +472,7 @@ fn iteration_lookup_offers_symbolic_current_and_resolves_it_case_insensitively()
             .count(),
         1
     );
+    key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Enter);
     assert_eq!(value(&ui), first.value);
     assert_eq!(ids(&ui), "1200");
@@ -458,6 +584,7 @@ fn slow_lookup_coalesces_queries_and_ignores_stale_acceptance() {
         "Sam Fiction",
         "a stale click must not choose a different result"
     );
+    key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Enter);
     assert_eq!(ids(&ui), "103");
 }
@@ -506,10 +633,10 @@ fn short_suggestion_view_scrolls_with_keyboard_and_preserves_input_focus() {
     ))
     .unwrap();
     settle(&mut ui);
-    for _ in 0..19 {
+    for _ in 0..20 {
         key(&mut ui, KeyCode::Down);
     }
-    assert_eq!(completion(&ui).selected, 19);
+    assert_eq!(completion(&ui).selected, Some(19));
     assert!(ui.capture_frame().plain_text().contains("Person 19"));
     assert_eq!(ui.focused_key(), Some(&"dialog-field-0".into()));
     key(&mut ui, KeyCode::Enter);
@@ -558,6 +685,7 @@ fn creation_project_picker_matches_workspace_aliases_and_tab_keeps_form_navigati
     replace(&mut ui, "Meteor");
     wait(&mut ui);
     assert_eq!(completion(&ui).options.len(), 1);
+    key(&mut ui, KeyCode::Down);
     key(&mut ui, KeyCode::Enter);
     assert_eq!(ids(&ui), "9002");
     assert_eq!(value(&ui), demo::projects()[1].path);

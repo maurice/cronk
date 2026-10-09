@@ -1639,10 +1639,14 @@ impl Component for Cronk {
                     if !c.open {
                         return self.schedule_lookup(ctx, index);
                     }
-                    c.selected = c
-                        .selected
-                        .saturating_add_signed(delta)
-                        .min(c.options.len().saturating_sub(1));
+                    if !c.pending && !c.options.is_empty() {
+                        let last = c.options.len() - 1;
+                        c.selected = Some(match c.selected {
+                            Some(selected) => selected.saturating_add_signed(delta).min(last),
+                            None if delta < 0 => last,
+                            None => 0,
+                        });
+                    }
                 }
                 if let Some(d) = &mut ctx.state.dialog {
                     d.reveal_selection = true;
@@ -1670,13 +1674,12 @@ impl Component for Cronk {
             Msg::LookupEnter(index) => {
                 if let Some(c) = completion::active_completion(&ctx.state, index)
                     && c.open
+                    && let Some(selected) = c.selected
                 {
                     if c.pending {
                         return Update::none();
                     }
-                    if !c.options.is_empty() {
-                        return self.update(Msg::LookupAccept(index, c.epoch, c.selected), ctx);
-                    }
+                    return self.update(Msg::LookupAccept(index, c.epoch, selected), ctx);
                 }
                 return self.submit(ctx);
             }
@@ -3287,13 +3290,13 @@ impl Cronk {
         let help = match *name {
             "state_event" => "Enter close or reopen. Enter commits · Esc cancels",
             "milestone_id" | "iteration_id" | "epic_id" => {
-                "Type a name · ↑/↓ suggestions · Enter chooses, then saves · Empty clears · Esc cancels"
+                "Type a name · ↑/↓ select · Enter accepts selected or saves · Empty clears · Esc cancels"
             }
             "assignee_ids" | "reviewer_ids" => {
-                "Type names separated by commas · ↑/↓ suggestions · Enter chooses, then saves · Empty clears"
+                "Type names separated by commas · ↑/↓ select · Enter accepts selected or saves · Empty clears"
             }
             "labels" => {
-                "Type known labels separated by commas · ↑/↓ suggestions · Enter chooses, then saves · Empty clears"
+                "Type known labels separated by commas · ↑/↓ select · Enter accepts selected or saves · Empty clears"
             }
             _ => "Enter commits · Esc cancels",
         };
@@ -3427,7 +3430,7 @@ impl Cronk {
                     }
                 } else { self.dialog_error(ctx, "The built-in and Starred tabs cannot be renamed or removed"); }
             }
-            Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Search by name · Enter chooses a suggestion, then adds · Full paths and IDs also work · Blank alias keeps GitLab's short name", vec![FormField::lookup("Project", "", Completion::new(LookupKind::Projects, 0, false)), FormField::new("Short alias (optional)", "", false)]),
+            Action::AddProject => self.show_dialog(ctx, DialogKind::AddProject, "Add existing project", "Search by name · ↑/↓ select · Enter accepts selected or adds · Full paths and IDs also work · Blank alias keeps GitLab's short name", vec![FormField::lookup("Project", "", Completion::new(LookupKind::Projects, 0, false)), FormField::new("Short alias (optional)", "", false)]),
             Action::RemoveProject => {
                 let project = ctx.state.config.project_route.and_then(|id| ctx.state.project(id).cloned())
                     .or_else(|| {

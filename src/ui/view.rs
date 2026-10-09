@@ -3837,13 +3837,13 @@ fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: C
         .smooth_wheel_scroll(false)
         .estimated_child_height(2)
         .children(rows);
-    if let Some(option) = c.options.get(c.selected) {
+    if let Some(option) = c.selected.and_then(|selected| c.options.get(selected)) {
         choices = choices.reveal_key(format!("lookup-{index}-{}", option.id));
     }
     VStack::new()
         .height(Length::Auto)
         .child(line(
-            "↑/↓ choose · Enter accept · Tab next field · Esc cancel",
+            "↑/↓ select · Enter accepts selected or saves · Tab next · Esc cancel",
             Style::new().fg(colors.accent),
         ))
         .child(interaction::scrollbar(
@@ -3866,7 +3866,7 @@ fn completion_row(
     colors: Colors,
 ) -> Element {
     let option = &c.options[option_index];
-    let selected = c.selected == option_index;
+    let selected = c.selected == Some(option_index);
     let canvas = Colors {
         background: colors.surface,
         ..colors

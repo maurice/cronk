@@ -3451,7 +3451,8 @@ mod tests {
                 .len(),
             2
         );
-        for code in [KeyCode::Down, KeyCode::Enter] {
+        // Results start unselected: choose the first, then the second match.
+        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Enter] {
             ui.send_key(KeyEvent {
                 code,
                 mods: KeyMods::NONE,
@@ -5447,6 +5448,89 @@ mod tests {
         assert_eq!(details.item.unresolved, Some(0));
         assert_eq!(details.jobs.len(), 1);
         assert!(details.warnings.is_empty());
+    }
+
+    #[test]
+    fn clearing_mr_people_editor_submits_empty_ids_without_accepting_a_suggestion() {
+        use crate::{config::Config, demo, ui::Cronk};
+        use tui_lipan::{TestBackend, prelude::*};
+
+        for (field, name) in [(3, "assignee_ids"), (6, "reviewer_ids")] {
+            for ready in [false, true] {
+                let mock = Mock::new(|_| Reply::bytes(204, Vec::new()));
+                let route = crate::model::ItemKey {
+                    project: 9001,
+                    iid: 101,
+                    kind: ItemKind::MergeRequest,
+                };
+                // Demo reads provide deterministic populated fields and local
+                // suggestions; writes still use the real API client below.
+                let mut ui = TestBackend::new_with_app(
+                    App::new().focus_policy(FocusPolicy::Manual),
+                    Cronk {
+                        config: Config {
+                            projects: demo::projects(),
+                            active_tab: 3,
+                            route: Some(route),
+                            section: Some(0),
+                            field,
+                            onboarding: false,
+                            animations: false,
+                            ..Config::default()
+                        },
+                        path: None,
+                        api: Some(mock.client()),
+                        demo: true,
+                    },
+                    (),
+                );
+                ui.pump().unwrap();
+                let press = |ui: &mut TestBackend<Cronk>, code, mods| {
+                    ui.send_key(KeyEvent { code, mods }).unwrap();
+                    ui.pump().unwrap();
+                    ui.render();
+                };
+                press(&mut ui, KeyCode::Enter, KeyMods::NONE);
+                assert!(
+                    !ui.state().dialog.as_ref().unwrap().fields[0]
+                        .value()
+                        .is_empty()
+                );
+                press(&mut ui, KeyCode::Home, KeyMods::NONE);
+                press(&mut ui, KeyCode::End, KeyMods::SHIFT);
+                press(&mut ui, KeyCode::Backspace, KeyMods::NONE);
+                if ready {
+                    ui.advance(Duration::from_millis(350));
+                    ui.pump().unwrap();
+                    assert!(
+                        !ui.state().dialog.as_ref().unwrap().fields[0]
+                            .completion
+                            .as_ref()
+                            .unwrap()
+                            .options
+                            .is_empty()
+                    );
+                }
+                press(&mut ui, KeyCode::Enter, KeyMods::NONE);
+                for _ in 0..80 {
+                    ui.settle(Duration::from_millis(25)).unwrap();
+                    if !ui.state().mutation_pending {
+                        break;
+                    }
+                }
+                assert!(!ui.state().mutation_pending);
+                assert!(ui.state().dialog.is_none());
+                let requests = mock.requests.lock().unwrap();
+                let writes: Vec<_> = requests.iter().filter(|r| r.method == "PUT").collect();
+                assert_eq!(writes.len(), 1);
+                assert!(
+                    writes[0]
+                        .target
+                        .starts_with("/api/v4/projects/9001/merge_requests/101")
+                );
+                assert_eq!(writes[0].json(), json!({name: []}));
+            }
+        }
     }
 
     #[test]

@@ -122,7 +122,7 @@ Issue and MR details are **one continuous document**, with one main document scr
 
 ### CI job logs
 
-Running and hard-failed jobs expand automatically, so concurrent live logs and failures remain visible together. **Space** or the job's **+/−** header toggles expansion; the first click on an expanded hard failure from outside its pipeline selects it without hiding its logs. A manual collapse survives refreshes, tab switches, and restart. Selection styling runs alongside the entire expanded job, not just its header.
+Running and hard-failed jobs expand automatically, so concurrent live logs and failures remain visible together. **Space** or the job's **+/−** header toggles expansion; the first click on an expanded running or hard-failed job from outside its pipeline selects it without hiding its logs. A manual collapse survives refreshes, tab switches, and restart. Selection styling runs alongside the entire expanded job, not just its header.
 
 Jobs in both MR and project pipelines are grouped by attention: **hard failures → active work → upcoming automatic work → canceled → success/allowed failures → skipped → unstarted manual jobs**. Hard failures stay pinned in earliest-started run order. Active, canceled, and completed jobs sort newest-started first; upcoming, skipped, and manual jobs sort by stage and then name. Active work includes running, preparing, canceling, and waiting for an external callback; upcoming work includes created, pending, resource-waiting, and scheduled jobs. A manual job moves into its current state's group once started or failed.
 

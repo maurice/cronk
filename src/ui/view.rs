@@ -3046,9 +3046,9 @@ fn jobs(
     for (index, job) in jobs.iter().enumerate() {
         let selected = cursor == Some(index);
         let expanded = ctx.state.job_expanded(job);
-        // Inspect an auto-expanded failure before toggling it: the first click
-        // from outside this pipeline should select it without hiding its logs.
-        let focus_only = cursor.is_none() && expanded && job.failed_hard();
+        // Inspect auto-expanded logs before toggling them: the first click
+        // from outside this pipeline should select the job without hiding its logs.
+        let focus_only = cursor.is_none() && expanded && (job.running() || job.failed_hard());
         let id = job.id;
         let link = ctx.link().clone();
         let job_colors = if selected {

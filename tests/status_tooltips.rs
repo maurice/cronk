@@ -1,7 +1,7 @@
 use cronk::{
     config::Config,
     demo,
-    model::{ItemKey, ItemKind},
+    model::{ItemKey, ItemKind, User},
     ui::{Cronk, Msg, Scope},
 };
 use tui_lipan::{
@@ -146,6 +146,94 @@ fn list_status_and_pipeline_dots_have_hover_only_explanations_in_every_theme() {
                 MouseKind::Up(MouseButton::Left),
             ] {
                 mouse(&mut ui, dot.x as u16, dot.y as u16, kind);
+            }
+            assert_eq!(ui.state().config.route.as_ref(), Some(&item.key));
+            assert_eq!(ui.state().scope, Scope::Details);
+            assert_closed(&ui);
+        }
+    }
+}
+
+#[test]
+fn list_people_keep_hover_details_and_allow_row_activation() {
+    for tab in [2, 3] {
+        for role in if tab == 2 {
+            vec!["author", "person-0"]
+        } else {
+            vec!["author", "person-0", "person-1"]
+        } {
+            let mut ui = mount("midnight", tab, None);
+            let mut item = ui.state().visible_items()[0].clone();
+            item.title = "Short title".into();
+            item.labels.clear();
+            let assigned = User {
+                id: 50,
+                username: "bob".into(),
+                name: "Bob".into(),
+                ..User::default()
+            };
+            let reviewing = User {
+                id: 51,
+                username: "carol".into(),
+                name: "Carol".into(),
+                ..User::default()
+            };
+            item.assignees = vec![item.author.clone(), assigned.clone()];
+            item.reviewers = vec![item.author.clone(), assigned.clone(), reviewing.clone()];
+            let (user, suffix) = match (role, tab) {
+                ("author", 2) => (item.author.clone(), " (+ assigned)"),
+                ("author", _) => (item.author.clone(), " (+ assigned, reviewing)"),
+                ("person-0", 2) => (assigned, " (assigned)"),
+                ("person-0", _) => (assigned, " (assigned, reviewing)"),
+                ("person-1", _) => (reviewing, " (reviewing)"),
+                _ => unreachable!(),
+            };
+            ui.state_mut().items = vec![item.clone()];
+            settle(&mut ui);
+            let key = format!(
+                "item-{}-{}-{}-{role}",
+                item.key.project,
+                item.key.kind.segment(),
+                item.key.iid
+            );
+            let trigger = rect(&ui, &key);
+            assert_eq!(trigger.h, 1);
+            assert_eq!(
+                trigger.w as usize,
+                ui.state().render_user(&user).chars().count()
+                    + if role == "author" { 0 } else { suffix.len() }
+            );
+            assert!(
+                ui.capture_frame()
+                    .plain_text()
+                    .contains(&format!("{}{suffix}", ui.state().render_user(&user)))
+            );
+            let title_row = rect(
+                &ui,
+                &format!(
+                    "item-{}-{}-{}-status",
+                    item.key.project,
+                    item.key.kind.segment(),
+                    item.key.iid
+                ),
+            )
+            .y;
+            assert_eq!(trigger.y, title_row + i16::from(role != "author"));
+            let (x, y) = (trigger.x as u16, trigger.y as u16);
+            mouse(&mut ui, x, y, MouseKind::Moved);
+            let text = ui.capture_frame().plain_text();
+            assert!(
+                text.contains(&format!("Username: @{}", user.username)),
+                "{text}"
+            );
+            assert_eq!(ui.state().scope, Scope::List);
+            mouse(&mut ui, 0, 0, MouseKind::Moved);
+            assert_closed(&ui);
+            for kind in [
+                MouseKind::Down(MouseButton::Left),
+                MouseKind::Up(MouseButton::Left),
+            ] {
+                mouse(&mut ui, x, y, kind);
             }
             assert_eq!(ui.state().config.route.as_ref(), Some(&item.key));
             assert_eq!(ui.state().scope, Scope::Details);

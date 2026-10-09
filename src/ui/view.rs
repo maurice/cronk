@@ -1072,19 +1072,62 @@ fn work_row(
         colors.base()
     };
     let style = interaction::style(ctx, &format!("item-{}", item_key(&item.key)), style);
-    let mut title = vec![Span::new(format!("{}  ", item_id(&item.key))).fg(colors.accent)];
-    title.push(Span::new(item.title.clone()).bold());
+    let id = format!("{}  ", item_id(&item.key));
+    let title = vec![Span::new(item.title.clone()).bold()];
+    let people = work_people(item);
+    let title_line = HStack::new()
+        .width(Length::Flex(1))
+        .height(Length::Px(1))
+        .style(style)
+        .child(
+            Text::new(id.clone())
+                .width(Length::Px(id.len() as u16))
+                .height(Length::Px(1))
+                .style(style.fg(colors.accent)),
+        )
+        .child(
+            Text::from_spans(title)
+                .height(Length::Px(1))
+                .overflow(Overflow::Ellipsis)
+                .style(style),
+        )
+        .child(
+            Text::new("  by ")
+                .width(Length::Px(5))
+                .height(Length::Px(1))
+                .style(style.fg(colors.muted)),
+        )
+        .child(user_tooltip(
+            ctx,
+            format!("item-{}-author", item_key(&item.key)),
+            &item.author,
+            Text::new(state.render_user(&item.author))
+                .height(Length::Px(1))
+                .overflow(Overflow::Ellipsis)
+                .style(colors.user_style(state, item.author.id, style.fg(colors.muted))),
+        ))
+        .child(
+            Text::new(if people[0].roles().is_empty() {
+                String::new()
+            } else {
+                format!(" (+ {})", people[0].roles())
+            })
+            .height(Length::Px(1))
+            .overflow(Overflow::Ellipsis)
+            .style(style.fg(colors.muted)),
+        )
+        .child(Spacer::new().width(Length::Flex(1)));
     let mut labels = vec![Span::new("   ")];
     labels.extend(label_spans(&item.labels, colors));
-    if !item.labels.is_empty() {
-        // Keep the labels apart from the pipeline dot that follows them.
-        labels.push(Span::new(" "));
-    }
     let mut labels_line = HStack::new()
         .height(Length::Px(1))
         .style(style)
         .child(Text::from_spans(labels).height(Length::Px(1)).style(style));
     if let Some(pipeline) = &item.pipeline {
+        if !item.labels.is_empty() {
+            // Keep the field gap even when long labels are truncated.
+            labels_line = labels_line.child(Text::new("  ").width(Length::Px(2)).style(style));
+        }
         labels_line = labels_line
             .child(status_dot(
                 ctx,
@@ -1109,27 +1152,26 @@ fn work_row(
     let timing = item.list_pipeline_timing(state.now_unix());
     if !timing.is_empty() {
         labels_line = labels_line.child(
-            Text::new(format!("  {timing}  ·  "))
-                .height(Length::Px(1))
-                .style(style.fg(colors.muted)),
-        );
-    } else if item.pipeline.is_some() || item.pipeline_metrics_fetched {
-        labels_line = labels_line.child(
-            Text::new("  ·  ")
+            Text::new(format!("  {timing}"))
                 .height(Length::Px(1))
                 .style(style.fg(colors.muted)),
         );
     }
-    labels_line = labels_line.child(user_tooltip(
-        ctx,
-        format!("item-{}-author", item_key(&item.key)),
-        &item.author,
-        Text::new(state.render_user(&item.author))
-            .width(Length::Flex(1))
-            .height(Length::Px(1))
-            .overflow(Overflow::Ellipsis)
-            .style(colors.user_style(state, item.author.id, style.fg(colors.muted))),
-    ));
+    if people.len() > 1 {
+        let has_metadata = !item.labels.is_empty()
+            || item.pipeline.is_some()
+            || (item.key.kind == ItemKind::MergeRequest && item.pipeline_metrics_fetched)
+            || !timing.is_empty();
+        if has_metadata {
+            labels_line = labels_line.child(
+                Text::new("  ·  ")
+                    .width(Length::Px(5))
+                    .height(Length::Px(1))
+                    .style(style.fg(colors.muted)),
+            );
+        }
+        labels_line = labels_line.child(work_row_people(ctx, item, &people[1..], style, colors));
+    }
     let mut attention = Vec::new();
     if state.config.active_tab == 0 {
         let roles = item.dashboard_roles(state.user.id);
@@ -1169,7 +1211,7 @@ fn work_row(
             colors,
         ))
         .child(Text::new(" ").width(Length::Px(1)).style(style))
-        .child(rich(title, style))
+        .child(title_line)
         .child(
             Text::new(format!(" {identity}  "))
                 .style(Style::new().fg(colors.muted))
@@ -1204,6 +1246,110 @@ fn work_row(
         row,
         move || Msg::Activate(index),
     )
+}
+
+struct WorkPerson<'a> {
+    user: &'a User,
+    assigned: bool,
+    reviewing: bool,
+}
+
+impl WorkPerson<'_> {
+    fn roles(&self) -> &'static str {
+        match (self.assigned, self.reviewing) {
+            (true, true) => "assigned, reviewing",
+            (true, false) => "assigned",
+            (false, true) => "reviewing",
+            (false, false) => "",
+        }
+    }
+}
+
+/// Author first, then assignees and reviewers in API order, once per known identity.
+fn work_people(item: &WorkItem) -> Vec<WorkPerson<'_>> {
+    let mut people = vec![WorkPerson {
+        user: &item.author,
+        assigned: false,
+        reviewing: false,
+    }];
+    for (user, reviewing) in item.assignees.iter().map(|user| (user, false)).chain(
+        item.reviewers
+            .iter()
+            .filter(|_| item.key.kind == ItemKind::MergeRequest)
+            .map(|user| (user, true)),
+    ) {
+        // Missing IDs are not proof of a shared identity; never merge unknown people.
+        let index = people
+            .iter()
+            .position(|person| user.id != 0 && person.user.id == user.id);
+        let index = index.unwrap_or_else(|| {
+            people.push(WorkPerson {
+                user,
+                assigned: false,
+                reviewing: false,
+            });
+            people.len() - 1
+        });
+        if reviewing {
+            people[index].reviewing = true;
+        } else {
+            people[index].assigned = true;
+        }
+    }
+    people
+}
+
+/// Compact people fields retain formatting, highlighting, and passive profile tooltips.
+fn work_row_people(
+    ctx: &Context<Cronk>,
+    item: &WorkItem,
+    people: &[WorkPerson<'_>],
+    style: Style,
+    colors: Colors,
+) -> Element {
+    let mut list = HStack::new()
+        .width(Length::Auto)
+        .height(Length::Px(1))
+        .style(style);
+    for (index, person) in people.iter().enumerate() {
+        if index > 0 {
+            list = list.child(
+                Text::new(", ")
+                    .width(Length::Px(2))
+                    .height(Length::Px(1))
+                    .style(style.fg(colors.muted)),
+            );
+        }
+        let user = person.user;
+        list = list.child(
+            user_tooltip(
+                ctx,
+                format!("item-{}-person-{index}", item_key(&item.key)),
+                user,
+                Text::from_spans(vec![
+                    Span::new(ctx.state.render_user(user)).style(colors.user_style(
+                        &ctx.state,
+                        user.id,
+                        style.fg(colors.muted),
+                    )),
+                    Span::new(format!(" ({})", person.roles())).fg(colors.muted),
+                ])
+                .height(Length::Px(1))
+                .overflow(Overflow::Ellipsis)
+                .style(style.fg(colors.muted)),
+            )
+            .min_width(Length::Px(
+                (ctx.state.render_user(user).chars().count().min(3) + 1) as u16,
+            )),
+        );
+    }
+    // Reserve a few identity cells plus an ellipsis per person before labels/timing win all the space.
+    let min_width = people
+        .iter()
+        .map(|person| ctx.state.render_user(person.user).chars().count().min(3) + 1)
+        .sum::<usize>()
+        + people.len().saturating_sub(1) * 2;
+    Element::from(list).min_width(Length::Px(min_width.min(u16::MAX as usize) as u16))
 }
 
 fn project_row(
@@ -4034,6 +4180,52 @@ const HELP: &str = "\
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_people_keep_distinct_ids_even_when_display_names_match() {
+        let user = |id| User {
+            id,
+            username: "same-login".into(),
+            name: "Same name".into(),
+            ..User::default()
+        };
+        let item = WorkItem {
+            key: ItemKey {
+                kind: ItemKind::MergeRequest,
+                ..ItemKey::default()
+            },
+            author: user(1),
+            assignees: vec![user(2)],
+            reviewers: vec![user(3), user(2)],
+            ..WorkItem::default()
+        };
+        let people = work_people(&item);
+        assert_eq!(
+            people
+                .iter()
+                .map(|person| (person.user.id, person.roles()))
+                .collect::<Vec<_>>(),
+            [(1, ""), (2, "assigned, reviewing"), (3, "reviewing")]
+        );
+    }
+
+    #[test]
+    fn work_people_do_not_merge_missing_ids() {
+        let item = WorkItem {
+            key: ItemKey {
+                kind: ItemKind::MergeRequest,
+                ..ItemKey::default()
+            },
+            assignees: vec![User::default()],
+            reviewers: vec![User::default()],
+            ..WorkItem::default()
+        };
+        let people = work_people(&item);
+        assert_eq!(
+            people.iter().map(WorkPerson::roles).collect::<Vec<_>>(),
+            ["", "assigned", "reviewing"]
+        );
+    }
 
     fn linear_rgb(color: Color) -> [f64; 3] {
         let (r, g, b) = color.to_rgb().unwrap();

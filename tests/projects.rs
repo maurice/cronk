@@ -524,6 +524,50 @@ fn project_fields_are_left_aligned_editable_first_and_match_shared_label_width()
 }
 
 #[test]
+fn forget_help_is_centered_and_inherits_the_section_background() {
+    let help = "Removes this project from Cronk only. GitLab data is unchanged.";
+    for theme in THEMES {
+        let mut ui = mount(demo::projects().remove(0), 80);
+        ui.state_mut().config.theme = theme.into();
+        ui.dispatch(Msg::Enter).unwrap();
+        ui.dispatch(Msg::Move(2)).unwrap();
+        settle(&mut ui);
+        let mut backgrounds = Vec::new();
+        // The broad section highlight and focused button both leave the help
+        // text's background to the enclosing detail row.
+        for scope in [Scope::Details, Scope::Section] {
+            if scope == Scope::Section {
+                ui.dispatch(Msg::Enter).unwrap();
+                settle(&mut ui);
+            }
+            assert_eq!(ui.state().scope, scope);
+            let rect = ui.rect_of_key(&"project-remove".into()).unwrap();
+            let frame = ui.capture_frame();
+            let plain = frame.plain_text();
+            let (y, line) = plain
+                .lines()
+                .enumerate()
+                .find(|(_, line)| line.contains(help))
+                .unwrap_or_else(|| panic!("{theme}, {scope:?}: {plain}"));
+            let x = line[..line.find(help).unwrap()].chars().count() as u16;
+            let left = rect.x as u16 + 4;
+            let right = rect.x as u16 + rect.w;
+            assert!(
+                (i32::from(x - left) - i32::from(right - x - help.len() as u16)).abs() <= 1,
+                "{theme}, {scope:?}: {plain}"
+            );
+            let background = frame.cell(left, y as u16).bg;
+            for column in x..x + help.len() as u16 {
+                assert_eq!(frame.cell(column, y as u16).bg, background, "{theme}");
+            }
+            assert_eq!(frame.cell(right - 1, y as u16).bg, background);
+            backgrounds.push(background);
+        }
+        assert_ne!(backgrounds[0], backgrounds[1], "{theme}");
+    }
+}
+
+#[test]
 fn forget_button_is_three_rows_centered_contrasting_and_accessible_on_small_screens() {
     for theme in THEMES {
         let mut ui = mount(demo::projects().remove(0), 40);

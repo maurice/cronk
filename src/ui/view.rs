@@ -3049,6 +3049,9 @@ fn jobs(
     for (index, job) in jobs.iter().enumerate() {
         let selected = cursor == Some(index);
         let expanded = ctx.state.job_expanded(job);
+        // Inspect an auto-expanded failure before toggling it: the first click
+        // from outside this pipeline should select it without hiding its logs.
+        let focus_only = cursor.is_none() && expanded && job.failed_hard();
         let id = job.id;
         let link = ctx.link().clone();
         let job_colors = if selected {
@@ -3068,8 +3071,12 @@ fn jobs(
                 selected,
                 move || {
                     link.send(Msg::Section(section));
-                    link.send(Msg::Select(index));
-                    Msg::ToggleJob(id)
+                    if focus_only {
+                        Msg::Select(index)
+                    } else {
+                        link.send(Msg::Select(index));
+                        Msg::ToggleJob(id)
+                    }
                 },
             )
             .with_status(format!("job-{id}-status"), "Job", job.display_status()),
@@ -4002,8 +4009,8 @@ const HELP: &str = "\
 - **Ctrl+J** inserts a newline in multiline fields. **Esc** cancels.
 - ID-backed fields suggest names: **Up / Down** choose, **Enter** accepts, then saves.
 - Separate assignees/reviewers with commas; only the trimmed token at the caret is searched.
-- Running jobs expand automatically; Space or the +/− header toggles any job.
-- Manual collapse survives refresh and restart. Selection styling covers expanded logs.
+- Running/hard-failed jobs auto-expand; hard failures pin first in run order.
+- Space/header toggles jobs; manual collapse survives refresh and restart.
 - Enter focuses a job's logs; ↑/↓ and PgUp/PgDn scroll; Home/End go to start/live tail.
 - Ctrl+↑/↓ and Ctrl+PgUp/PgDn scroll the selected job without focusing it.
 - z zooms a selected/focused job. Zoom offers a draggable scrollbar and mouse-wheel scrolling.

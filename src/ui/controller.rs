@@ -463,10 +463,12 @@ impl Component for Cronk {
                 ctx.state.sync_progress.insert(id, progress);
                 self.merge_items(ctx, items);
             }
-            Msg::DetailCached(key, request, details) => {
+            Msg::DetailCached(key, request, mut details) => {
                 if ctx.state.detail_requests.get(&key) != Some(&request) {
                     return Update::none();
                 }
+                // Cached jobs may have been written with an older display order.
+                sort_jobs(&mut details.jobs);
                 ctx.state
                     .shared_details
                     .insert(key.clone(), ((*details).clone(), Duration::ZERO));

@@ -2195,7 +2195,13 @@ fn cache_finished_job(ui: &mut Ui, marker: &str) -> u64 {
     let mut details = ui.state().details.clone().unwrap();
     details.warnings.clear();
     details.item.title = marker.into();
-    let index = details.jobs.iter().position(|j| !j.running()).unwrap();
+    // Hard failures now lead the list and already auto-expand; choose a job
+    // whose collapsed logs can be explicitly opened for this cache fixture.
+    let index = details
+        .jobs
+        .iter()
+        .position(|j| !j.running() && !j.failed_hard())
+        .unwrap();
     let job = details.jobs[index].id;
     ui.dispatch(Msg::DetailsLoaded(
         route.clone(),
@@ -3280,9 +3286,16 @@ fn optional_detail_warnings_do_not_back_off_or_stall_live_traces() {
     ];
     details.warnings = warnings.clone();
     details.item.title = "Updated MR with partial optional details".into();
-    let live_job = details.jobs[0].id;
+    // Pinned hard failures already have traces; start an as-yet unread job
+    // so this still proves the refresh schedules a new live trace.
+    let index = details
+        .jobs
+        .iter()
+        .position(|job| !ui.state().traces.contains_key(&job.id))
+        .unwrap();
+    let live_job = details.jobs[index].id;
     assert!(!ui.state().traces.contains_key(&live_job));
-    details.jobs[0].status = "running".into();
+    details.jobs[index].status = "running".into();
     ui.dispatch(Msg::DetailsLoaded(
         route.clone(),
         epoch,

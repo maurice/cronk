@@ -1703,6 +1703,9 @@ impl GitLab {
             .generation;
         let raw = self.core_item(key)?;
         let mut details = previous.unwrap_or_default();
+        // Normalize older cached job ordering before publishing any progress,
+        // including when a failed pipeline refresh retains those cached jobs.
+        sort_jobs(&mut details.jobs);
         let colors: HashMap<_, _> = details
             .item
             .labels
@@ -4377,6 +4380,59 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("Notes incomplete"))
         );
+    }
+
+    #[test]
+    fn cached_failures_stay_pinned_through_core_progress_and_failed_pipeline_refresh() {
+        let mock = Mock::new(|request| match request.url().path() {
+            "/api/v4/projects/7/merge_requests/1" => {
+                let mut item = raw_item(1, "opened");
+                item["head_pipeline"] = json!({"id": 99, "status": "failed"});
+                Reply::json(item)
+            }
+            "/api/v4/projects/7/pipelines/99/jobs" => Reply::bytes(503, "retry later"),
+            _ => Reply::json(json!([])),
+        });
+        let previous = Details {
+            jobs: vec![
+                Job {
+                    id: 2,
+                    status: "running".into(),
+                    started_at: Some("2025-01-01T10:05:00Z".into()),
+                    ..Default::default()
+                },
+                Job {
+                    id: 1,
+                    status: "failed".into(),
+                    started_at: Some("2025-01-01T10:00:00Z".into()),
+                    ..Default::default()
+                },
+            ],
+            loaded: HashSet::from([DetailPart::Pipeline]),
+            ..Default::default()
+        };
+        let progress = Mutex::new(Vec::new());
+        let details = mock
+            .client()
+            .details_progress(
+                &key(ItemKind::MergeRequest),
+                Some(previous),
+                |part, details| {
+                    assert_eq!(
+                        details.jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+                        [1, 2]
+                    );
+                    progress.lock().unwrap().push(part);
+                },
+            )
+            .unwrap();
+        assert_eq!(progress.lock().unwrap()[0], DetailPart::Core);
+        assert!(progress.lock().unwrap().contains(&DetailPart::Pipeline));
+        assert_eq!(
+            details.jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(details.warnings.iter().any(|w| w.contains("Pipeline jobs")));
     }
 
     #[test]

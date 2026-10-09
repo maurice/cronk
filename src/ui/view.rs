@@ -2042,10 +2042,15 @@ fn project_forget(ctx: &Context<Cronk>, colors: Colors) -> Vec<DetailRow> {
             selected,
             || Msg::Action(Action::RemoveProject),
         ),
-        Text::new("Removes this project from Cronk only. GitLab data is unchanged.")
+        HStack::new()
             .height(Length::Auto)
-            .overflow(Overflow::Wrap)
-            .style(colors.base().fg(colors.muted))
+            .justify(Justify::Center)
+            .child(
+                Text::new("Removes this project from Cronk only. GitLab data is unchanged.")
+                    .height(Length::Auto)
+                    .overflow(Overflow::Wrap)
+                    .style(Style::new().fg(colors.muted)),
+            )
             .into(),
     ]
 }

@@ -155,6 +155,73 @@ fn list_status_and_pipeline_dots_have_hover_only_explanations_in_every_theme() {
 }
 
 #[test]
+fn list_people_keep_hover_details_and_allow_row_activation() {
+    for tab in [2, 3] {
+        for role in if tab == 2 {
+            vec!["author", "assignee-0"]
+        } else {
+            vec!["author", "assignee-0", "reviewer-0", "reviewer-1"]
+        } {
+            let mut ui = mount("midnight", tab, None);
+            let mut item = ui.state().visible_items()[0].clone();
+            item.title = "Short title".into();
+            item.labels.clear();
+            let user = match role {
+                "author" => item.author.clone(),
+                "assignee-0" => item.assignees[0].clone(),
+                "reviewer-0" => item.reviewers[0].clone(),
+                "reviewer-1" => item.reviewers[1].clone(),
+                _ => unreachable!(),
+            };
+            ui.state_mut().items = vec![item.clone()];
+            settle(&mut ui);
+            let key = format!(
+                "item-{}-{}-{}-{role}",
+                item.key.project,
+                item.key.kind.segment(),
+                item.key.iid
+            );
+            let trigger = rect(&ui, &key);
+            assert_eq!(trigger.h, 1);
+            assert_eq!(
+                trigger.w as usize,
+                ui.state().render_user(&user).chars().count()
+            );
+            let title_row = rect(
+                &ui,
+                &format!(
+                    "item-{}-{}-{}-status",
+                    item.key.project,
+                    item.key.kind.segment(),
+                    item.key.iid
+                ),
+            )
+            .y;
+            assert_eq!(trigger.y, title_row + i16::from(role != "author"));
+            let (x, y) = (trigger.x as u16, trigger.y as u16);
+            mouse(&mut ui, x, y, MouseKind::Moved);
+            let text = ui.capture_frame().plain_text();
+            assert!(
+                text.contains(&format!("Username: @{}", user.username)),
+                "{text}"
+            );
+            assert_eq!(ui.state().scope, Scope::List);
+            mouse(&mut ui, 0, 0, MouseKind::Moved);
+            assert_closed(&ui);
+            for kind in [
+                MouseKind::Down(MouseButton::Left),
+                MouseKind::Up(MouseButton::Left),
+            ] {
+                mouse(&mut ui, x, y, kind);
+            }
+            assert_eq!(ui.state().config.route.as_ref(), Some(&item.key));
+            assert_eq!(ui.state().scope, Scope::Details);
+            assert_closed(&ui);
+        }
+    }
+}
+
+#[test]
 fn detail_padding_and_status_slots_align_with_lists_in_every_theme() {
     for theme in THEMES {
         for kind in [ItemKind::Issue, ItemKind::MergeRequest] {

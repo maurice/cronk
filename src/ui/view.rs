@@ -1074,17 +1074,43 @@ fn work_row(
     let style = interaction::style(ctx, &format!("item-{}", item_key(&item.key)), style);
     let mut title = vec![Span::new(format!("{}  ", item_id(&item.key))).fg(colors.accent)];
     title.push(Span::new(item.title.clone()).bold());
+    let title_line = HStack::new()
+        .width(Length::Flex(1))
+        .height(Length::Px(1))
+        .style(style)
+        .child(
+            Text::from_spans(title)
+                .height(Length::Px(1))
+                .overflow(Overflow::Ellipsis)
+                .style(style),
+        )
+        .child(
+            Text::new("  by ")
+                .width(Length::Px(5))
+                .height(Length::Px(1))
+                .style(style.fg(colors.muted)),
+        )
+        .child(user_tooltip(
+            ctx,
+            format!("item-{}-author", item_key(&item.key)),
+            &item.author,
+            Text::new(state.render_user(&item.author))
+                .height(Length::Px(1))
+                .overflow(Overflow::Ellipsis)
+                .style(colors.user_style(state, item.author.id, style.fg(colors.muted))),
+        ))
+        .child(Spacer::new().width(Length::Flex(1)));
     let mut labels = vec![Span::new("   ")];
     labels.extend(label_spans(&item.labels, colors));
-    if !item.labels.is_empty() {
-        // Keep the labels apart from the pipeline dot that follows them.
-        labels.push(Span::new(" "));
-    }
     let mut labels_line = HStack::new()
         .height(Length::Px(1))
         .style(style)
         .child(Text::from_spans(labels).height(Length::Px(1)).style(style));
     if let Some(pipeline) = &item.pipeline {
+        if !item.labels.is_empty() {
+            // Keep the field gap even when long labels are truncated.
+            labels_line = labels_line.child(Text::new("  ").width(Length::Px(2)).style(style));
+        }
         labels_line = labels_line
             .child(status_dot(
                 ctx,
@@ -1109,27 +1135,43 @@ fn work_row(
     let timing = item.list_pipeline_timing(state.now_unix());
     if !timing.is_empty() {
         labels_line = labels_line.child(
-            Text::new(format!("  {timing}  ·  "))
-                .height(Length::Px(1))
-                .style(style.fg(colors.muted)),
-        );
-    } else if item.pipeline.is_some() || item.pipeline_metrics_fetched {
-        labels_line = labels_line.child(
-            Text::new("  ·  ")
+            Text::new(format!("  {timing}"))
                 .height(Length::Px(1))
                 .style(style.fg(colors.muted)),
         );
     }
-    labels_line = labels_line.child(user_tooltip(
-        ctx,
-        format!("item-{}-author", item_key(&item.key)),
-        &item.author,
-        Text::new(state.render_user(&item.author))
-            .width(Length::Flex(1))
-            .height(Length::Px(1))
-            .overflow(Overflow::Ellipsis)
-            .style(colors.user_style(state, item.author.id, style.fg(colors.muted))),
-    ));
+    labels_line = labels_line
+        .child(
+            Text::new("  ·  ")
+                .width(Length::Px(5))
+                .height(Length::Px(1))
+                .style(style.fg(colors.muted)),
+        )
+        .child(work_row_users(
+            ctx,
+            item,
+            "assignee",
+            &item.assignees,
+            style,
+            colors,
+        ));
+    if item.key.kind == ItemKind::MergeRequest {
+        labels_line = labels_line
+            .child(
+                Text::new(" / ")
+                    .width(Length::Px(3))
+                    .height(Length::Px(1))
+                    .style(style.fg(colors.muted)),
+            )
+            .child(work_row_users(
+                ctx,
+                item,
+                "reviewer",
+                &item.reviewers,
+                style,
+                colors,
+            ));
+    }
     let mut attention = Vec::new();
     if state.config.active_tab == 0 {
         let roles = item.dashboard_roles(state.user.id);
@@ -1169,7 +1211,7 @@ fn work_row(
             colors,
         ))
         .child(Text::new(" ").width(Length::Px(1)).style(style))
-        .child(rich(title, style))
+        .child(title_line)
         .child(
             Text::new(format!(" {identity}  "))
                 .style(Style::new().fg(colors.muted))
@@ -1204,6 +1246,48 @@ fn work_row(
         row,
         move || Msg::Activate(index),
     )
+}
+
+/// Compact people fields retain each user's formatting, highlight, and hover details.
+fn work_row_users(
+    ctx: &Context<Cronk>,
+    item: &WorkItem,
+    role: &str,
+    users: &[User],
+    style: Style,
+    colors: Colors,
+) -> HStack {
+    let mut list = HStack::new()
+        .width(Length::Auto)
+        .height(Length::Px(1))
+        .style(style);
+    if users.is_empty() {
+        return list.child(
+            Text::new("-")
+                .height(Length::Px(1))
+                .style(style.fg(colors.muted)),
+        );
+    }
+    for (index, user) in users.iter().enumerate() {
+        if index > 0 {
+            list = list.child(
+                Text::new(", ")
+                    .width(Length::Px(2))
+                    .height(Length::Px(1))
+                    .style(style.fg(colors.muted)),
+            );
+        }
+        list = list.child(user_tooltip(
+            ctx,
+            format!("item-{}-{role}-{index}", item_key(&item.key)),
+            user,
+            Text::new(ctx.state.render_user(user))
+                .height(Length::Px(1))
+                .overflow(Overflow::Ellipsis)
+                .style(colors.user_style(&ctx.state, user.id, style.fg(colors.muted))),
+        ));
+    }
+    list
 }
 
 fn project_row(

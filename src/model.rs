@@ -692,40 +692,51 @@ impl Job {
     }
 }
 
-/// Orders jobs for display: hard failures stay pinned first in run order
-/// (earliest start first, missing start times last). Other started jobs follow,
-/// newest first; jobs yet to start follow by stage (earliest-created stage first)
-/// and then name.
+/// Orders jobs by attention: hard failures, active work, upcoming automatic work,
+/// canceled, success/allowed failure, skipped, then unstarted manual work.
+/// Hard failures use earliest start first (missing times last); active, canceled
+/// and completed jobs use newest start first. Other groups use stage order
+/// (earliest-created stage first), then name. Unknown states stay with upcoming
+/// work rather than being hidden among completed or manual jobs.
 pub fn sort_jobs(jobs: &mut [Job]) {
     let mut stage_rank: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for job in jobs.iter() {
         let rank = stage_rank.entry(job.stage.clone()).or_insert(job.id);
         *rank = (*rank).min(job.id);
     }
+    let priority = |job: &Job| match job.status.as_str() {
+        "failed" if !job.allow_failure => 0,
+        "running" | "preparing" | "canceling" | "waiting_for_callback" => 1,
+        "created" | "pending" | "waiting_for_resource" | "scheduled" => 2,
+        "canceled" => 3,
+        "success" | "failed" => 4,
+        "skipped" => 5,
+        "manual" => 6,
+        _ => 2,
+    };
+    let stage_order = |a: &Job, b: &Job| {
+        stage_rank[&a.stage]
+            .cmp(&stage_rank[&b.stage])
+            .then_with(|| a.name.cmp(&b.name))
+            .then(a.id.cmp(&b.id))
+    };
     jobs.sort_by(|a, b| {
-        match (a.failed_hard(), b.failed_hard()) {
-            (true, false) => return std::cmp::Ordering::Less,
-            (false, true) => return std::cmp::Ordering::Greater,
-            (true, true) => {
-                return a
-                    .started_at
-                    .is_none()
-                    .cmp(&b.started_at.is_none())
-                    .then_with(|| a.started_at.cmp(&b.started_at))
-                    .then(a.id.cmp(&b.id));
-            }
-            (false, false) => {}
-        }
-        let key = |j: &Job| (j.started_at.is_none(), stage_rank[&j.stage]);
-        match (&a.started_at, &b.started_at) {
-            (Some(x), Some(y)) => y.cmp(x).then(b.id.cmp(&a.id)),
-            (None, None) => key(a)
-                .cmp(&key(b))
-                .then_with(|| a.name.cmp(&b.name))
+        let group = priority(a);
+        group.cmp(&priority(b)).then_with(|| match group {
+            0 => a
+                .started_at
+                .is_none()
+                .cmp(&b.started_at.is_none())
+                .then_with(|| a.started_at.cmp(&b.started_at))
                 .then(a.id.cmp(&b.id)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-        }
+            1 | 3 | 4 => match (&a.started_at, &b.started_at) {
+                (Some(x), Some(y)) => y.cmp(x).then(b.id.cmp(&a.id)),
+                (None, None) => stage_order(a, b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+            },
+            _ => stage_order(a, b),
+        })
     });
 }
 
@@ -869,6 +880,7 @@ mod job_order_tests {
             name: name.into(),
             stage: stage.into(),
             started_at: started.map(Into::into),
+            status: "created".into(),
             ..Job::default()
         }
     }
@@ -897,10 +909,11 @@ mod job_order_tests {
         sort_jobs(&mut jobs);
         assert_eq!(
             jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
-            [1, 2, 3, 4, 6, 5, 7]
+            [1, 2, 3, 4, 6, 7, 5]
         );
-        jobs.iter_mut().find(|j| j.id == 7).unwrap().started_at =
-            Some("2025-01-01T10:08:00Z".into());
+        let next = jobs.iter_mut().find(|j| j.id == 7).unwrap();
+        next.started_at = Some("2025-01-01T10:08:00Z".into());
+        next.status = "running".into();
         sort_jobs(&mut jobs);
         assert_eq!(
             jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
@@ -909,7 +922,94 @@ mod job_order_tests {
     }
 
     #[test]
-    fn started_jobs_newest_first_then_unstarted_by_stage_and_name() {
+    fn all_job_states_follow_attention_priority_not_start_time() {
+        let cases = [
+            (1, "failed", false, Some("2025-01-01T10:00:00Z")),
+            (5, "running", false, Some("2025-01-01T10:05:00Z")),
+            (4, "preparing", false, Some("2025-01-01T10:04:00Z")),
+            (3, "canceling", false, Some("2025-01-01T10:03:00Z")),
+            (2, "waiting_for_callback", false, None),
+            (6, "created", false, None),
+            (7, "pending", false, None),
+            (8, "waiting_for_resource", false, None),
+            (9, "scheduled", false, None),
+            (15, "future-status", false, None),
+            (10, "canceled", false, Some("2025-01-01T11:00:00Z")),
+            (11, "success", false, Some("2025-01-01T12:00:00Z")),
+            (12, "failed", true, Some("2025-01-01T11:30:00Z")),
+            (13, "skipped", false, None),
+            (14, "manual", false, None),
+        ];
+        let mut jobs: Vec<_> = cases
+            .iter()
+            .map(|&(id, status, allow_failure, started)| Job {
+                status: status.into(),
+                allow_failure,
+                ..job(id, &format!("job-{id:02}"), "test", started)
+            })
+            .collect();
+        jobs.reverse();
+        jobs.rotate_left(4);
+        sort_jobs(&mut jobs);
+        assert_eq!(
+            jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+            cases.iter().map(|case| case.0).collect::<Vec<_>>()
+        );
+        let sorted = jobs.iter().map(|j| j.id).collect::<Vec<_>>();
+        sort_jobs(&mut jobs);
+        assert_eq!(jobs.iter().map(|j| j.id).collect::<Vec<_>>(), sorted);
+    }
+
+    #[test]
+    fn upcoming_skipped_and_manual_jobs_use_stage_then_name_even_with_start_times() {
+        let mut jobs = vec![
+            job(1, "finished-build", "build", None),
+            job(8, "z-test", "test", Some("2025-01-01T10:10:00Z")),
+            job(7, "a-test", "test", None),
+            job(6, "b-build", "build", None),
+            job(5, "a-build", "build", None),
+        ];
+        jobs[0].status = "success".into();
+        for status in ["pending", "skipped", "manual"] {
+            for job in &mut jobs {
+                if job.id != 1 {
+                    job.status = status.into();
+                }
+            }
+            sort_jobs(&mut jobs);
+            let ids: Vec<_> = jobs.iter().map(|j| j.id).collect();
+            if status == "pending" {
+                assert_eq!(ids, [5, 6, 7, 8, 1]);
+            } else {
+                assert_eq!(ids, [1, 5, 6, 7, 8]);
+            }
+        }
+    }
+
+    #[test]
+    fn manual_job_moves_up_when_started_or_failed_and_down_when_nonblocking() {
+        let mut jobs = vec![
+            job(1, "automatic", "test", None),
+            job(2, "manual", "test", None),
+        ];
+        jobs[1].status = "manual".into();
+        for (status, allow_failure, expected) in [
+            ("manual", false, [1, 2]),
+            ("running", false, [2, 1]),
+            ("failed", false, [2, 1]),
+            ("failed", true, [1, 2]),
+            ("success", false, [1, 2]),
+        ] {
+            let manual = jobs.iter_mut().find(|j| j.id == 2).unwrap();
+            manual.status = status.into();
+            manual.allow_failure = allow_failure;
+            sort_jobs(&mut jobs);
+            assert_eq!(jobs.iter().map(|j| j.id).collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    fn active_jobs_newest_first_then_upcoming_by_stage_and_name() {
         let mut jobs = vec![
             job(1, "lint", "check", Some("2025-01-01T10:00:00Z")),
             job(2, "unit-2", "test", Some("2025-01-01T10:05:00Z")),
@@ -918,6 +1018,9 @@ mod job_order_tests {
             job(5, "e2e-b", "e2e", None),
             job(4, "e2e-a", "e2e", None),
         ];
+        for job in &mut jobs[..3] {
+            job.status = "running".into();
+        }
         sort_jobs(&mut jobs);
         let names: Vec<_> = jobs.iter().map(|j| j.name.as_str()).collect();
         assert_eq!(

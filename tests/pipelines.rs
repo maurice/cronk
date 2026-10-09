@@ -94,6 +94,58 @@ fn click(ui: &mut Ui, key: &str) {
 }
 
 #[test]
+fn project_pipeline_failures_pin_in_run_order_and_unfocused_click_keeps_logs_open() {
+    let mut ui = mount(60);
+    open_pipelines(&mut ui);
+    key(&mut ui, KeyCode::Enter);
+    key(&mut ui, KeyCode::Enter);
+    let pipeline = ui.state().drilled.unwrap();
+    let selected = ui.state().selected_job().unwrap().id;
+    let window = &ui.state().project_pipelines[&PROJECT];
+    let mut jobs = window.jobs[&pipeline].jobs[..3].to_vec();
+    let first_failure = jobs[1].id;
+    let second_failure = jobs[2].id;
+    jobs[0].status = "running".into();
+    jobs[0].started_at = Some("2025-01-01T10:10:00Z".into());
+    for (job, started) in jobs[1..]
+        .iter_mut()
+        .zip(["2025-01-01T10:00:00Z", "2025-01-01T10:05:00Z"])
+    {
+        job.status = "failed".into();
+        job.allow_failure = false;
+        job.started_at = Some(started.into());
+    }
+    cronk::model::sort_jobs(&mut jobs);
+    ui.dispatch(Msg::PipelineLoaded(
+        PROJECT,
+        pipeline,
+        ui.state().pipeline_epoch,
+        Ok(Box::new((window.pipelines[0].clone(), jobs, Vec::new()))),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    let jobs = &ui.state().project_pipelines[&PROJECT].jobs[&pipeline].jobs;
+    assert_eq!(
+        jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+        [first_failure, second_failure, selected]
+    );
+    assert_eq!(ui.state().selected_job().unwrap().id, selected);
+    assert!(ui.state().job_expanded(&jobs[0]));
+    assert!(ui.state().job_expanded(&jobs[1]));
+
+    ui.dispatch(Msg::Select(0)).unwrap();
+    settle(&mut ui);
+    ui.state_mut().scope = Scope::Details;
+    settle(&mut ui);
+    click(&mut ui, &format!("job-{first_failure}"));
+    assert_eq!(ui.state().selected_job().unwrap().id, first_failure);
+    assert!(!ui.state().collapsed.contains(&first_failure));
+    assert_eq!(ui.state().drilled, Some(pipeline));
+    click(&mut ui, &format!("job-{first_failure}"));
+    assert!(ui.state().collapsed.contains(&first_failure));
+}
+
+#[test]
 fn pipelines_follow_merge_request_visibility() {
     let mut hidden = demo::projects();
     hidden[0].merge_requests_visible = false;

@@ -692,9 +692,10 @@ impl Job {
     }
 }
 
-/// Orders jobs for display: jobs that have started come first, most recently
-/// started on top (so current and last jobs are easy to reach); jobs yet to
-/// start follow, ordered by stage (earliest-created stage first) and then name.
+/// Orders jobs for display: hard failures stay pinned first in run order
+/// (earliest start first, missing start times last). Other started jobs follow,
+/// newest first; jobs yet to start follow by stage (earliest-created stage first)
+/// and then name.
 pub fn sort_jobs(jobs: &mut [Job]) {
     let mut stage_rank: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for job in jobs.iter() {
@@ -702,6 +703,19 @@ pub fn sort_jobs(jobs: &mut [Job]) {
         *rank = (*rank).min(job.id);
     }
     jobs.sort_by(|a, b| {
+        match (a.failed_hard(), b.failed_hard()) {
+            (true, false) => return std::cmp::Ordering::Less,
+            (false, true) => return std::cmp::Ordering::Greater,
+            (true, true) => {
+                return a
+                    .started_at
+                    .is_none()
+                    .cmp(&b.started_at.is_none())
+                    .then_with(|| a.started_at.cmp(&b.started_at))
+                    .then(a.id.cmp(&b.id));
+            }
+            (false, false) => {}
+        }
         let key = |j: &Job| (j.started_at.is_none(), stage_rank[&j.stage]);
         match (&a.started_at, &b.started_at) {
             (Some(x), Some(y)) => y.cmp(x).then(b.id.cmp(&a.id)),
@@ -857,6 +871,41 @@ mod job_order_tests {
             started_at: started.map(Into::into),
             ..Job::default()
         }
+    }
+
+    #[test]
+    fn hard_failures_stay_pinned_in_run_order_as_other_jobs_start() {
+        let mut jobs = vec![
+            job(1, "first-failure", "test", Some("2025-01-01T10:00:00Z")),
+            job(3, "later-failure", "test", Some("2025-01-01T10:05:00Z")),
+            job(
+                2,
+                "same-start-failure",
+                "test",
+                Some("2025-01-01T10:00:00Z"),
+            ),
+            job(4, "missing-start-failure", "test", None),
+            job(5, "allowed-failure", "test", Some("2025-01-01T10:06:00Z")),
+            job(6, "running", "test", Some("2025-01-01T10:07:00Z")),
+            job(7, "pending", "deploy", None),
+        ];
+        for job in &mut jobs[..5] {
+            job.status = "failed".into();
+        }
+        jobs[4].allow_failure = true;
+        jobs[5].status = "running".into();
+        sort_jobs(&mut jobs);
+        assert_eq!(
+            jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 6, 5, 7]
+        );
+        jobs.iter_mut().find(|j| j.id == 7).unwrap().started_at =
+            Some("2025-01-01T10:08:00Z".into());
+        sort_jobs(&mut jobs);
+        assert_eq!(
+            jobs.iter().map(|j| j.id).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 7, 6, 5]
+        );
     }
 
     #[test]

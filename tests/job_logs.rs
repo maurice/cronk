@@ -203,6 +203,88 @@ fn space_toggles_enter_focuses_and_navigation_remains_consistent() {
     assert_eq!(ui.state().config.field, 1);
 }
 
+fn click_job(ui: &mut Ui, id: u64) {
+    let rect = ui.rect_of_key(&format!("job-{id}").into()).unwrap();
+    let x = (rect.x + 3) as u16;
+    let y = rect.y as u16;
+    mouse(ui, x, y, MouseKind::Down(MouseButton::Left));
+    mouse(ui, x, y, MouseKind::Up(MouseButton::Left));
+}
+
+#[test]
+fn first_unfocused_failure_click_selects_without_collapsing_logs() {
+    let mut ui = mount("midnight");
+    ui.state_mut().details.as_mut().unwrap().jobs[0].allow_failure = false;
+    ui.state_mut().scope = Scope::Details;
+    settle(&mut ui);
+    assert!(
+        ui.state()
+            .job_expanded(&ui.state().details.as_ref().unwrap().jobs[0])
+    );
+    assert!(ui.rect_of_key(&format!("trace-{JOB}").into()).is_some());
+
+    click_job(&mut ui, JOB);
+    assert!(ui.state().in_jobs());
+    assert_eq!(ui.state().selected_job().unwrap().id, JOB);
+    assert!(!ui.state().collapsed.contains(&JOB));
+    assert!(text(&ui).contains("LINE_099"));
+
+    click_job(&mut ui, JOB);
+    assert!(ui.state().collapsed.contains(&JOB));
+    assert!(!text(&ui).contains("LINE_099"));
+
+    ui.state_mut().scope = Scope::Details;
+    settle(&mut ui);
+    click_job(&mut ui, JOB);
+    assert!(!ui.state().collapsed.contains(&JOB));
+    assert!(text(&ui).contains("LINE_099"));
+}
+
+#[test]
+fn focused_failure_header_click_still_collapses_logs() {
+    let mut ui = mount("midnight");
+    ui.state_mut().details.as_mut().unwrap().jobs[0].allow_failure = false;
+    settle(&mut ui);
+    click_job(&mut ui, JOB);
+    assert!(ui.state().collapsed.contains(&JOB));
+    assert!(!text(&ui).contains("LINE_099"));
+}
+
+#[test]
+fn refresh_pins_failure_and_preserves_selected_job_identity() {
+    let mut ui = mount("midnight");
+    let mut details = ui.state().details.as_ref().unwrap().clone();
+    details.jobs[0].status = "running".into();
+    details.jobs[0].started_at = Some("2025-01-01T10:05:00Z".into());
+    details.jobs[1].status = "failed".into();
+    details.jobs[1].started_at = Some("2025-01-01T10:00:00Z".into());
+    cronk::model::sort_jobs(&mut details.jobs);
+    ui.dispatch(Msg::DetailsLoaded(
+        details.item.key.clone(),
+        ui.state().detail_epoch,
+        Ok(Box::new(details)),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    assert_eq!(ui.state().details.as_ref().unwrap().jobs[0].id, JOB + 1);
+    assert_eq!(ui.state().selected_job().unwrap().id, JOB);
+    assert_eq!(ui.state().config.field, 1);
+
+    ui.dispatch(Msg::ToggleJob(JOB + 1)).unwrap();
+    assert!(ui.state().collapsed.contains(&(JOB + 1)));
+    let details = ui.state().details.as_ref().unwrap().clone();
+    ui.dispatch(Msg::DetailsLoaded(
+        details.item.key.clone(),
+        ui.state().detail_epoch,
+        Ok(Box::new(details)),
+    ))
+    .unwrap();
+    settle(&mut ui);
+    assert_eq!(ui.state().details.as_ref().unwrap().jobs[0].id, JOB + 1);
+    assert!(ui.state().collapsed.contains(&(JOB + 1)));
+    assert_eq!(ui.state().selected_job().unwrap().id, JOB);
+}
+
 #[test]
 fn running_jobs_can_be_collapsed_and_refresh_respects_the_choice() {
     let mut ui = mount("midnight");

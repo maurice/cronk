@@ -261,18 +261,35 @@ impl Pipeline {
         }
     }
 
-    /// Elapsed run time in seconds: GitLab's `duration` once known, or wall time since
-    /// start (or creation) while active. Finished pipelines without a duration give None.
+    /// Elapsed run time in seconds: wall time since start (or creation) while active,
+    /// otherwise GitLab's fixed `duration`. Missing timestamps fall back to `duration`.
     pub fn elapsed_secs(&self, now_unix: i64) -> Option<u64> {
-        if let Some(duration) = self.duration {
-            return Some(duration);
+        if self.active()
+            && let Some(start) = self
+                .started_at
+                .as_deref()
+                .and_then(crate::dates::parse_unix)
+                .or_else(|| {
+                    self.created_at
+                        .as_deref()
+                        .and_then(crate::dates::parse_unix)
+                })
+        {
+            return Some(now_unix.saturating_sub(start).max(0) as u64);
         }
-        if !self.active() {
-            return None;
+        self.duration
+    }
+
+    /// Shared list/detail timing: `3m 12s · 2 min ago`, omitting unavailable facts.
+    pub fn timing_label(&self, now_unix: i64) -> String {
+        let mut times = Vec::new();
+        if let Some(secs) = self.elapsed_secs(now_unix) {
+            times.push(format_duration(secs));
         }
-        let start = self.started_at.as_deref().or(self.created_at.as_deref())?;
-        let start = crate::dates::parse_unix(start)?;
-        Some(now_unix.saturating_sub(start).max(0) as u64)
+        if let Some(updated) = self.updated_at.as_deref().filter(|u| !u.is_empty()) {
+            times.push(crate::dates::format_relative(updated, now_unix));
+        }
+        times.join(" · ")
     }
 }
 
@@ -471,6 +488,42 @@ mod pipeline_tests {
         .unwrap();
         assert_eq!(nulls.name, None);
         assert!(nulls.active());
+    }
+
+    #[test]
+    fn pipeline_timing_labels_track_elapsed_and_relative_time() {
+        let now = crate::dates::parse_unix("2026-09-28T12:00:00Z").unwrap();
+        let mut pipeline = Pipeline {
+            status: "running".into(),
+            started_at: Some("2026-09-28T11:56:48Z".into()),
+            updated_at: Some("2026-09-28T11:59:20Z".into()),
+            duration: Some(90),
+            ..Pipeline::default()
+        };
+        assert_eq!(pipeline.timing_label(now), "3m 12s · just now");
+        assert_eq!(pipeline.timing_label(now + 10), "3m 22s · 1 min ago");
+        pipeline.status = "success".into();
+        assert_eq!(pipeline.timing_label(now), "1m 30s · just now");
+        assert_eq!(pipeline.timing_label(now + 100), "1m 30s · 2 min ago");
+    }
+
+    #[test]
+    fn pipeline_timing_labels_omit_missing_facts_and_fall_back_to_available_data() {
+        let now = crate::dates::parse_unix("2026-09-28T12:00:00Z").unwrap();
+        let mut pipeline = Pipeline::default();
+        assert_eq!(pipeline.timing_label(now), "");
+        pipeline.updated_at = Some("2026-09-28T11:58:00Z".into());
+        assert_eq!(pipeline.timing_label(now), "2 min ago");
+        pipeline.updated_at = Some(String::new());
+        pipeline.duration = Some(45);
+        assert_eq!(pipeline.timing_label(now), "45s");
+        pipeline.status = "running".into();
+        assert_eq!(pipeline.elapsed_secs(now), Some(45));
+        pipeline.started_at = Some("invalid".into());
+        pipeline.created_at = Some("2026-09-28T11:57:00Z".into());
+        assert_eq!(pipeline.timing_label(now), "3m 00s");
+        pipeline.started_at = Some("2026-09-28T12:01:00Z".into());
+        assert_eq!(pipeline.timing_label(now), "0s");
     }
 
     #[test]

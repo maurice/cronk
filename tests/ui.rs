@@ -809,6 +809,66 @@ fn dialogs_and_palette_type_direct_shortcuts_without_switching_tabs() {
 }
 
 #[test]
+fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_facts() {
+    for (status, duration, started, updated, expected) in [
+        (
+            "running",
+            Some(90),
+            Some("2026-09-28T11:56:48Z"),
+            Some("2026-09-28T11:58:00Z"),
+            "running  3m 12s · 2 min ago",
+        ),
+        (
+            "success",
+            Some(192),
+            None,
+            Some("2026-09-28T11:58:00Z"),
+            "success  3m 12s · 2 min ago",
+        ),
+        (
+            "failed",
+            None,
+            None,
+            Some("2026-09-28T11:58:00Z"),
+            "failed  2 min ago",
+        ),
+        ("success", Some(192), None, None, "success  3m 12s"),
+        ("failed", None, None, None, "failed  ·"),
+    ] {
+        let mut cfg = config();
+        cfg.active_tab = 3;
+        cfg.animations = false;
+        let mut ui = mount_with_viewport(
+            cfg,
+            None,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 140,
+                h: 24,
+            },
+        );
+        let mut item = demo::items()
+            .into_iter()
+            .find(|item| item.key.kind == ItemKind::MergeRequest)
+            .unwrap();
+        let pipeline = item.pipeline.as_mut().unwrap();
+        pipeline.status = status.into();
+        pipeline.duration = duration;
+        pipeline.started_at = started.map(Into::into);
+        pipeline.created_at = None;
+        pipeline.updated_at = updated.map(Into::into);
+        ui.state_mut().items = vec![item];
+        for _ in 0..3 {
+            settle_layout(&mut ui);
+        }
+        let text = ui.capture_frame().plain_text();
+        assert!(text.contains(expected), "missing {expected:?}:\n{text}");
+        assert!(!text.contains("None"));
+    }
+}
+
+#[test]
 fn merge_request_list_renders_title_without_an_extra_draft_annotation() {
     for theme in ["midnight", "dracula", "light"] {
         for (draft, title) in [

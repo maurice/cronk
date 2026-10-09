@@ -1091,10 +1091,20 @@ fn work_row(
                 colors,
             ))
             .child(
-                Text::new(format!(" {}  ·  ", pipeline.status))
+                Text::new(format!(" {}", pipeline.status))
                     .height(Length::Px(1))
                     .style(style.fg(colors.status(&pipeline.status).1)),
             );
+        let timing = pipeline.timing_label(state.now_unix());
+        labels_line = labels_line.child(
+            Text::new(if timing.is_empty() {
+                "  ·  ".into()
+            } else {
+                format!("  {timing}  ·  ")
+            })
+            .height(Length::Px(1))
+            .style(style.fg(colors.muted)),
+        );
     }
     labels_line = labels_line.child(user_tooltip(
         ctx,
@@ -1751,15 +1761,9 @@ fn pipeline_row_spans(
     if !facts.is_empty() {
         spans.push(Span::new(format!("  {}", facts.join("  "))).fg(colors.foreground));
     }
-    let mut times = Vec::new();
-    if let Some(secs) = pipeline.elapsed_secs(now) {
-        times.push(format_duration(secs));
-    }
-    if let Some(updated) = pipeline.updated_at.as_deref().filter(|u| !u.is_empty()) {
-        times.push(crate::dates::format_relative(updated, now));
-    }
+    let times = pipeline.timing_label(now);
     if !times.is_empty() {
-        spans.push(Span::new(format!("   {}", times.join(" · "))).fg(colors.muted));
+        spans.push(Span::new(format!("   {times}")).fg(colors.muted));
     }
     if let Some(name) = pipeline.name.as_deref().filter(|n| !n.is_empty()) {
         spans.push(Span::new(format!("   {name}")).fg(colors.muted));
@@ -2781,15 +2785,9 @@ fn pipeline_facts(ctx: &Context<Cronk>, pipeline: &Pipeline, colors: Colors) -> 
     if !reference.is_empty() {
         facts.push(reference);
     }
-    if let Some(secs) = pipeline.elapsed_secs(now) {
-        facts.push(format_duration(secs));
-    }
-    if let Some(updated) = pipeline
-        .updated_at
-        .as_deref()
-        .filter(|updated| !updated.is_empty())
-    {
-        facts.push(crate::dates::format_relative(updated, now));
+    let timing = pipeline.timing_label(now);
+    if !timing.is_empty() {
+        facts.push(timing);
     }
     if let Some(user) = &pipeline.user {
         facts.push(format!("by {}", ctx.state.render_user(user)));

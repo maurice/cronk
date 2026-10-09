@@ -282,8 +282,15 @@ pub fn items() -> Vec<WorkItem> {
                 },
                 target_branch: if mr { "main".into() } else { String::new() },
                 updated_at: format!("2026-09-{:02}T{:02}:24:00Z", 28 - index, 16 - slot),
+                merged_at: (state == "merged").then(|| {
+                    timestamp(NOW_UNIX - (2 + index as i64) * 86_400 - local as i64 * 900)
+                }),
+                closed_at: (state == "closed").then(|| {
+                    timestamp(NOW_UNIX - (1 + index as i64) * 86_400 - local as i64 * 900)
+                }),
                 web_url: url,
                 draft: mr && local == 1 && index % 2 == 1,
+                pipeline_metrics_fetched: pipeline.is_some(),
                 pipeline,
                 unresolved: Some(if mr && local == 0 {
                     2

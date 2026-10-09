@@ -6,6 +6,8 @@ use crate::{
 };
 use tui_lipan::CommandLink;
 
+const MR_METRICS_CONCURRENCY: usize = 4;
+
 impl Component for Cronk {
     type Message = Msg;
     type Properties = ();
@@ -205,6 +207,7 @@ impl Component for Cronk {
             error: navigation_error,
             list_pending: HashSet::new(),
             detail_pending: None,
+            mr_metrics_pending: HashSet::new(),
             trace_pending: HashSet::new(),
             mutation_pending: false,
             user_pending: false,
@@ -391,6 +394,7 @@ impl Component for Cronk {
                 // Do not let an in-flight read immediately repopulate a cleared cache.
                 if !ctx.state.list_pending.is_empty()
                     || !ctx.state.detail_requests.is_empty()
+                    || !ctx.state.mr_metrics_pending.is_empty()
                     || ctx.state.mutation_pending
                 {
                     ctx.state.error = Some(
@@ -661,8 +665,20 @@ impl Component for Cronk {
                     .visible_item_at(ctx.state.scroll.selected)
                     .map(|i| i.key.clone());
                 match result {
-                    Ok((items, current_iteration)) => {
+                    Ok((mut items, current_iteration)) => {
                         ctx.state.navigation_hydrated.insert(id);
+                        let previous: HashMap<_, _> = ctx
+                            .state
+                            .items
+                            .iter()
+                            .filter(|item| item.key.project == id)
+                            .map(|item| (item.key.clone(), item.clone()))
+                            .collect();
+                        for item in &mut items {
+                            if let Some(old) = previous.get(&item.key) {
+                                item.preserve_terminal_pipeline_metrics(old);
+                            }
+                        }
                         let replaced: HashSet<_> = items.iter().map(|i| i.key.clone()).collect();
                         let project = ctx
                             .state
@@ -690,6 +706,21 @@ impl Component for Cronk {
                     }
                     Err(error) => self.network_error(ctx, error),
                 }
+                ctx.link().send(Msg::LoadVisibleMrMetrics);
+            }
+            Msg::LoadVisibleMrMetrics => return self.load_visible_mr_metrics(ctx),
+            Msg::MrMetricsLoaded(key, updated_at, result) => {
+                return self.mr_metrics_loaded(ctx, key, updated_at, result);
+            }
+            Msg::MrMetricsCached(key, result) => {
+                ctx.state.mr_metrics_pending.remove(&key);
+                if let Err(error) = result {
+                    ctx.state.error = Some(format!(
+                        "Pipeline metrics cache write failed for !{}: {error}",
+                        key.iid
+                    ));
+                }
+                ctx.link().send(Msg::LoadVisibleMrMetrics);
             }
             Msg::LoadDetails => {
                 let Some(key) = ctx.state.config.route.clone() else {
@@ -1027,6 +1058,7 @@ impl Component for Cronk {
                     self.switch_tab(ctx, index);
                 }
                 self.persist(ctx);
+                ctx.link().send(Msg::LoadVisibleMrMetrics);
             }
             Msg::ToggleStar(key) => {
                 let title = ctx
@@ -1072,6 +1104,9 @@ impl Component for Cronk {
                 } else {
                     self.move_selection(ctx, delta);
                     self.persist(ctx);
+                    if ctx.state.scope == Scope::List {
+                        ctx.link().send(Msg::LoadVisibleMrMetrics);
+                    }
                 }
             }
             Msg::Select(index) => {
@@ -1080,6 +1115,9 @@ impl Component for Cronk {
                 }
                 self.select(ctx, index);
                 self.persist(ctx);
+                if ctx.state.scope == Scope::List {
+                    ctx.link().send(Msg::LoadVisibleMrMetrics);
+                }
             }
             Msg::Activate(index) => {
                 self.select(ctx, index);
@@ -1378,9 +1416,13 @@ impl Component for Cronk {
                     self.normalize(ctx);
                 }
                 if ctx.state.scroll == previous {
+                    if matches!(msg, Msg::ListViewportChanged) {
+                        ctx.link().send(Msg::LoadVisibleMrMetrics);
+                    }
                     return Update::none();
                 }
                 self.persist(ctx);
+                ctx.link().send(Msg::LoadVisibleMrMetrics);
             }
             Msg::ToggleProject => {
                 if ctx.state.config.active_tab == 1 {
@@ -2062,7 +2104,10 @@ impl Cronk {
             .into_iter()
             .map(|i| (i.key.clone(), i))
             .collect();
-        for item in items {
+        for mut item in items {
+            if let Some(previous) = merged.get(&item.key) {
+                item.preserve_terminal_pipeline_metrics(previous);
+            }
             merged.insert(item.key.clone(), item);
         }
         ctx.state.items = merged.into_values().collect();
@@ -2073,6 +2118,123 @@ impl Cronk {
         }
         ctx.state.restore_selection(false);
         self.normalize(ctx);
+        ctx.link().send(Msg::LoadVisibleMrMetrics);
+    }
+
+    fn load_visible_mr_metrics(&self, ctx: &mut Context<Self>) -> Update {
+        if ctx.state.demo
+            || ctx.state.scope != Scope::List
+            || ctx.state.config.active_tab == 1
+            || !ctx.state.list_pending.is_empty()
+            || ctx.elapsed() < ctx.state.blocked_until
+        {
+            return Update::none();
+        }
+        let Some(api) = self.api.clone() else {
+            return Update::none();
+        };
+        let slots = list_height_for_tab(ctx.viewport().h, ctx.state.config.active_tab);
+        let visible = ctx.state.visible_items();
+        let loaded: HashSet<_> = ctx
+            .state
+            .items
+            .iter()
+            .map(|item| item.key.clone())
+            .collect();
+        let window = view::list_render_window(ctx.state.scroll.offset, slots, visible.len());
+        let available = MR_METRICS_CONCURRENCY.saturating_sub(ctx.state.mr_metrics_pending.len());
+        if available == 0 {
+            return Update::none();
+        }
+        let requests: Vec<_> = window
+            .filter_map(|index| visible.get(index))
+            .filter(|item| {
+                loaded.contains(&item.key)
+                    && item.key.kind == ItemKind::MergeRequest
+                    && item.pipeline.is_none()
+                    && !item.pipeline_metrics_fetched
+                    && !ctx.state.mr_metrics_pending.contains(&item.key)
+            })
+            .take(available)
+            .map(|item| (item.key.clone(), item.updated_at.clone()))
+            .collect();
+        if requests.is_empty() {
+            return Update::none();
+        }
+        ctx.state
+            .mr_metrics_pending
+            .extend(requests.iter().map(|(key, _)| key.clone()));
+        Update::with_command(ctx.link().command(move |link| {
+            std::thread::scope(|scope| {
+                for (key, updated_at) in requests {
+                    let api = api.clone();
+                    let link = link.clone();
+                    scope.spawn(move || {
+                        link.send(Msg::MrMetricsLoaded(
+                            key.clone(),
+                            updated_at,
+                            api.mr_pipeline_metrics(&key)
+                                .map(Box::new)
+                                .map_err(|error| error.to_string()),
+                        ));
+                    });
+                }
+            });
+        }))
+    }
+
+    fn mr_metrics_loaded(
+        &mut self,
+        ctx: &mut Context<Self>,
+        key: ItemKey,
+        updated_at: String,
+        result: Result<Box<WorkItem>, String>,
+    ) -> Update {
+        let fresh = match result {
+            Ok(fresh) => *fresh,
+            Err(error) => {
+                ctx.state.mr_metrics_pending.remove(&key);
+                self.network_error(ctx, error);
+                return Update::full();
+            }
+        };
+        let Some(item) = ctx.state.items.iter_mut().find(|item| item.key == key) else {
+            ctx.state.mr_metrics_pending.remove(&key);
+            ctx.link().send(Msg::LoadVisibleMrMetrics);
+            return Update::none();
+        };
+        if item.updated_at != updated_at {
+            ctx.state.mr_metrics_pending.remove(&key);
+            ctx.link().send(Msg::LoadVisibleMrMetrics);
+            return Update::none();
+        }
+        if fresh.pipeline.is_some() {
+            item.pipeline = fresh.pipeline;
+        }
+        if fresh.merged_at.is_some() {
+            item.merged_at = fresh.merged_at;
+        }
+        if fresh.closed_at.is_some() {
+            item.closed_at = fresh.closed_at;
+        }
+        item.pipeline_metrics_fetched = true;
+        let terminal = matches!(item.state.as_str(), "merged" | "closed");
+        let saved = terminal.then(|| item.clone());
+        if let Some(saved) = saved
+            && let Some(api) = self.api.clone()
+        {
+            let key = key.clone();
+            return Update::with_command(ctx.link().command(move |link| {
+                link.send(Msg::MrMetricsCached(
+                    key,
+                    api.cache_mr_pipeline_metrics(&saved)
+                        .map_err(|error| error.to_string()),
+                ));
+            }));
+        }
+        ctx.state.mr_metrics_pending.remove(&key);
+        ctx.link().send(Msg::LoadVisibleMrMetrics);
+        Update::full()
     }
 
     fn normalize(&self, ctx: &mut Context<Self>) {
@@ -3567,6 +3729,7 @@ impl Cronk {
                 ctx.state.scroll = BoundaryScroll::default();
                 self.close_dialog(ctx);
                 self.persist(ctx);
+                ctx.link().send(Msg::LoadVisibleMrMetrics);
                 return Update::full();
             }
             DialogKind::SaveView | DialogKind::RenameView => {

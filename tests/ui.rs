@@ -869,6 +869,60 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
 }
 
 #[test]
+fn merge_request_list_shows_pipeline_metrics_and_terminal_age_for_all_demo_mrs() {
+    let mut cfg = config();
+    cfg.active_tab = 3;
+    cfg.animations = false;
+    let mut ui = mount_with_viewport(
+        cfg,
+        None,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 150,
+            h: 36,
+        },
+    );
+    ui.state_mut().items = demo::items()
+        .into_iter()
+        .filter(|item| item.key.kind == ItemKind::MergeRequest && item.state != "opened")
+        .collect();
+    for _ in 0..3 {
+        settle_layout(&mut ui);
+    }
+    let text = ui.capture_frame().plain_text();
+    for expected in [
+        "success  7m 13s · merged 2 days ago",
+        "canceled  7m 13s · closed 2 days ago",
+        "success  7m 13s · merged 4 days ago",
+        "canceled  7m 13s · closed 4 days ago",
+        "success  7m 13s · merged 6 days ago",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?}:\n{text}");
+    }
+}
+
+#[test]
+fn terminal_merge_request_without_pipeline_still_shows_when_it_closed() {
+    let mut cfg = config();
+    cfg.active_tab = 3;
+    cfg.animations = false;
+    let mut ui = mount(cfg, None);
+    let mut item = demo::items()
+        .into_iter()
+        .find(|item| item.key.kind == ItemKind::MergeRequest && item.state == "closed")
+        .unwrap();
+    item.pipeline = None;
+    item.pipeline_metrics_fetched = true;
+    ui.state_mut().items = vec![item];
+    for _ in 0..3 {
+        settle_layout(&mut ui);
+    }
+    let text = ui.capture_frame().plain_text();
+    assert!(text.contains("no pipeline  closed 2 days ago"), "{text}");
+}
+
+#[test]
 fn merge_request_list_renders_title_without_an_extra_draft_annotation() {
     for theme in ["midnight", "dracula", "light"] {
         for (draft, title) in [

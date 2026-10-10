@@ -188,7 +188,7 @@ Collapsed pipeline (1 line), built from list fields only:
 ```
 ▶ ● #48210  main  push  passed   1 h ago
 ▶ ✖ #48207  !104  merge request  failed   2 h ago
-▶ ◐ #48213  main  schedule  running   3m 12s · 2 min ago   nightly
+▶ ◐ #48213  main  schedule  running   3m 12s; 2 min ago   nightly
 ```
 
 - Status dot + status (coloured via `colors.status`, with the existing tooltip).
@@ -200,12 +200,12 @@ Collapsed pipeline (1 line), built from list fields only:
 Expanded pipeline (adds up to 2 lines, requires the detail/jobs fetch; shows a muted `loading…` placeholder until then):
 
 ```
-▼ ◐ #48213  main  schedule  running   3m 12s · 2 min ago   nightly
+▼ ◐ #48213  main  schedule  running   3m 12s; 2 min ago   nightly
     by @release-bot  ·  https://gitlab…/-/pipelines/48213
     ◐ 2 running  ○ 1 pending  ● 7 passed   10 total
 ```
 
-- Line 1 gains the real `duration` once the detail is fetched (finished pipelines then show `8m 02s · 1 h ago`).
+- Line 1 gains the real `duration` once the detail is fetched (finished pipelines then show `8m 02s; 1 h ago`).
 - Line 2: started-by (through the existing `UserFormatter`, so **You** stays yellow) and the Web URL (hyperlinked).
 - Line 3: job counts, same renderer as the MR summary. When jobs are not loaded yet, this line is `loading jobs…`.
 - The `▶ / ▼` toggle marker mirrors the `+ / −` on job headers (`▶` collapsed, `▼` expanded).

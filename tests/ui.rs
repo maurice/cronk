@@ -809,6 +809,424 @@ fn dialogs_and_palette_type_direct_shortcuts_without_switching_tabs() {
 }
 
 #[test]
+fn work_lists_keep_titles_clean_and_show_responsibility_below() {
+    for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
+        for display in [UserDisplay::Username, UserDisplay::Name, UserDisplay::Id] {
+            for (assignees, reviewers) in [(0, 0), (1, 2), (2, 0), (0, 1), (2, 2)] {
+                for labels in [false, true] {
+                    let mut cfg = config();
+                    cfg.active_tab = if kind == ItemKind::Issue { 2 } else { 3 };
+                    cfg.user_display = display;
+                    cfg.animations = false;
+                    let mut ui = mount_with_viewport(
+                        cfg,
+                        None,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            w: 160,
+                            h: 24,
+                        },
+                    );
+                    let person = |id, username: &str, name: &str| User {
+                        id,
+                        username: username.into(),
+                        name: name.into(),
+                        ..User::default()
+                    };
+                    let author = person(50, "originator", "Originator");
+                    let assigned = [ui.state().user.clone(), person(51, "bob", "Bob")];
+                    let reviewing = [person(52, "carol", "Carol"), person(53, "dave", "Dave")];
+                    let mut item = demo::items()
+                        .into_iter()
+                        .find(|item| item.key.kind == kind)
+                        .unwrap();
+                    item.title = "Tidy metadata".into();
+                    item.author = author.clone();
+                    item.assignees = assigned[..assignees].to_vec();
+                    item.reviewers = reviewing[..reviewers].to_vec();
+                    item.pipeline = None;
+                    item.pipeline_metrics_fetched = false;
+                    item.labels.truncate(usize::from(labels));
+                    if labels {
+                        item.labels[0].name = "bug".into();
+                    }
+                    let title = format!("{}{}  Tidy metadata", kind.symbol(), item.key.iid);
+                    let names = |users: &[User]| {
+                        users
+                            .iter()
+                            .map(|user| ui.state().render_user(user))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let mut metadata = if labels {
+                        "bug  ·  ".to_owned()
+                    } else {
+                        String::new()
+                    };
+                    if assignees > 0 {
+                        metadata.push_str(&format!("assigned: {}", names(&item.assignees)));
+                    } else if kind == ItemKind::MergeRequest {
+                        metadata.push_str(&format!("by {}", ui.state().render_user(&author)));
+                    } else {
+                        metadata.push_str("unassigned");
+                    }
+                    if kind == ItemKind::MergeRequest && reviewers > 0 {
+                        metadata.push_str(&format!("  ·  review: {}", names(&item.reviewers)));
+                    }
+                    ui.state_mut().items = vec![item];
+                    for _ in 0..3 {
+                        settle_layout(&mut ui);
+                    }
+                    let frame = ui.capture_frame();
+                    let lines = frame.to_lines();
+                    let title_index = lines
+                        .iter()
+                        .position(|line| line.contains(&title))
+                        .unwrap_or_else(|| panic!("missing {title:?}:\n{}", frame.plain_text()));
+                    assert_eq!(
+                        lines[title_index + 1]
+                            .trim_start_matches(['▕', ' '])
+                            .trim_end(),
+                        metadata.trim_start(),
+                        "{}",
+                        frame.plain_text()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn work_lists_keep_shared_people_in_each_responsibility_group() {
+    for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
+        for display in [UserDisplay::Username, UserDisplay::Name, UserDisplay::Id] {
+            for author_is_current in [false, true] {
+                for author_roles in 0..4 {
+                    let mut cfg = config();
+                    cfg.active_tab = if kind == ItemKind::Issue { 2 } else { 3 };
+                    cfg.user_display = display;
+                    cfg.animations = false;
+                    let mut ui = mount_with_viewport(
+                        cfg,
+                        None,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            w: 180,
+                            h: 24,
+                        },
+                    );
+                    let mut item = demo::items()
+                        .into_iter()
+                        .find(|item| item.key.kind == kind)
+                        .unwrap();
+                    let author = if author_is_current {
+                        ui.state().user.clone()
+                    } else {
+                        User {
+                            id: 50,
+                            username: "originator".into(),
+                            name: "Originator".into(),
+                            ..User::default()
+                        }
+                    };
+                    let bob = User {
+                        id: 51,
+                        username: "bob".into(),
+                        name: "Bob".into(),
+                        ..User::default()
+                    };
+                    let carol = User {
+                        id: 52,
+                        username: "carol".into(),
+                        name: "Carol".into(),
+                        ..User::default()
+                    };
+                    item.title = "Tidy metadata".into();
+                    item.author = author.clone();
+                    item.assignees = vec![bob.clone(), bob.clone()];
+                    let mut bob_review_snapshot = bob.clone();
+                    bob_review_snapshot.username = "renamed-bob".into();
+                    item.reviewers =
+                        vec![bob_review_snapshot.clone(), carol.clone(), carol.clone()];
+                    if author_roles & 1 != 0 {
+                        item.assignees.push(author.clone());
+                    }
+                    if author_roles & 2 != 0 {
+                        let mut author_review_snapshot = author.clone();
+                        author_review_snapshot.name = "Renamed author".into();
+                        item.reviewers.push(author_review_snapshot);
+                    }
+                    item.labels.truncate(1);
+                    item.labels[0].name = "bug".into();
+                    item.pipeline = None;
+                    item.pipeline_metrics_fetched = false;
+                    let title = format!("{}{}  Tidy metadata", kind.symbol(), item.key.iid);
+                    let mut metadata =
+                        format!("bug  ·  assigned: {}", ui.state().render_user(&bob));
+                    if author_roles & 1 != 0 {
+                        metadata.push_str(&format!(", {}", ui.state().render_user(&author)));
+                    }
+                    if kind == ItemKind::MergeRequest {
+                        metadata.push_str(&format!(
+                            "  ·  review: {}, {}",
+                            ui.state().render_user(&bob_review_snapshot),
+                            ui.state().render_user(&carol)
+                        ));
+                        if author_roles & 2 != 0 {
+                            metadata.push_str(&format!(
+                                ", {}",
+                                ui.state().render_user(item.reviewers.last().unwrap())
+                            ));
+                        }
+                    }
+                    ui.state_mut().items = vec![item];
+                    for _ in 0..3 {
+                        settle_layout(&mut ui);
+                    }
+                    let frame = ui.capture_frame();
+                    let lines = frame.to_lines();
+                    let title_index = lines
+                        .iter()
+                        .position(|line| line.contains(&title))
+                        .unwrap_or_else(|| panic!("missing {title:?}:\n{}", frame.plain_text()));
+                    assert_eq!(
+                        lines[title_index + 1]
+                            .trim_start_matches(['▕', ' '])
+                            .trim_end(),
+                        metadata,
+                        "{}",
+                        frame.plain_text()
+                    );
+                    assert!(
+                        !lines[title_index].contains(" by "),
+                        "{}",
+                        frame.plain_text()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn work_list_long_titles_and_labels_keep_responsibility_on_the_second_row() {
+    for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
+        for width in [48, 80, 120] {
+            let mut cfg = config();
+            cfg.active_tab = if kind == ItemKind::Issue { 2 } else { 3 };
+            cfg.animations = false;
+            let mut ui = mount_with_viewport(
+                cfg,
+                None,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: width,
+                    h: 24,
+                },
+            );
+            let mut item = demo::items()
+                .into_iter()
+                .find(|item| item.key.kind == kind)
+                .unwrap();
+            item.title = "A very long title ".repeat(20);
+            item.author = ui.state().user.clone();
+            item.assignees = vec![item.author.clone()];
+            item.reviewers = vec![item.author.clone()];
+            item.labels.truncate(1);
+            item.labels[0].name = "a-very-long-label".repeat(20);
+            item.pipeline = None;
+            item.pipeline_metrics_fetched = false;
+            let id = format!("{}{}  ", kind.symbol(), item.key.iid);
+            ui.state_mut().items = vec![item];
+            for _ in 0..3 {
+                settle_layout(&mut ui);
+            }
+            let frame = ui.capture_frame();
+            let lines = frame.to_lines();
+            let title_index = lines
+                .iter()
+                .position(|line| line.contains(&id))
+                .unwrap_or_else(|| panic!("{}", frame.plain_text()));
+            assert!(lines[title_index].contains('…'), "{}", frame.plain_text());
+            assert!(
+                !lines[title_index].contains("You"),
+                "{}",
+                frame.plain_text()
+            );
+            let expected = if kind == ItemKind::Issue {
+                "  ·  assigned: You"
+            } else {
+                "  ·  assigned: You  ·  review: You"
+            };
+            assert!(
+                lines[title_index + 1].trim_end().ends_with(expected),
+                "{}",
+                frame.plain_text()
+            );
+            assert!(
+                lines[title_index + 2].trim().is_empty(),
+                "rows must not wrap:\n{}",
+                frame.plain_text()
+            );
+        }
+    }
+}
+
+#[test]
+fn merge_request_list_dense_metadata_prioritizes_responsibility_without_wrapping() {
+    for (width, display) in [(48, UserDisplay::Username), (80, UserDisplay::Name)] {
+        let mut cfg = config();
+        cfg.active_tab = 3;
+        cfg.user_display = display;
+        cfg.animations = false;
+        let mut ui = mount_with_viewport(
+            cfg,
+            None,
+            Rect {
+                x: 0,
+                y: 0,
+                w: width,
+                h: 24,
+            },
+        );
+        let mut item = demo::items()
+            .into_iter()
+            .find(|item| item.key.kind == ItemKind::MergeRequest && item.key.iid == 102)
+            .unwrap();
+        if display == UserDisplay::Name {
+            item.title = "Short title".into();
+            item.assignees[0].id = 123;
+            item.assignees[0].name = "An assignee name spanning forty characters".into();
+        }
+        ui.state_mut().items = vec![item];
+        for _ in 0..3 {
+            settle_layout(&mut ui);
+        }
+        let frame = ui.capture_frame();
+        let lines = frame.to_lines();
+        let title_index = lines
+            .iter()
+            .position(|line| line.contains("!102  "))
+            .unwrap_or_else(|| panic!("{}", frame.plain_text()));
+        assert!(
+            lines[title_index].contains(if display == UserDisplay::Name {
+                "Short title"
+            } else {
+                "!102  [DEMO]"
+            }),
+            "{}",
+            frame.plain_text()
+        );
+        let metadata = &lines[title_index + 1];
+        assert!(
+            !lines[title_index].contains(" by "),
+            "{}",
+            frame.plain_text()
+        );
+        assert!(metadata.contains("assigned: "), "{}", frame.plain_text());
+        if width >= 80 {
+            assert!(metadata.contains("review: "), "{}", frame.plain_text());
+        } else {
+            assert!(metadata.contains("assigned: You"), "{}", frame.plain_text());
+            assert!(
+                !metadata.contains("review:"),
+                "secondary reviews should yield first:\n{}",
+                frame.plain_text()
+            );
+        }
+        assert!(
+            !metadata.trim_end().ends_with('·'),
+            "{}",
+            frame.plain_text()
+        );
+        assert!(!metadata.contains(" / "), "{}", frame.plain_text());
+        assert!(
+            lines[title_index + 2].trim().is_empty(),
+            "{}",
+            frame.plain_text()
+        );
+    }
+}
+
+#[test]
+fn merge_request_list_author_fallback_is_explicit_for_draft_ready_and_terminal_mrs() {
+    for state in ["opened", "merged", "closed"] {
+        for draft in [false, true] {
+            for author_reviews in [false, true] {
+                let mut cfg = config();
+                cfg.active_tab = 3;
+                cfg.animations = false;
+                let mut ui = mount_with_viewport(
+                    cfg,
+                    None,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        w: 140,
+                        h: 24,
+                    },
+                );
+                let mut item = demo::items()
+                    .into_iter()
+                    .find(|item| item.key.kind == ItemKind::MergeRequest)
+                    .unwrap();
+                item.title = "Short title".into();
+                item.state = state.into();
+                item.draft = draft;
+                item.author = ui.state().user.clone();
+                item.assignees.clear();
+                item.reviewers = if author_reviews {
+                    vec![item.author.clone()]
+                } else {
+                    Vec::new()
+                };
+                item.labels.clear();
+                item.pipeline = None;
+                item.pipeline_metrics_fetched = false;
+                let title = format!("!{}  Short title", item.key.iid);
+                ui.state_mut().items = vec![item];
+                for _ in 0..3 {
+                    settle_layout(&mut ui);
+                }
+                let frame = ui.capture_frame();
+                let lines = frame.to_lines();
+                let title_index = lines
+                    .iter()
+                    .position(|line| line.contains(&title))
+                    .unwrap_or_else(|| panic!("{}", frame.plain_text()));
+                let expected = if author_reviews {
+                    "by You  ·  review: You"
+                } else {
+                    "by You"
+                };
+                assert_eq!(
+                    lines[title_index + 1]
+                        .trim_start_matches(['▕', ' '])
+                        .trim_end(),
+                    expected,
+                    "{}",
+                    frame.plain_text()
+                );
+                assert!(
+                    !lines[title_index].contains("You"),
+                    "{}",
+                    frame.plain_text()
+                );
+                assert!(
+                    !frame.plain_text().contains("unassigned"),
+                    "{}",
+                    frame.plain_text()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_facts() {
     for (status, duration, started, updated, expected) in [
         (
@@ -816,14 +1234,14 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
             Some(90),
             Some("2026-09-28T11:56:48Z"),
             Some("2026-09-28T11:58:00Z"),
-            "running  3m 12s · 2 min ago",
+            "running  3m 12s; 2 min ago",
         ),
         (
             "success",
             Some(192),
             None,
             Some("2026-09-28T11:58:00Z"),
-            "success  3m 12s · 2 min ago",
+            "success  3m 12s; 2 min ago",
         ),
         (
             "failed",
@@ -833,7 +1251,7 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
             "failed  2 min ago",
         ),
         ("success", Some(192), None, None, "success  3m 12s"),
-        ("failed", None, None, None, "failed  ·"),
+        ("failed", None, None, None, "failed"),
     ] {
         let mut cfg = config();
         cfg.active_tab = 3;
@@ -852,6 +1270,10 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
             .into_iter()
             .find(|item| item.key.kind == ItemKind::MergeRequest)
             .unwrap();
+        item.labels.truncate(1);
+        item.labels[0].name = "bug".into();
+        item.assignees.clear();
+        item.reviewers.clear();
         let pipeline = item.pipeline.as_mut().unwrap();
         pipeline.status = status.into();
         pipeline.duration = duration;
@@ -864,6 +1286,16 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
         }
         let text = ui.capture_frame().plain_text();
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");
+        let metadata = text.lines().find(|line| line.contains("bug")).unwrap();
+        assert!(
+            metadata.trim_start_matches(['▕', ' ']).starts_with("bug  "),
+            "{text}"
+        );
+        assert!(
+            metadata.contains(&format!("{expected}  ·  by You")),
+            "{text}"
+        );
+        assert!(!metadata.contains("review:"), "{text}");
         assert!(!text.contains("None"));
     }
 }
@@ -892,11 +1324,11 @@ fn merge_request_list_shows_pipeline_metrics_and_terminal_age_for_all_demo_mrs()
     }
     let text = ui.capture_frame().plain_text();
     for expected in [
-        "success  7m 13s · merged 2 days ago",
-        "canceled  7m 13s · closed 2 days ago",
-        "success  7m 13s · merged 4 days ago",
-        "canceled  7m 13s · closed 4 days ago",
-        "success  7m 13s · merged 6 days ago",
+        "success  7m 13s; merged 2 days ago",
+        "canceled  7m 13s; closed 2 days ago",
+        "success  7m 13s; merged 4 days ago",
+        "canceled  7m 13s; closed 4 days ago",
+        "success  7m 13s; merged 6 days ago",
     ] {
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");
     }
@@ -914,12 +1346,24 @@ fn terminal_merge_request_without_pipeline_still_shows_when_it_closed() {
         .unwrap();
     item.pipeline = None;
     item.pipeline_metrics_fetched = true;
+    item.labels.clear();
+    item.assignees.clear();
+    item.reviewers.clear();
     ui.state_mut().items = vec![item];
     for _ in 0..3 {
         settle_layout(&mut ui);
     }
     let text = ui.capture_frame().plain_text();
-    assert!(text.contains("no pipeline  closed 2 days ago"), "{text}");
+    let metadata = text
+        .lines()
+        .find(|line| line.contains("no pipeline"))
+        .unwrap();
+    assert!(
+        metadata
+            .trim_end()
+            .ends_with("no pipeline  closed 2 days ago  ·  by @demo-sam"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -935,7 +1379,16 @@ fn merge_request_list_renders_title_without_an_extra_draft_annotation() {
             cfg.active_tab = 3;
             cfg.theme = theme.into();
             cfg.animations = false;
-            let mut ui = mount(cfg, None);
+            let mut ui = mount_with_viewport(
+                cfg,
+                None,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 120,
+                    h: 24,
+                },
+            );
             let mut item = demo::items()
                 .into_iter()
                 .find(|item| item.key.kind == ItemKind::MergeRequest)
@@ -3651,7 +4104,7 @@ fn configured_user_name_pattern_is_used_in_the_interface() {
         .iter_mut()
         .find(|item| item.key == key)
         .unwrap()
-        .author = user;
+        .assignees = vec![user];
     ui.render();
 
     let text = ui.capture_frame().plain_text();
@@ -3692,6 +4145,118 @@ fn current_user_overrides_every_display_mode_without_changing_other_users() {
         assert_ne!(ui.state().render_user_lookup(&option), "You");
         ui.state_mut().user = other;
         assert_ne!(ui.state().render_user(&current), "You");
+    }
+}
+
+#[test]
+fn list_people_use_theme_foreground_while_captions_stay_muted() {
+    for theme in cronk::config::THEMES {
+        for tab in [2, 3] {
+            for fallback in [false, true]
+                .into_iter()
+                .filter(|fallback| tab == 3 || !fallback)
+            {
+                for custom in [false, true] {
+                    let mut cfg = config();
+                    cfg.active_tab = tab;
+                    cfg.theme = theme.into();
+                    cfg.animations = false;
+                    if custom {
+                        cfg.colors.foreground = Some("#123456".into());
+                    }
+                    let mut ui = mount_with_viewport(
+                        cfg,
+                        None,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            w: 120,
+                            h: 24,
+                        },
+                    );
+                    let other = User {
+                        id: 51,
+                        username: "bob".into(),
+                        name: "Bob".into(),
+                        ..User::default()
+                    };
+                    let reviewer = User {
+                        id: 52,
+                        username: "carol".into(),
+                        name: "Carol".into(),
+                        ..User::default()
+                    };
+                    let mut item = demo::items()
+                        .into_iter()
+                        .find(|item| {
+                            item.key.kind
+                                == if tab == 2 {
+                                    ItemKind::Issue
+                                } else {
+                                    ItemKind::MergeRequest
+                                }
+                        })
+                        .unwrap();
+                    item.title = "People colors".into();
+                    item.author = other.clone();
+                    item.assignees = if fallback { Vec::new() } else { vec![other] };
+                    item.reviewers = if tab == 3 { vec![reviewer] } else { Vec::new() };
+                    item.labels.clear();
+                    item.pipeline = None;
+                    item.pipeline_metrics_fetched = false;
+                    ui.state_mut().items = vec![item];
+                    for _ in 0..3 {
+                        settle_layout(&mut ui);
+                    }
+                    let frame = ui.capture_frame();
+                    let lines = frame.to_lines();
+                    let title_y = lines
+                        .iter()
+                        .position(|line| line.contains("People colors"))
+                        .unwrap();
+                    let title_x = lines[title_y][..lines[title_y].find("People colors").unwrap()]
+                        .chars()
+                        .count();
+                    let foreground = frame.cell(title_x as u16, title_y as u16).fg;
+                    if custom {
+                        assert_eq!(foreground, Color::hex_u24(0x123456));
+                    }
+                    let metadata_y = title_y + 1;
+                    for name in if tab == 3 {
+                        vec!["@bob", "@carol"]
+                    } else {
+                        vec!["@bob"]
+                    } {
+                        let byte = lines[metadata_y]
+                            .find(name)
+                            .unwrap_or_else(|| panic!("missing {name}:\n{}", frame.plain_text()));
+                        let x = lines[metadata_y][..byte].chars().count();
+                        for offset in 0..name.len() {
+                            assert_eq!(
+                                frame.cell((x + offset) as u16, metadata_y as u16).fg,
+                                foreground,
+                                "{theme}:\n{}",
+                                frame.plain_text()
+                            );
+                        }
+                    }
+                    for caption in if tab == 3 {
+                        vec![if fallback { "by " } else { "assigned:" }, "review:"]
+                    } else {
+                        vec!["assigned:"]
+                    } {
+                        let byte = lines[metadata_y].find(caption).unwrap();
+                        let x = lines[metadata_y][..byte].chars().count();
+                        assert_ne!(
+                            frame.cell(x as u16, metadata_y as u16).fg,
+                            foreground,
+                            "caption must stay muted in {theme}:\n{}",
+                            frame.plain_text()
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

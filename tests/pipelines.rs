@@ -313,7 +313,7 @@ fn newest_pipeline_auto_expands_and_rows_show_source_ref_and_time() {
     key(&mut ui, KeyCode::Down);
     let shown = text(&mut ui);
     assert!(
-        shown.contains("▼ #60999  running  main  schedule   2m 52s · just now   nightly"),
+        shown.contains("▼ #60999  running  main  schedule   2m 52s; just now   nightly"),
         "{shown}"
     );
     assert!(shown.contains("by @demo-ci-bot"), "{shown}");

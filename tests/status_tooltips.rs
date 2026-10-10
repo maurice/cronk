@@ -1,7 +1,7 @@
 use cronk::{
     config::Config,
     demo,
-    model::{ItemKey, ItemKind},
+    model::{ItemKey, ItemKind, User},
     ui::{Cronk, Msg, Scope},
 };
 use tui_lipan::{
@@ -146,6 +146,105 @@ fn list_status_and_pipeline_dots_have_hover_only_explanations_in_every_theme() {
                 MouseKind::Up(MouseButton::Left),
             ] {
                 mouse(&mut ui, dot.x as u16, dot.y as u16, kind);
+            }
+            assert_eq!(ui.state().config.route.as_ref(), Some(&item.key));
+            assert_eq!(ui.state().scope, Scope::Details);
+            assert_closed(&ui);
+        }
+    }
+}
+
+#[test]
+fn list_people_keep_hover_details_and_allow_row_activation() {
+    for tab in [2, 3] {
+        for role in if tab == 2 {
+            vec!["assignee-0", "assignee-1"]
+        } else {
+            vec![
+                "assignee-0",
+                "assignee-1",
+                "reviewer-0",
+                "reviewer-1",
+                "reviewer-2",
+                "author",
+            ]
+        } {
+            let mut ui = mount("midnight", tab, None);
+            let mut item = ui.state().visible_items()[0].clone();
+            item.title = "Short title".into();
+            item.labels.clear();
+            let assigned = User {
+                id: 50,
+                username: "bob".into(),
+                name: "Bob".into(),
+                ..User::default()
+            };
+            let reviewing = User {
+                id: 51,
+                username: "carol".into(),
+                name: "Carol".into(),
+                ..User::default()
+            };
+            item.assignees = vec![item.author.clone(), assigned.clone()];
+            item.reviewers = vec![item.author.clone(), assigned.clone(), reviewing.clone()];
+            if role == "author" {
+                item.assignees.clear();
+            }
+            let user = match role {
+                "author" | "assignee-0" | "reviewer-0" => item.author.clone(),
+                "assignee-1" | "reviewer-1" => assigned,
+                "reviewer-2" => reviewing,
+                _ => unreachable!(),
+            };
+            ui.state_mut().items = vec![item.clone()];
+            settle(&mut ui);
+            let key = format!(
+                "item-{}-{}-{}-{role}",
+                item.key.project,
+                item.key.kind.segment(),
+                item.key.iid
+            );
+            let trigger = rect(&ui, &key);
+            assert_eq!(trigger.h, 1);
+            assert_eq!(
+                trigger.w as usize,
+                ui.state().render_user(&user).chars().count()
+            );
+            let frame = ui.capture_frame().plain_text();
+            let prefix = if role == "author" {
+                "by "
+            } else if role.starts_with("reviewer") {
+                "review: "
+            } else {
+                "assigned: "
+            };
+            assert!(frame.contains(prefix), "{frame}");
+            let title_row = rect(
+                &ui,
+                &format!(
+                    "item-{}-{}-{}-status",
+                    item.key.project,
+                    item.key.kind.segment(),
+                    item.key.iid
+                ),
+            )
+            .y;
+            assert_eq!(trigger.y, title_row + 1);
+            let (x, y) = (trigger.x as u16, trigger.y as u16);
+            mouse(&mut ui, x, y, MouseKind::Moved);
+            let text = ui.capture_frame().plain_text();
+            assert!(
+                text.contains(&format!("Username: @{}", user.username)),
+                "{text}"
+            );
+            assert_eq!(ui.state().scope, Scope::List);
+            mouse(&mut ui, 0, 0, MouseKind::Moved);
+            assert_closed(&ui);
+            for kind in [
+                MouseKind::Down(MouseButton::Left),
+                MouseKind::Up(MouseButton::Left),
+            ] {
+                mouse(&mut ui, x, y, kind);
             }
             assert_eq!(ui.state().config.route.as_ref(), Some(&item.key));
             assert_eq!(ui.state().scope, Scope::Details);

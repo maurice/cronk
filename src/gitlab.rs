@@ -4838,7 +4838,7 @@ mod tests {
         );
         assert_eq!(
             pipeline.timing_label(crate::demo::NOW_UNIX),
-            "3m 12s · 2 min ago"
+            "3m 12s; 2 min ago"
         );
         assert_eq!(mock.requests.lock().unwrap().len(), 3);
     }

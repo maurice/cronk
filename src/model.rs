@@ -280,7 +280,7 @@ impl Pipeline {
         self.duration
     }
 
-    /// Shared list/detail timing: `3m 12s · 2 min ago`, omitting unavailable facts.
+    /// Shared list/detail timing: `3m 12s; 2 min ago`, omitting unavailable facts.
     pub fn timing_label(&self, now_unix: i64) -> String {
         let mut times = Vec::new();
         if let Some(secs) = self.elapsed_secs(now_unix) {
@@ -289,7 +289,7 @@ impl Pipeline {
         if let Some(updated) = self.updated_at.as_deref().filter(|u| !u.is_empty()) {
             times.push(crate::dates::format_relative(updated, now_unix));
         }
-        times.join(" · ")
+        times.join("; ")
     }
 }
 
@@ -365,7 +365,7 @@ impl WorkItem {
                 "{event} {}",
                 crate::dates::format_relative(date, now_unix)
             ));
-            return times.join(" · ");
+            return times.join("; ");
         }
         self.pipeline
             .as_ref()
@@ -561,11 +561,11 @@ mod pipeline_tests {
             duration: Some(90),
             ..Pipeline::default()
         };
-        assert_eq!(pipeline.timing_label(now), "3m 12s · just now");
-        assert_eq!(pipeline.timing_label(now + 10), "3m 22s · 1 min ago");
+        assert_eq!(pipeline.timing_label(now), "3m 12s; just now");
+        assert_eq!(pipeline.timing_label(now + 10), "3m 22s; 1 min ago");
         pipeline.status = "success".into();
-        assert_eq!(pipeline.timing_label(now), "1m 30s · just now");
-        assert_eq!(pipeline.timing_label(now + 100), "1m 30s · 2 min ago");
+        assert_eq!(pipeline.timing_label(now), "1m 30s; just now");
+        assert_eq!(pipeline.timing_label(now + 100), "1m 30s; 2 min ago");
     }
 
     #[test]
@@ -607,7 +607,7 @@ mod pipeline_tests {
         };
         assert_eq!(
             merged.list_pipeline_timing(now),
-            "3m 12s · merged 2 days ago"
+            "3m 12s; merged 2 days ago"
         );
         merged.state = "closed".into();
         merged.merged_at = None;

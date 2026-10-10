@@ -1325,7 +1325,7 @@ fn work_row_users(
                 Text::new(name)
                     .height(Length::Px(1))
                     .overflow(Overflow::Ellipsis)
-                    .style(colors.user_style(&ctx.state, user.id, style.fg(colors.muted))),
+                    .style(colors.user_style(&ctx.state, user.id, style.fg(colors.foreground))),
             )
             .min_width(Length::Px(min_name)),
         );
@@ -2921,7 +2921,7 @@ fn pipeline(ctx: &Context<Cronk>, details: &Details, colors: Colors) -> Vec<Deta
     content
 }
 
-/// `  ·  push · main · 3m 12s · 2 min ago · by @alex`: only the facts GitLab supplied.
+/// `  ·  push · main · 3m 12s; 2 min ago · by @alex`: only the facts GitLab supplied.
 fn pipeline_facts(ctx: &Context<Cronk>, pipeline: &Pipeline, colors: Colors) -> Vec<Span> {
     let now = ctx.state.now_unix();
     let mut facts = Vec::new();

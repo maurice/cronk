@@ -1234,14 +1234,14 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
             Some(90),
             Some("2026-09-28T11:56:48Z"),
             Some("2026-09-28T11:58:00Z"),
-            "running  3m 12s · 2 min ago",
+            "running  3m 12s; 2 min ago",
         ),
         (
             "success",
             Some(192),
             None,
             Some("2026-09-28T11:58:00Z"),
-            "success  3m 12s · 2 min ago",
+            "success  3m 12s; 2 min ago",
         ),
         (
             "failed",
@@ -1324,11 +1324,11 @@ fn merge_request_list_shows_pipeline_metrics_and_terminal_age_for_all_demo_mrs()
     }
     let text = ui.capture_frame().plain_text();
     for expected in [
-        "success  7m 13s · merged 2 days ago",
-        "canceled  7m 13s · closed 2 days ago",
-        "success  7m 13s · merged 4 days ago",
-        "canceled  7m 13s · closed 4 days ago",
-        "success  7m 13s · merged 6 days ago",
+        "success  7m 13s; merged 2 days ago",
+        "canceled  7m 13s; closed 2 days ago",
+        "success  7m 13s; merged 4 days ago",
+        "canceled  7m 13s; closed 4 days ago",
+        "success  7m 13s; merged 6 days ago",
     ] {
         assert!(text.contains(expected), "missing {expected:?}:\n{text}");
     }
@@ -4145,6 +4145,118 @@ fn current_user_overrides_every_display_mode_without_changing_other_users() {
         assert_ne!(ui.state().render_user_lookup(&option), "You");
         ui.state_mut().user = other;
         assert_ne!(ui.state().render_user(&current), "You");
+    }
+}
+
+#[test]
+fn list_people_use_theme_foreground_while_captions_stay_muted() {
+    for theme in cronk::config::THEMES {
+        for tab in [2, 3] {
+            for fallback in [false, true]
+                .into_iter()
+                .filter(|fallback| tab == 3 || !fallback)
+            {
+                for custom in [false, true] {
+                    let mut cfg = config();
+                    cfg.active_tab = tab;
+                    cfg.theme = theme.into();
+                    cfg.animations = false;
+                    if custom {
+                        cfg.colors.foreground = Some("#123456".into());
+                    }
+                    let mut ui = mount_with_viewport(
+                        cfg,
+                        None,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            w: 120,
+                            h: 24,
+                        },
+                    );
+                    let other = User {
+                        id: 51,
+                        username: "bob".into(),
+                        name: "Bob".into(),
+                        ..User::default()
+                    };
+                    let reviewer = User {
+                        id: 52,
+                        username: "carol".into(),
+                        name: "Carol".into(),
+                        ..User::default()
+                    };
+                    let mut item = demo::items()
+                        .into_iter()
+                        .find(|item| {
+                            item.key.kind
+                                == if tab == 2 {
+                                    ItemKind::Issue
+                                } else {
+                                    ItemKind::MergeRequest
+                                }
+                        })
+                        .unwrap();
+                    item.title = "People colors".into();
+                    item.author = other.clone();
+                    item.assignees = if fallback { Vec::new() } else { vec![other] };
+                    item.reviewers = if tab == 3 { vec![reviewer] } else { Vec::new() };
+                    item.labels.clear();
+                    item.pipeline = None;
+                    item.pipeline_metrics_fetched = false;
+                    ui.state_mut().items = vec![item];
+                    for _ in 0..3 {
+                        settle_layout(&mut ui);
+                    }
+                    let frame = ui.capture_frame();
+                    let lines = frame.to_lines();
+                    let title_y = lines
+                        .iter()
+                        .position(|line| line.contains("People colors"))
+                        .unwrap();
+                    let title_x = lines[title_y][..lines[title_y].find("People colors").unwrap()]
+                        .chars()
+                        .count();
+                    let foreground = frame.cell(title_x as u16, title_y as u16).fg;
+                    if custom {
+                        assert_eq!(foreground, Color::hex_u24(0x123456));
+                    }
+                    let metadata_y = title_y + 1;
+                    for name in if tab == 3 {
+                        vec!["@bob", "@carol"]
+                    } else {
+                        vec!["@bob"]
+                    } {
+                        let byte = lines[metadata_y]
+                            .find(name)
+                            .unwrap_or_else(|| panic!("missing {name}:\n{}", frame.plain_text()));
+                        let x = lines[metadata_y][..byte].chars().count();
+                        for offset in 0..name.len() {
+                            assert_eq!(
+                                frame.cell((x + offset) as u16, metadata_y as u16).fg,
+                                foreground,
+                                "{theme}:\n{}",
+                                frame.plain_text()
+                            );
+                        }
+                    }
+                    for caption in if tab == 3 {
+                        vec![if fallback { "by " } else { "assigned:" }, "review:"]
+                    } else {
+                        vec!["assigned:"]
+                    } {
+                        let byte = lines[metadata_y].find(caption).unwrap();
+                        let x = lines[metadata_y][..byte].chars().count();
+                        assert_ne!(
+                            frame.cell(x as u16, metadata_y as u16).fg,
+                            foreground,
+                            "caption must stay muted in {theme}:\n{}",
+                            frame.plain_text()
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

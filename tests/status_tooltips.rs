@@ -158,9 +158,16 @@ fn list_status_and_pipeline_dots_have_hover_only_explanations_in_every_theme() {
 fn list_people_keep_hover_details_and_allow_row_activation() {
     for tab in [2, 3] {
         for role in if tab == 2 {
-            vec!["author", "person-0"]
+            vec!["assignee-0", "assignee-1"]
         } else {
-            vec!["author", "person-0", "person-1"]
+            vec![
+                "assignee-0",
+                "assignee-1",
+                "reviewer-0",
+                "reviewer-1",
+                "reviewer-2",
+                "author",
+            ]
         } {
             let mut ui = mount("midnight", tab, None);
             let mut item = ui.state().visible_items()[0].clone();
@@ -180,12 +187,13 @@ fn list_people_keep_hover_details_and_allow_row_activation() {
             };
             item.assignees = vec![item.author.clone(), assigned.clone()];
             item.reviewers = vec![item.author.clone(), assigned.clone(), reviewing.clone()];
-            let (user, suffix) = match (role, tab) {
-                ("author", 2) => (item.author.clone(), " (+ assigned)"),
-                ("author", _) => (item.author.clone(), " (+ assigned, reviewing)"),
-                ("person-0", 2) => (assigned, " (assigned)"),
-                ("person-0", _) => (assigned, " (assigned, reviewing)"),
-                ("person-1", _) => (reviewing, " (reviewing)"),
+            if role == "author" {
+                item.assignees.clear();
+            }
+            let user = match role {
+                "author" | "assignee-0" | "reviewer-0" => item.author.clone(),
+                "assignee-1" | "reviewer-1" => assigned,
+                "reviewer-2" => reviewing,
                 _ => unreachable!(),
             };
             ui.state_mut().items = vec![item.clone()];
@@ -201,13 +209,16 @@ fn list_people_keep_hover_details_and_allow_row_activation() {
             assert_eq!(
                 trigger.w as usize,
                 ui.state().render_user(&user).chars().count()
-                    + if role == "author" { 0 } else { suffix.len() }
             );
-            assert!(
-                ui.capture_frame()
-                    .plain_text()
-                    .contains(&format!("{}{suffix}", ui.state().render_user(&user)))
-            );
+            let frame = ui.capture_frame().plain_text();
+            let prefix = if role == "author" {
+                "by "
+            } else if role.starts_with("reviewer") {
+                "review: "
+            } else {
+                "assigned: "
+            };
+            assert!(frame.contains(prefix), "{frame}");
             let title_row = rect(
                 &ui,
                 &format!(
@@ -218,7 +229,7 @@ fn list_people_keep_hover_details_and_allow_row_activation() {
                 ),
             )
             .y;
-            assert_eq!(trigger.y, title_row + i16::from(role != "author"));
+            assert_eq!(trigger.y, title_row + 1);
             let (x, y) = (trigger.x as u16, trigger.y as u16);
             mouse(&mut ui, x, y, MouseKind::Moved);
             let text = ui.capture_frame().plain_text();

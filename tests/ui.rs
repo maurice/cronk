@@ -809,7 +809,7 @@ fn dialogs_and_palette_type_direct_shortcuts_without_switching_tabs() {
 }
 
 #[test]
-fn work_lists_put_authors_after_titles_and_label_other_peoples_roles() {
+fn work_lists_keep_titles_clean_and_show_responsibility_below() {
     for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
         for display in [UserDisplay::Username, UserDisplay::Name, UserDisplay::Id] {
             for (assignees, reviewers) in [(0, 0), (1, 2), (2, 0), (0, 1), (2, 2)] {
@@ -851,32 +851,28 @@ fn work_lists_put_authors_after_titles_and_label_other_peoples_roles() {
                     if labels {
                         item.labels[0].name = "bug".into();
                     }
-                    let title = format!(
-                        "{}{}  Tidy metadata  by {}",
-                        kind.symbol(),
-                        item.key.iid,
-                        ui.state().render_user(&author)
-                    );
-                    let role_labels = |users: &[User], role: &str| {
+                    let title = format!("{}{}  Tidy metadata", kind.symbol(), item.key.iid);
+                    let names = |users: &[User]| {
                         users
                             .iter()
-                            .map(|user| format!("{} ({role})", ui.state().render_user(user)))
+                            .map(|user| ui.state().render_user(user))
                             .collect::<Vec<_>>()
+                            .join(", ")
                     };
-                    let mut people = role_labels(&item.assignees, "assigned");
-                    if kind == ItemKind::MergeRequest {
-                        people.extend(role_labels(&item.reviewers, "reviewing"));
-                    }
                     let mut metadata = if labels {
-                        "bug".to_owned()
+                        "bug  ·  ".to_owned()
                     } else {
                         String::new()
                     };
-                    if !people.is_empty() {
-                        if labels {
-                            metadata.push_str("  ·  ");
-                        }
-                        metadata.push_str(&people.join(", "));
+                    if assignees > 0 {
+                        metadata.push_str(&format!("assigned: {}", names(&item.assignees)));
+                    } else if kind == ItemKind::MergeRequest {
+                        metadata.push_str(&format!("by {}", ui.state().render_user(&author)));
+                    } else {
+                        metadata.push_str("unassigned");
+                    }
+                    if kind == ItemKind::MergeRequest && reviewers > 0 {
+                        metadata.push_str(&format!("  ·  review: {}", names(&item.reviewers)));
                     }
                     ui.state_mut().items = vec![item];
                     for _ in 0..3 {
@@ -903,7 +899,7 @@ fn work_lists_put_authors_after_titles_and_label_other_peoples_roles() {
 }
 
 #[test]
-fn work_lists_merge_author_and_people_roles_by_identity() {
+fn work_lists_keep_shared_people_in_each_responsibility_group() {
     for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
         for display in [UserDisplay::Username, UserDisplay::Name, UserDisplay::Id] {
             for author_is_current in [false, true] {
@@ -953,7 +949,8 @@ fn work_lists_merge_author_and_people_roles_by_identity() {
                     item.assignees = vec![bob.clone(), bob.clone()];
                     let mut bob_review_snapshot = bob.clone();
                     bob_review_snapshot.username = "renamed-bob".into();
-                    item.reviewers = vec![bob_review_snapshot, carol.clone(), carol.clone()];
+                    item.reviewers =
+                        vec![bob_review_snapshot.clone(), carol.clone(), carol.clone()];
                     if author_roles & 1 != 0 {
                         item.assignees.push(author.clone());
                     }
@@ -966,33 +963,25 @@ fn work_lists_merge_author_and_people_roles_by_identity() {
                     item.labels[0].name = "bug".into();
                     item.pipeline = None;
                     item.pipeline_metrics_fetched = false;
-                    let mut roles = Vec::new();
+                    let title = format!("{}{}  Tidy metadata", kind.symbol(), item.key.iid);
+                    let mut metadata =
+                        format!("bug  ·  assigned: {}", ui.state().render_user(&bob));
                     if author_roles & 1 != 0 {
-                        roles.push("assigned");
+                        metadata.push_str(&format!(", {}", ui.state().render_user(&author)));
                     }
-                    if kind == ItemKind::MergeRequest && author_roles & 2 != 0 {
-                        roles.push("reviewing");
-                    }
-                    let suffix = if roles.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" (+ {})", roles.join(", "))
-                    };
-                    let title = format!(
-                        "{}{}  Tidy metadata  by {}{suffix}",
-                        kind.symbol(),
-                        item.key.iid,
-                        ui.state().render_user(&author)
-                    );
-                    let metadata = if kind == ItemKind::Issue {
-                        format!("bug  ·  {} (assigned)", ui.state().render_user(&bob))
-                    } else {
-                        format!(
-                            "bug  ·  {} (assigned, reviewing), {} (reviewing)",
-                            ui.state().render_user(&bob),
+                    if kind == ItemKind::MergeRequest {
+                        metadata.push_str(&format!(
+                            "  ·  review: {}, {}",
+                            ui.state().render_user(&bob_review_snapshot),
                             ui.state().render_user(&carol)
-                        )
-                    };
+                        ));
+                        if author_roles & 2 != 0 {
+                            metadata.push_str(&format!(
+                                ", {}",
+                                ui.state().render_user(item.reviewers.last().unwrap())
+                            ));
+                        }
+                    }
                     ui.state_mut().items = vec![item];
                     for _ in 0..3 {
                         settle_layout(&mut ui);
@@ -1012,7 +1001,7 @@ fn work_lists_merge_author_and_people_roles_by_identity() {
                         frame.plain_text()
                     );
                     assert!(
-                        !lines[title_index + 1].contains(&ui.state().render_user(&author)),
+                        !lines[title_index].contains(" by "),
                         "{}",
                         frame.plain_text()
                     );
@@ -1023,7 +1012,7 @@ fn work_lists_merge_author_and_people_roles_by_identity() {
 }
 
 #[test]
-fn work_list_long_titles_and_author_roles_do_not_wrap_or_repeat_people() {
+fn work_list_long_titles_and_labels_keep_responsibility_on_the_second_row() {
     for kind in [ItemKind::Issue, ItemKind::MergeRequest] {
         for width in [48, 80, 120] {
             let mut cfg = config();
@@ -1051,6 +1040,7 @@ fn work_list_long_titles_and_author_roles_do_not_wrap_or_repeat_people() {
             item.labels[0].name = "a-very-long-label".repeat(20);
             item.pipeline = None;
             item.pipeline_metrics_fetched = false;
+            let id = format!("{}{}  ", kind.symbol(), item.key.iid);
             ui.state_mut().items = vec![item];
             for _ in 0..3 {
                 settle_layout(&mut ui);
@@ -1059,26 +1049,24 @@ fn work_list_long_titles_and_author_roles_do_not_wrap_or_repeat_people() {
             let lines = frame.to_lines();
             let title_index = lines
                 .iter()
-                .position(|line| line.contains("  by You"))
+                .position(|line| line.contains(&id))
                 .unwrap_or_else(|| panic!("{}", frame.plain_text()));
             assert!(lines[title_index].contains('…'), "{}", frame.plain_text());
             assert!(
-                !lines[title_index + 1].contains("You"),
+                !lines[title_index].contains("You"),
                 "{}",
                 frame.plain_text()
             );
+            let expected = if kind == ItemKind::Issue {
+                "  ·  assigned: You"
+            } else {
+                "  ·  assigned: You  ·  review: You"
+            };
             assert!(
-                !lines[title_index + 1].contains('·'),
+                lines[title_index + 1].trim_end().ends_with(expected),
                 "{}",
                 frame.plain_text()
             );
-            if width >= 80 {
-                assert!(
-                    lines[title_index].contains("You (+ assigned"),
-                    "{}",
-                    frame.plain_text()
-                );
-            }
             assert!(
                 lines[title_index + 2].trim().is_empty(),
                 "rows must not wrap:\n{}",
@@ -1089,7 +1077,7 @@ fn work_list_long_titles_and_author_roles_do_not_wrap_or_repeat_people() {
 }
 
 #[test]
-fn merge_request_list_dense_metadata_and_long_author_names_truncate_without_wrapping() {
+fn merge_request_list_dense_metadata_prioritizes_responsibility_without_wrapping() {
     for (width, display) in [(48, UserDisplay::Username), (80, UserDisplay::Name)] {
         let mut cfg = config();
         cfg.active_tab = 3;
@@ -1111,8 +1099,8 @@ fn merge_request_list_dense_metadata_and_long_author_names_truncate_without_wrap
             .unwrap();
         if display == UserDisplay::Name {
             item.title = "Short title".into();
-            item.author.id = 123;
-            item.author.name = "An author name spanning forty characters".into();
+            item.assignees[0].id = 123;
+            item.assignees[0].name = "An assignee name spanning forty characters".into();
         }
         ui.state_mut().items = vec![item];
         for _ in 0..3 {
@@ -1126,22 +1114,115 @@ fn merge_request_list_dense_metadata_and_long_author_names_truncate_without_wrap
             .unwrap_or_else(|| panic!("{}", frame.plain_text()));
         assert!(
             lines[title_index].contains(if display == UserDisplay::Name {
-                "Short title  by An author"
+                "Short title"
             } else {
-                "  by @demo-sam"
+                "!102  [DEMO]"
             }),
             "{}",
             frame.plain_text()
         );
         let metadata = &lines[title_index + 1];
-        assert!(metadata.contains("running  "), "{}", frame.plain_text());
-        assert!(metadata.contains("  ·  You"), "{}", frame.plain_text());
+        assert!(
+            !lines[title_index].contains(" by "),
+            "{}",
+            frame.plain_text()
+        );
+        assert!(metadata.contains("assigned: "), "{}", frame.plain_text());
+        if width >= 80 {
+            assert!(metadata.contains("review: "), "{}", frame.plain_text());
+        } else {
+            assert!(metadata.contains("assigned: You"), "{}", frame.plain_text());
+            assert!(
+                !metadata.contains("review:"),
+                "secondary reviews should yield first:\n{}",
+                frame.plain_text()
+            );
+        }
+        assert!(
+            !metadata.trim_end().ends_with('·'),
+            "{}",
+            frame.plain_text()
+        );
         assert!(!metadata.contains(" / "), "{}", frame.plain_text());
         assert!(
             lines[title_index + 2].trim().is_empty(),
             "{}",
             frame.plain_text()
         );
+    }
+}
+
+#[test]
+fn merge_request_list_author_fallback_is_explicit_for_draft_ready_and_terminal_mrs() {
+    for state in ["opened", "merged", "closed"] {
+        for draft in [false, true] {
+            for author_reviews in [false, true] {
+                let mut cfg = config();
+                cfg.active_tab = 3;
+                cfg.animations = false;
+                let mut ui = mount_with_viewport(
+                    cfg,
+                    None,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        w: 140,
+                        h: 24,
+                    },
+                );
+                let mut item = demo::items()
+                    .into_iter()
+                    .find(|item| item.key.kind == ItemKind::MergeRequest)
+                    .unwrap();
+                item.title = "Short title".into();
+                item.state = state.into();
+                item.draft = draft;
+                item.author = ui.state().user.clone();
+                item.assignees.clear();
+                item.reviewers = if author_reviews {
+                    vec![item.author.clone()]
+                } else {
+                    Vec::new()
+                };
+                item.labels.clear();
+                item.pipeline = None;
+                item.pipeline_metrics_fetched = false;
+                let title = format!("!{}  Short title", item.key.iid);
+                ui.state_mut().items = vec![item];
+                for _ in 0..3 {
+                    settle_layout(&mut ui);
+                }
+                let frame = ui.capture_frame();
+                let lines = frame.to_lines();
+                let title_index = lines
+                    .iter()
+                    .position(|line| line.contains(&title))
+                    .unwrap_or_else(|| panic!("{}", frame.plain_text()));
+                let expected = if author_reviews {
+                    "by You  ·  review: You"
+                } else {
+                    "by You"
+                };
+                assert_eq!(
+                    lines[title_index + 1]
+                        .trim_start_matches(['▕', ' '])
+                        .trim_end(),
+                    expected,
+                    "{}",
+                    frame.plain_text()
+                );
+                assert!(
+                    !lines[title_index].contains("You"),
+                    "{}",
+                    frame.plain_text()
+                );
+                assert!(
+                    !frame.plain_text().contains("unassigned"),
+                    "{}",
+                    frame.plain_text()
+                );
+            }
+        }
     }
 }
 
@@ -1211,10 +1292,10 @@ fn merge_request_list_pipeline_timing_matches_project_format_and_omits_missing_f
             "{text}"
         );
         assert!(
-            metadata.trim_end().ends_with(expected),
-            "missing {expected:?}:\n{text}"
+            metadata.contains(&format!("{expected}  ·  by You")),
+            "{text}"
         );
-        assert!(!metadata.contains("  ·  "), "{text}");
+        assert!(!metadata.contains("review:"), "{text}");
         assert!(!text.contains("None"));
     }
 }
@@ -1280,7 +1361,7 @@ fn terminal_merge_request_without_pipeline_still_shows_when_it_closed() {
     assert!(
         metadata
             .trim_end()
-            .ends_with("no pipeline  closed 2 days ago"),
+            .ends_with("no pipeline  closed 2 days ago  ·  by @demo-sam"),
         "{text}"
     );
 }
@@ -4023,7 +4104,7 @@ fn configured_user_name_pattern_is_used_in_the_interface() {
         .iter_mut()
         .find(|item| item.key == key)
         .unwrap()
-        .author = user;
+        .assignees = vec![user];
     ui.render();
 
     let text = ui.capture_frame().plain_text();

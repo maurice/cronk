@@ -137,7 +137,7 @@ fn user_labels_show_available_profile_details_on_hover() {
     let mut ui = mount(config("midnight", 2));
     let key = ui.state().visible_items()[0].key.clone();
     let label_key = format!(
-        "item-{}-{}-{}-author",
+        "item-{}-{}-{}-assignee-0",
         key.project,
         key.kind.segment(),
         key.iid
@@ -148,7 +148,7 @@ fn user_labels_show_available_profile_details_on_hover() {
         .iter_mut()
         .find(|item| item.key == key)
         .unwrap()
-        .author;
+        .assignees[0];
     author.username = "opaque-bot-a83f".into();
     author.name = "Deploy automation".into();
     author.public_email = Some("deploy@example.org".into());

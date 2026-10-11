@@ -525,6 +525,7 @@ pub enum Msg {
     LogWheel(u64, usize, isize),
     LogBar(u64, usize, usize, bool),
     LogBarEnd(u64),
+    ToggleLogSection(u64, usize),
     SearchLog,
     LogSearchInput(InputEvent),
     SubmitLogSearch,

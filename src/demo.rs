@@ -724,7 +724,7 @@ pub fn trace(job: u64, tick: u64) -> String {
         tick.min(4)
     };
     text.push_str(
-        "Fetching synthetic sources... done\nRestoring deterministic build cache... done\n",
+        "\x1b[0Ksection_start:100:prepare[collapsed=true]\r\x1b[0KPrepare synthetic workspace\nFetching synthetic sources... done\nRestoring deterministic build cache... done\n\x1b[0Ksection_end:102:prepare\r\x1b[0K\n\x1b[0Ksection_start:102:run_checks\r\x1b[0KRun synthetic checks\n",
     );
     for step in 0..steps {
         text.push_str(&format!(
@@ -744,6 +744,9 @@ pub fn trace(job: u64, tick: u64) -> String {
         "failed" if tick >= 4 => text.push_str("\nFAIL recovery_deadline\n  expected: lease available within 250ms\n    actual: lease held after cancellation barrier\n  hint: inspect the acknowledgement path in the fictional worker patch\nUploading synthetic test report... done\nERROR: Job failed: exit code 1\n"),
         "success" if tick >= 4 => text.push_str("\nAll required checks passed.\nUploading synthetic artifacts... done\nJob succeeded\n"),
         _ => {},
+    }
+    if !fixture.running() && tick >= 4 {
+        text.push_str("\x1b[0Ksection_end:167:run_checks\r\x1b[0K\n");
     }
     text
 }

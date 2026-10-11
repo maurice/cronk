@@ -165,6 +165,63 @@ fn position(ui: &Ui) -> usize {
 }
 
 #[test]
+fn gitlab_sections_render_toggle_and_reveal_search_matches_inline_and_zoomed() {
+    for zoom in [false, true] {
+        let mut ui = mount("midnight");
+        append(
+            &mut ui,
+            "\x1b[0Ksection_start:100:build[collapsed=true]\r\x1b[0KBuild the project\nHidden needle\n\x1b[0Ksection_end:165:build\r\x1b[0K\nAfter build\n",
+            true,
+        );
+        ui.state_mut().traces.get_mut(&JOB).unwrap().finished = true;
+        key(&mut ui, KeyCode::Enter);
+        if zoom {
+            key(&mut ui, KeyCode::Char('z'));
+        }
+        assert!(text(&ui).contains("Build the project"), "{}", text(&ui));
+        assert!(text(&ui).contains("1m 05s"), "{}", text(&ui));
+        assert!(!text(&ui).contains("section_start"));
+        assert!(!text(&ui).contains("section_end"));
+        assert!(!text(&ui).contains("Hidden needle"));
+        let control = ui
+            .rect_of_key(&format!("log-section-{JOB}-0").into())
+            .unwrap();
+        assert_eq!(control.w, 1);
+        let click = |ui: &mut Ui| {
+            mouse(
+                ui,
+                control.x as u16,
+                control.y as u16,
+                MouseKind::Down(MouseButton::Left),
+            );
+            mouse(
+                ui,
+                control.x as u16,
+                control.y as u16,
+                MouseKind::Up(MouseButton::Left),
+            );
+        };
+        click(&mut ui);
+        assert!(text(&ui).contains("Hidden needle"), "{}", text(&ui));
+        click(&mut ui);
+        assert!(!text(&ui).contains("Hidden needle"));
+        key(&mut ui, KeyCode::Char('/'));
+        for c in "needle".chars() {
+            key(&mut ui, KeyCode::Char(c));
+        }
+        key(&mut ui, KeyCode::Enter);
+        assert!(text(&ui).contains("Hidden needle"));
+        assert_eq!(ui.state().log_views[&JOB].matches, vec![1]);
+        append(&mut ui, "replacement\n", true);
+        assert!(text(&ui).contains("replacement"));
+        assert!(
+            ui.rect_of_key(&format!("log-section-{JOB}-0").into())
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn space_toggles_enter_focuses_and_navigation_remains_consistent() {
     let mut ui = mount("midnight");
     key(&mut ui, KeyCode::Char(' '));

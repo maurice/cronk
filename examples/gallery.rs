@@ -58,6 +58,17 @@ fn main() -> anyhow::Result<()> {
             "midnight",
         ),
         (
+            "log-sections",
+            3,
+            Some(ItemKey {
+                project: 9001,
+                iid: 101,
+                kind: ItemKind::MergeRequest,
+            }),
+            Some(2),
+            "midnight",
+        ),
+        (
             "changes",
             3,
             Some(ItemKey {
@@ -124,6 +135,22 @@ fn main() -> anyhow::Result<()> {
             }
         }
         backend.dispatch(Msg::LoadTraces)?;
+        backend.pump()?;
+        if name == "log-sections" {
+            let job = backend
+                .state()
+                .details
+                .as_ref()
+                .unwrap()
+                .jobs
+                .iter()
+                .find(|job| job.status == "failed")
+                .unwrap()
+                .id;
+            backend.dispatch(Msg::FocusLog(job))?;
+            backend.dispatch(Msg::ZoomLog)?;
+            backend.dispatch(Msg::ScrollLog(job, isize::MIN))?;
+        }
         backend.render();
         let snapshot = backend.capture_ui_snapshot();
         std::fs::write(

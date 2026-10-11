@@ -2738,6 +2738,8 @@ struct Sanitizer {
     utf8: Vec<u8>,
     csi: String,
     csi_valid: bool,
+    // Only a validated GitLab marker may retain the erase/CR framing.
+    section: Option<String>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -2802,6 +2804,33 @@ impl Sanitizer {
 
     fn character(&mut self, c: char, text: &mut String) {
         use EscapeMode::*;
+        if matches!(self.mode, Ground)
+            && let Some(candidate) = &mut self.section
+        {
+            if c == '\r' {
+                let candidate = self.section.take().unwrap();
+                if crate::log_sections::marker(&candidate).is_some() {
+                    text.push_str(crate::log_sections::PREFIX);
+                    text.push_str(&candidate);
+                    text.push('\r');
+                } else {
+                    text.push_str(&candidate);
+                }
+                return;
+            }
+            candidate.push(c);
+            let possible = "section_start:".starts_with(candidate.as_str())
+                || "section_end:".starts_with(candidate.as_str())
+                || candidate.starts_with("section_start:")
+                || candidate.starts_with("section_end:");
+            if possible && candidate.len() <= 4096 && !c.is_control() {
+                return;
+            }
+            let mut candidate = self.section.take().unwrap();
+            candidate.pop();
+            text.push_str(&candidate);
+            // Handle the terminating character normally; never bypass sanitization.
+        }
         if c == '\u{9c}' {
             self.mode = Ground;
             return;
@@ -2831,6 +2860,9 @@ impl Sanitizer {
             Csi => match c {
                 '\u{1b}' => self.mode = Escape,
                 '@'..='~' => {
+                    if c == 'K' && self.csi_valid && self.csi == "0" {
+                        self.section = Some(std::string::String::new());
+                    }
                     if c == 'm'
                         && self.csi_valid
                         && let Some(params) = crate::ansi::normalize_sgr(&self.csi)
@@ -6189,6 +6221,34 @@ mod tests {
                 .to_string()
                 .contains("compressed trace")
         );
+    }
+
+    #[test]
+    fn sanitizer_preserves_only_validated_section_metadata_at_every_boundary() {
+        let input = "\x1b[0Ksection_start:100:build[collapsed=true]\r\x1b[0K\x1b[32mBuild\nbody\n\x1b[0Ksection_end:165:build\r\x1b[0K\n";
+        for split in 0..=input.len() {
+            let mut sanitizer = Sanitizer::default();
+            let mut text = sanitizer.feed(&input.as_bytes()[..split]);
+            text.push_str(&sanitizer.feed(&input.as_bytes()[split..]));
+            let mut trace = crate::ui::Trace::default();
+            trace.append(&text, false);
+            assert_eq!(trace.line_count(), 2, "split {split}: {text:?}");
+            assert_eq!(trace.plain_line(0), "Build");
+            assert_eq!(trace.section(0).unwrap().duration, Some(65));
+        }
+        let mut sanitizer = Sanitizer::default();
+        assert_eq!(
+            sanitizer.feed(b"\x1b[0Ksection_start:no:bad\r\x1b[2Jtext\n"),
+            "section_start:no:badtext\n"
+        );
+        assert_eq!(sanitizer.feed(b"\x1b[0Kordinary\rtext"), "ordinarytext");
+        assert!(
+            sanitizer
+                .feed(format!("\x1b[0Ksection_start:1:{}", "x".repeat(5000)).as_bytes())
+                .len()
+                > 4096
+        );
+        assert!(sanitizer.section.is_none());
     }
 
     #[test]

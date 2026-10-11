@@ -2959,9 +2959,10 @@ fn job_header(job: &Job, expanded: bool, colors: Colors) -> Vec<Span> {
 fn log_window(ctx: &Context<Cronk>, job: &Job, height: usize, colors: Colors) -> Element {
     let id = job.id;
     let trace = ctx.state.traces.get(&id);
-    let total = trace.map_or(0, super::Trace::line_count);
     let default_view = super::LogView::default();
     let view = ctx.state.log_views.get(&id).unwrap_or(&default_view);
+    let visible_rows = trace.map_or_else(Vec::new, |t| view.visible_rows(t));
+    let total = visible_rows.len();
     let height = if ctx.state.log_zoom {
         height
     } else {
@@ -2975,30 +2976,62 @@ fn log_window(ctx: &Context<Cronk>, job: &Job, height: usize, colors: Colors) ->
         .current_match
         .and_then(|i| view.matches.get(i))
         .copied();
-    let mut visible = Vec::new();
-    for row in offset..offset + height {
-        if row > offset {
-            visible.push(Span::new("\n"));
-        }
-        if total == 0 && row == 0 {
-            visible.push(Span::new(if trace.is_some_and(|t| t.finished) {
-                "  Trace is empty."
-            } else {
-                "  Waiting for log output…"
-            }));
-        } else if let Some(trace) = trace {
-            visible.extend(trace.line_spans_with_current(
-                row,
-                &view.query,
-                current_match == Some(row),
-            ));
-        }
-    }
-    let rows = Text::from_spans(visible)
+    let mut rows = VStack::new()
         .height(Length::Px(height as u16))
         .width(Length::Flex(1))
-        .overflow(Overflow::Clip)
         .style(style);
+    for position in offset..offset + height {
+        let row = visible_rows.get(position).copied();
+        let section = row.and_then(|row| trace.and_then(|t| t.section(row)));
+        let mut content = HStack::new().height(Length::Px(1)).style(style);
+        let gutter = Text::new(match &section {
+            Some(s) if view.collapsed(s) => "▸",
+            Some(_) => "▾",
+            None => " ",
+        })
+        .width(Length::Px(1))
+        .height(Length::Px(1))
+        .style(style.fg(colors.muted));
+        content = if let Some(row) = row.filter(|_| section.is_some()) {
+            content.child(
+                Element::from(
+                    MouseRegion::new()
+                        .capture_click(true)
+                        .on_click(ctx.link().callback(move |_| Msg::ToggleLogSection(id, row)))
+                        .child(gutter),
+                )
+                .key(format!("log-section-{id}-{row}")),
+            )
+        } else {
+            content.child(gutter)
+        };
+        let spans = if let (Some(trace), Some(row)) = (trace, row) {
+            trace.line_spans_with_current(row, &view.query, current_match == Some(row))
+        } else if total == 0 && position == 0 {
+            vec![Span::new(if trace.is_some_and(|t| t.finished) {
+                "Trace is empty."
+            } else {
+                "Waiting for log output…"
+            })]
+        } else {
+            Vec::new()
+        };
+        content = content.child(
+            Text::from_spans(spans)
+                .height(Length::Px(1))
+                .width(Length::Flex(1))
+                .overflow(Overflow::Clip)
+                .style(style),
+        );
+        if let Some(duration) = section.and_then(|s| s.duration) {
+            content = content.child(
+                Text::new(format!(" {} ", crate::model::format_duration(duration)))
+                    .height(Length::Px(1))
+                    .style(style.fg(colors.muted)),
+            );
+        }
+        rows = rows.child(content);
+    }
     // A viewport-sized wheel proxy, not a layout of the full trace. Logical
     // history and the scrollbar below use usize line positions, so logs longer
     // than terminal Rect's i16 coordinates are still navigable. Remount only the

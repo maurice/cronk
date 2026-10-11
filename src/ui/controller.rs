@@ -942,7 +942,7 @@ impl Component for Cronk {
                                 .state
                                 .traces
                                 .get(&id)
-                                .map_or(0, |t| view.visible_rows(t).len());
+                                .map_or(0, |t| view.visible_count(t));
                             view.offset = view.position(total, height);
                         }
                         let trace = ctx.state.traces.entry(id).or_default();
@@ -1548,7 +1548,7 @@ impl Component for Cronk {
                     .state
                     .traces
                     .get(&id)
-                    .map_or(0, |t| view.visible_rows(t).len());
+                    .map_or(0, |t| view.visible_count(t));
                 view.scroll(total, height, delta);
             }
             Msg::LogWheel(id, origin, delta) => {
@@ -1561,7 +1561,7 @@ impl Component for Cronk {
                     .state
                     .traces
                     .get(&id)
-                    .map_or(0, |t| view.visible_rows(t).len());
+                    .map_or(0, |t| view.visible_count(t));
                 if view.position(total, height) != origin || delta == 0 {
                     return Update::none();
                 }
@@ -1581,7 +1581,7 @@ impl Component for Cronk {
                     .state
                     .traces
                     .get(&id)
-                    .map_or(0, |t| view.visible_rows(t).len());
+                    .map_or(0, |t| view.visible_count(t));
                 let (top, thumb) =
                     super::logs::scrollbar(total, height, view.position(total, height));
                 if start {
@@ -2455,7 +2455,8 @@ impl Cronk {
                                     epoch,
                                     id,
                                     finished,
-                                    api.trace(project, id, offset).map_err(|e| e.to_string()),
+                                    api.trace_for_job(project, id, offset, finished)
+                                        .map_err(|e| e.to_string()),
                                 ));
                             });
                         }

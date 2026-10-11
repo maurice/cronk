@@ -26,7 +26,7 @@ pub struct TraceIndex {
     bytes: usize,
     scanned: usize,
     sgr: SgrState,
-    // Sparse start-of-line checkpoints: unchanged styles consume no extra space.
+    // Sparse SGR checkpoints also preserve styles across inline section frames.
     styles: Vec<(usize, String)>,
     rows: Vec<Range<usize>>,
     sections: Vec<Section>,
@@ -50,15 +50,13 @@ impl TraceIndex {
                 };
                 if text.as_bytes()[end - 1] == b'm' {
                     self.sgr.apply(&text[cursor + 2..end - 1]);
+                    let prefix = self.sgr.prefix();
+                    if self.styles.last().map_or("", |(_, value)| value.as_str()) != prefix {
+                        self.styles.push((end, prefix));
+                    }
                 }
                 cursor = end;
                 continue;
-            }
-            if byte == b'\n' {
-                let prefix = self.sgr.prefix();
-                if self.styles.last().map_or("", |(_, value)| value.as_str()) != prefix {
-                    self.styles.push((cursor + 1, prefix));
-                }
             }
             cursor += 1;
         }
@@ -107,6 +105,23 @@ impl TraceIndex {
             } else if crate::log_sections::PREFIX.starts_with(rest) {
                 break;
             }
+            let newline = rest.find('\n').unwrap_or(rest.len());
+            // Frames may follow color changes or output without a final newline.
+            // Keep ordinary output as its own row; style-only prefixes use the
+            // SGR checkpoints rather than creating an empty displayed row.
+            if let Some(frame) = rest[..newline].find(crate::log_sections::PREFIX)
+                && frame > 0
+            {
+                let end = self.section_scanned + frame;
+                if parse_ansi(&text[self.section_scanned..end])
+                    .iter()
+                    .any(|s| !s.content.is_empty())
+                {
+                    self.rows.push(self.section_scanned..end);
+                }
+                self.section_scanned = end;
+                continue;
+            }
             if let Some(length) = rest.find('\n') {
                 let end = self.section_scanned + length;
                 if length > 0 || !self.marked_line {
@@ -150,12 +165,12 @@ impl Trace {
 
     pub(crate) fn section(&self, row: usize) -> Option<Section> {
         self.ensure_index();
-        self.index
-            .borrow()
+        let index = self.index.borrow();
+        index
             .sections
-            .iter()
-            .find(|s| s.row == row)
-            .cloned()
+            .binary_search_by_key(&row, |s| s.row)
+            .ok()
+            .map(|i| index.sections[i].clone())
     }
 
     pub fn plain_line(&self, row: usize) -> String {
@@ -284,6 +299,45 @@ fn highlight(spans: Vec<Span>, query: &str, current: bool) -> Vec<Span> {
     result
 }
 
+/// Sparse folded intervals, never one entry per source line. Section-free logs
+/// allocate nothing; lookups are logarithmic in the number of folded intervals.
+pub(crate) struct RowMap {
+    total: usize,
+    hidden: Vec<(Range<usize>, usize)>,
+    removed: usize,
+}
+
+impl RowMap {
+    pub(crate) fn len(&self) -> usize {
+        self.total - self.removed
+    }
+
+    pub(crate) fn source_at(&self, position: usize) -> Option<usize> {
+        if position >= self.len() {
+            return None;
+        }
+        let i = self
+            .hidden
+            .partition_point(|(range, before)| range.start - before <= position);
+        let removed = i.checked_sub(1).map_or(0, |i| {
+            let (range, before) = &self.hidden[i];
+            before + range.len()
+        });
+        Some(position + removed)
+    }
+
+    fn position_at(&self, source: usize) -> usize {
+        let i = self
+            .hidden
+            .partition_point(|(range, _)| range.start < source);
+        let removed = i.checked_sub(1).map_or(0, |i| {
+            let (range, before) = &self.hidden[i];
+            before + source.min(range.end) - range.start
+        });
+        source.min(self.total) - removed
+    }
+}
+
 pub struct LogView {
     pub offset: usize,
     pub follow: bool,
@@ -318,39 +372,66 @@ impl LogView {
             .unwrap_or(section.collapsed)
     }
 
-    pub fn visible_rows(&self, trace: &Trace) -> Vec<usize> {
+    pub(crate) fn row_map(&self, trace: &Trace) -> RowMap {
         trace.ensure_index();
         let index = trace.index.borrow();
-        let mut rows = Vec::new();
-        let mut row = 0;
+        let total = index.rows.len();
+        let mut map = RowMap {
+            total,
+            hidden: Vec::new(),
+            removed: 0,
+        };
+        let mut end = 0;
         for section in &index.sections {
-            if section.row < row || section.row >= index.rows.len() {
+            if section.row < end || section.row >= total || !self.collapsed(section) {
                 continue;
             }
-            rows.extend(row..=section.row);
-            row = if self.collapsed(section) {
-                section.end.unwrap_or(index.rows.len()).max(section.row + 1)
-            } else {
-                section.row + 1
-            };
+            let start = section.row + 1;
+            end = section.end.unwrap_or(total).max(start).min(total);
+            if start < end {
+                map.hidden.push((start..end, map.removed));
+                map.removed += end - start;
+            }
         }
-        rows.extend(row..index.rows.len());
-        rows
+        map
+    }
+
+    /// Materialize rows only for callers explicitly requesting the full list.
+    /// Rendering and navigation use the sparse map instead.
+    pub fn visible_rows(&self, trace: &Trace) -> Vec<usize> {
+        let map = self.row_map(trace);
+        (0..map.len())
+            .filter_map(|position| map.source_at(position))
+            .collect()
+    }
+
+    pub fn visible_count(&self, trace: &Trace) -> usize {
+        trace.ensure_index();
+        let index = trace.index.borrow();
+        let total = index.rows.len();
+        let mut removed = 0;
+        let mut end = 0;
+        for section in &index.sections {
+            if section.row < end || section.row >= total || !self.collapsed(section) {
+                continue;
+            }
+            let start = section.row + 1;
+            end = section.end.unwrap_or(total).max(start).min(total);
+            removed += end - start;
+        }
+        total - removed
     }
 
     pub fn toggle_section(&mut self, trace: &Trace, row: usize, height: usize) {
         let Some(section) = trace.section(row) else {
             return;
         };
-        let old = self.visible_rows(trace);
-        let anchor = old
-            .get(self.position(old.len(), height))
-            .copied()
-            .unwrap_or(0);
+        let old = self.row_map(trace);
+        let anchor = old.source_at(self.position(old.len(), height)).unwrap_or(0);
         self.section_choices.insert(row, !self.collapsed(&section));
-        let rows = self.visible_rows(trace);
+        let rows = self.row_map(trace);
         self.offset = rows
-            .partition_point(|&r| r < anchor)
+            .position_at(anchor)
             .min(rows.len().saturating_sub(height.max(1)));
         self.drag_grab = None;
         self.wheel_epoch = self.wheel_epoch.wrapping_add(1);
@@ -397,10 +478,9 @@ impl LogView {
             self.current_match = None;
             return;
         }
-        let rows = self.visible_rows(trace);
+        let rows = self.row_map(trace);
         let position = rows
-            .get(self.position(rows.len(), height))
-            .copied()
+            .source_at(self.position(rows.len(), height))
             .unwrap_or(0);
         let index = match self.current_match {
             Some(i) if backwards => (i + self.matches.len() - 1) % self.matches.len(),
@@ -424,9 +504,9 @@ impl LogView {
                 self.section_choices.insert(section.row, false);
             }
         }
-        let rows = self.visible_rows(trace);
+        let rows = self.row_map(trace);
         let max = rows.len().saturating_sub(height.max(1));
-        self.offset = rows.binary_search(&matched).unwrap_or(0).min(max);
+        self.offset = rows.position_at(matched).min(max);
         self.follow = self.offset == max;
     }
 
@@ -460,6 +540,76 @@ pub(super) fn scrollbar(total: usize, height: usize, offset: usize) -> (usize, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_row_map_matches_reference_and_scales_with_folds_not_lines() {
+        for total in 0..40 {
+            for start in 0..total {
+                for end in start..=total {
+                    let map = RowMap {
+                        total,
+                        hidden: vec![(start..end, 0)],
+                        removed: end - start,
+                    };
+                    let expected: Vec<_> =
+                        (0..total).filter(|r| !(start..end).contains(r)).collect();
+                    assert_eq!(map.len(), expected.len());
+                    for position in 0..=expected.len() {
+                        assert_eq!(map.source_at(position), expected.get(position).copied());
+                    }
+                    for source in 0..=total {
+                        assert_eq!(
+                            map.position_at(source),
+                            expected.partition_point(|&r| r < source)
+                        );
+                    }
+                }
+            }
+        }
+        let mut trace = Trace::default();
+        trace.append(&"line\n".repeat(1_000_000), false);
+        let view = LogView::default();
+        let map = view.row_map(&trace);
+        assert_eq!(map.len(), 1_000_000);
+        assert_eq!(view.visible_count(&trace), map.len());
+        assert_eq!(
+            map.hidden.capacity(),
+            0,
+            "section-free history has no mapping allocation"
+        );
+        assert_eq!(map.source_at(999_999), Some(999_999));
+        trace.append("\x1b[0Ksection_start:1:fold[collapsed=true]\rFold\n", false);
+        trace.append(&"hidden\n".repeat(10_000), false);
+        trace.append("\x1b[0Ksection_end:3:fold\r\nlast\n", false);
+        let map = view.row_map(&trace);
+        assert_eq!(map.hidden.len(), 1);
+        assert_eq!(map.len(), 1_000_002);
+        assert_eq!(map.source_at(1_000_001), Some(1_010_001));
+    }
+
+    #[test]
+    fn multiple_sparse_folds_update_with_streaming_and_choices() {
+        let mut trace = Trace::default();
+        trace.append("before\n\x1b[0Ksection_start:1:a[collapsed=true]\rA\na1\na2\n\x1b[0Ksection_end:2:a\r\x1b[0Ksection_start:3:b[collapsed=true]\rB\nb1\n", false);
+        let mut view = LogView::default();
+        assert_eq!(view.visible_rows(&trace), vec![0, 1, 4]);
+        trace.append("b2\n\x1b[0Ksection_end:5:b\rafter\n", false);
+        let map = view.row_map(&trace);
+        assert_eq!(map.hidden.len(), 2);
+        assert_eq!(view.visible_count(&trace), map.len());
+        let expected = [0, 1, 4, 7];
+        for (position, &source) in expected.iter().enumerate() {
+            assert_eq!(map.source_at(position), Some(source));
+        }
+        for source in 0..=8 {
+            assert_eq!(
+                map.position_at(source),
+                expected.partition_point(|&r| r < source)
+            );
+        }
+        view.toggle_section(&trace, 1, 1);
+        assert_eq!(view.visible_rows(&trace), vec![0, 1, 2, 3, 4, 7]);
+    }
 
     #[test]
     fn sections_handle_streaming_nested_repeated_names_and_search() {

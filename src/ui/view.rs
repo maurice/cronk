@@ -2961,8 +2961,8 @@ fn log_window(ctx: &Context<Cronk>, job: &Job, height: usize, colors: Colors) ->
     let trace = ctx.state.traces.get(&id);
     let default_view = super::LogView::default();
     let view = ctx.state.log_views.get(&id).unwrap_or(&default_view);
-    let visible_rows = trace.map_or_else(Vec::new, |t| view.visible_rows(t));
-    let total = visible_rows.len();
+    let visible_rows = trace.map(|t| view.row_map(t));
+    let total = visible_rows.as_ref().map_or(0, |rows| rows.len());
     let height = if ctx.state.log_zoom {
         height
     } else {
@@ -2981,7 +2981,9 @@ fn log_window(ctx: &Context<Cronk>, job: &Job, height: usize, colors: Colors) ->
         .width(Length::Flex(1))
         .style(style);
     for position in offset..offset + height {
-        let row = visible_rows.get(position).copied();
+        let row = visible_rows
+            .as_ref()
+            .and_then(|rows| rows.source_at(position));
         let section = row.and_then(|row| trace.and_then(|t| t.section(row)));
         let mut content = HStack::new().height(Length::Px(1)).style(style);
         let gutter = Text::new(match &section {

@@ -937,8 +937,12 @@ impl Component for Cronk {
                         // displayed top may have been clamped. Anchor that actual
                         // source line before adding new output, not an old offset.
                         let height = self.log_height(ctx, id);
-                        let total = ctx.state.traces.get(&id).map_or(0, Trace::line_count);
                         if let Some(view) = ctx.state.log_views.get_mut(&id).filter(|v| !v.follow) {
+                            let total = ctx
+                                .state
+                                .traces
+                                .get(&id)
+                                .map_or(0, |t| view.visible_count(t));
                             view.offset = view.position(total, height);
                         }
                         let trace = ctx.state.traces.entry(id).or_default();
@@ -1527,22 +1531,37 @@ impl Component for Cronk {
                     ctx.link().send(Msg::LoadTraces);
                 }
             }
+            Msg::ToggleLogSection(id, row) => {
+                let height = self.log_height(ctx, id);
+                if let Some(trace) = ctx.state.traces.get(&id) {
+                    ctx.state
+                        .log_views
+                        .entry(id)
+                        .or_default()
+                        .toggle_section(trace, row, height);
+                }
+            }
             Msg::ScrollLog(id, delta) => {
                 let height = self.log_height(ctx, id);
-                let total = ctx.state.traces.get(&id).map_or(0, Trace::line_count);
-                ctx.state
-                    .log_views
-                    .entry(id)
-                    .or_default()
-                    .scroll(total, height, delta);
+                let view = ctx.state.log_views.entry(id).or_default();
+                let total = ctx
+                    .state
+                    .traces
+                    .get(&id)
+                    .map_or(0, |t| view.visible_count(t));
+                view.scroll(total, height, delta);
             }
             Msg::LogWheel(id, origin, delta) => {
                 if !ctx.state.log_zoom || ctx.state.log_focus != Some(id) {
                     return Update::none();
                 }
                 let height = self.log_height(ctx, id);
-                let total = ctx.state.traces.get(&id).map_or(0, Trace::line_count);
                 let view = ctx.state.log_views.entry(id).or_default();
+                let total = ctx
+                    .state
+                    .traces
+                    .get(&id)
+                    .map_or(0, |t| view.visible_count(t));
                 if view.position(total, height) != origin || delta == 0 {
                     return Update::none();
                 }
@@ -1557,8 +1576,12 @@ impl Component for Cronk {
                 }) {
                     return Update::none();
                 }
-                let total = ctx.state.traces.get(&id).map_or(0, Trace::line_count);
                 let view = ctx.state.log_views.entry(id).or_default();
+                let total = ctx
+                    .state
+                    .traces
+                    .get(&id)
+                    .map_or(0, |t| view.visible_count(t));
                 let (top, thumb) =
                     super::logs::scrollbar(total, height, view.position(total, height));
                 if start {
@@ -2432,7 +2455,8 @@ impl Cronk {
                                     epoch,
                                     id,
                                     finished,
-                                    api.trace(project, id, offset).map_err(|e| e.to_string()),
+                                    api.trace_for_job(project, id, offset, finished)
+                                        .map_err(|e| e.to_string()),
                                 ));
                             });
                         }

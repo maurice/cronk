@@ -6,6 +6,7 @@ mod dates;
 pub mod demo;
 pub mod filter;
 pub mod gitlab;
+mod log_sections;
 pub mod model;
 mod navigation;
 pub mod scroll;

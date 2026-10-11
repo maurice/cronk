@@ -159,9 +159,175 @@ fn append(ui: &mut Ui, value: &str, reset: bool) {
 }
 fn position(ui: &Ui) -> usize {
     ui.state().log_views[&JOB].position(
-        ui.state().traces[&JOB].line_count(),
+        ui.state().log_views[&JOB].visible_count(&ui.state().traces[&JOB]),
         ui.state().log_height(ui.viewport().h, JOB),
     )
+}
+
+#[test]
+fn gitlab_sections_render_toggle_and_reveal_search_matches_inline_and_zoomed() {
+    for zoom in [false, true] {
+        let mut ui = mount("midnight");
+        append(
+            &mut ui,
+            "\x1b[0Ksection_start:100:build[collapsed=true]\r\x1b[0KBuild the project\nHidden needle\n\x1b[0Ksection_end:165:build\r\x1b[0K\nAfter build\n",
+            true,
+        );
+        ui.state_mut().traces.get_mut(&JOB).unwrap().finished = true;
+        key(&mut ui, KeyCode::Enter);
+        if zoom {
+            key(&mut ui, KeyCode::Char('z'));
+        }
+        assert!(text(&ui).contains("Build the project"), "{}", text(&ui));
+        assert!(text(&ui).contains("1m 05s"), "{}", text(&ui));
+        assert!(!text(&ui).contains("section_start"));
+        assert!(!text(&ui).contains("section_end"));
+        assert!(!text(&ui).contains("Hidden needle"));
+        let control = ui
+            .rect_of_key(&format!("log-section-{JOB}-0").into())
+            .unwrap();
+        assert_eq!(control.w, 1);
+        let click = |ui: &mut Ui| {
+            mouse(
+                ui,
+                control.x as u16,
+                control.y as u16,
+                MouseKind::Down(MouseButton::Left),
+            );
+            mouse(
+                ui,
+                control.x as u16,
+                control.y as u16,
+                MouseKind::Up(MouseButton::Left),
+            );
+        };
+        click(&mut ui);
+        assert!(text(&ui).contains("Hidden needle"), "{}", text(&ui));
+        click(&mut ui);
+        assert!(!text(&ui).contains("Hidden needle"));
+        key(&mut ui, KeyCode::Char('/'));
+        for c in "needle".chars() {
+            key(&mut ui, KeyCode::Char(c));
+        }
+        key(&mut ui, KeyCode::Enter);
+        assert!(text(&ui).contains("Hidden needle"));
+        assert_eq!(ui.state().log_views[&JOB].matches, vec![1]);
+        append(&mut ui, "replacement\n", true);
+        assert!(text(&ui).contains("replacement"));
+        assert!(
+            ui.rect_of_key(&format!("log-section-{JOB}-0").into())
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn folded_sections_keep_scroll_wheel_drag_follow_and_tab_positions_consistent() {
+    let mut ui = mount("midnight");
+    let body = format!(
+        "\x1b[32m\x1b[0Ksection_start:1:setup[collapsed=true]\rSetup\n{}\x1b[0Ksection_end:3:setup\r\x1b[0K\n{}",
+        "HIDDEN\n".repeat(100),
+        (0..100)
+            .map(|n| format!("VISIBLE_{n:03}\n"))
+            .collect::<String>()
+    );
+    append(&mut ui, &body, true);
+    ui.state_mut().traces.get_mut(&JOB).unwrap().finished = true;
+    key(&mut ui, KeyCode::Char('z'));
+    key(&mut ui, KeyCode::Home);
+    assert_eq!(position(&ui), 0);
+    assert!(text(&ui).contains("Setup"));
+    assert!(!text(&ui).contains("HIDDEN"));
+    assert!(!text(&ui).contains("section_start"));
+    key(&mut ui, KeyCode::Down);
+    assert_eq!(position(&ui), 1);
+    assert!(text(&ui).contains("VISIBLE_000"));
+    let rect = ui.rect_of_key(&format!("log-window-{JOB}").into()).unwrap();
+    mouse(
+        &mut ui,
+        (rect.x + 3) as u16,
+        (rect.y + 3) as u16,
+        MouseKind::ScrollDown,
+    );
+    assert!(position(&ui) > 1);
+    let paused = position(&ui);
+    append(&mut ui, "NEW_TAIL\n", false);
+    assert_eq!(position(&ui), paused);
+    assert!(!ui.state().log_views[&JOB].follow);
+    // Keep offline polling from replacing this completed synthetic fixture.
+    ui.state_mut().traces.get_mut(&JOB).unwrap().finished = true;
+    ui.dispatch(Msg::Tab(2)).unwrap();
+    settle(&mut ui);
+    ui.dispatch(Msg::Tab(3)).unwrap();
+    settle(&mut ui);
+    assert_eq!(position(&ui), paused);
+    assert_eq!(
+        ui.state().log_views[&JOB].visible_count(&ui.state().traces[&JOB]),
+        102
+    );
+    key(&mut ui, KeyCode::Char('z'));
+    key(&mut ui, KeyCode::Home);
+    let bar = ui
+        .rect_of_key(&format!("log-scrollbar-{JOB}").into())
+        .unwrap();
+    mouse(
+        &mut ui,
+        bar.x as u16,
+        bar.y as u16,
+        MouseKind::Down(MouseButton::Left),
+    );
+    mouse(
+        &mut ui,
+        bar.x as u16,
+        (bar.y + bar.h as i16 - 1) as u16,
+        MouseKind::Drag(MouseButton::Left),
+    );
+    mouse(
+        &mut ui,
+        bar.x as u16,
+        (bar.y + bar.h as i16 - 1) as u16,
+        MouseKind::Up(MouseButton::Left),
+    );
+    assert!(ui.state().log_views[&JOB].follow);
+    assert!(text(&ui).contains("NEW_TAIL"));
+    key(&mut ui, KeyCode::Home);
+    mouse(
+        &mut ui,
+        bar.x as u16,
+        (bar.y + bar.h as i16 - 1) as u16,
+        MouseKind::Down(MouseButton::Left),
+    );
+    mouse(
+        &mut ui,
+        bar.x as u16,
+        (bar.y + bar.h as i16 - 1) as u16,
+        MouseKind::Up(MouseButton::Left),
+    );
+    assert!(ui.state().log_views[&JOB].follow);
+    assert!(text(&ui).contains("NEW_TAIL"));
+    append(&mut ui, "LATEST_TAIL\n", false);
+    assert!(text(&ui).contains("LATEST_TAIL"));
+    key(&mut ui, KeyCode::Home);
+    let control = ui
+        .rect_of_key(&format!("log-section-{JOB}-0").into())
+        .unwrap();
+    mouse(
+        &mut ui,
+        control.x as u16,
+        control.y as u16,
+        MouseKind::Down(MouseButton::Left),
+    );
+    mouse(
+        &mut ui,
+        control.x as u16,
+        control.y as u16,
+        MouseKind::Up(MouseButton::Left),
+    );
+    assert!(text(&ui).contains("HIDDEN"));
+    assert_eq!(
+        ui.state().log_views[&JOB].visible_count(&ui.state().traces[&JOB]),
+        203
+    );
 }
 
 #[test]

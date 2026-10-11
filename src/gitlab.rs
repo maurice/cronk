@@ -2160,6 +2160,18 @@ impl GitLab {
     }
 
     pub fn trace(&self, project: u64, job: u64, offset: u64) -> Result<TraceChunk> {
+        self.trace_for_job(project, job, offset, false)
+    }
+
+    /// Finalize buffered printable output only when a completed job is drained
+    /// to EOF. Empty reads from a running job must preserve streaming state.
+    pub fn trace_for_job(
+        &self,
+        project: u64,
+        job: u64,
+        offset: u64,
+        completed: bool,
+    ) -> Result<TraceChunk> {
         let url = self.url(&[
             "projects",
             &project.to_string(),
@@ -2206,7 +2218,10 @@ impl GitLab {
         if start == 0 || reset {
             cursor.sanitizer = Sanitizer::default();
         }
-        let text = cursor.sanitizer.feed(&bytes);
+        let mut text = cursor.sanitizer.feed(&bytes);
+        if completed && bytes.is_empty() && !reset && next_offset == offset {
+            text.push_str(&cursor.sanitizer.finish());
+        }
         cursor.offset = next_offset;
         Ok(TraceChunk {
             text,
@@ -2738,6 +2753,8 @@ struct Sanitizer {
     utf8: Vec<u8>,
     csi: String,
     csi_valid: bool,
+    // Only a validated GitLab marker may retain the erase/CR framing.
+    section: Option<String>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -2794,6 +2811,22 @@ impl Sanitizer {
         text
     }
 
+    fn finish(&mut self) -> String {
+        let mut text = String::new();
+        // A truncated UTF-8 character is no longer waiting for a future poll.
+        let tail = std::mem::take(&mut self.utf8);
+        for c in String::from_utf8_lossy(&tail).chars() {
+            self.character(c, &mut text);
+        }
+        if let Some(candidate) = self.section.take() {
+            text.push_str(&candidate);
+        }
+        // Incomplete escape sequences remain stripped, never executed.
+        self.mode = EscapeMode::Ground;
+        self.csi.clear();
+        text
+    }
+
     fn start_csi(&mut self) {
         self.mode = EscapeMode::Csi;
         self.csi.clear();
@@ -2802,6 +2835,33 @@ impl Sanitizer {
 
     fn character(&mut self, c: char, text: &mut String) {
         use EscapeMode::*;
+        if matches!(self.mode, Ground)
+            && let Some(candidate) = &mut self.section
+        {
+            if c == '\r' {
+                let candidate = self.section.take().unwrap();
+                if crate::log_sections::marker(&candidate).is_some() {
+                    text.push_str(crate::log_sections::PREFIX);
+                    text.push_str(&candidate);
+                    text.push('\r');
+                } else {
+                    text.push_str(&candidate);
+                }
+                return;
+            }
+            candidate.push(c);
+            let possible = "section_start:".starts_with(candidate.as_str())
+                || "section_end:".starts_with(candidate.as_str())
+                || candidate.starts_with("section_start:")
+                || candidate.starts_with("section_end:");
+            if possible && candidate.len() <= 4096 && !c.is_control() {
+                return;
+            }
+            let mut candidate = self.section.take().unwrap();
+            candidate.pop();
+            text.push_str(&candidate);
+            // Handle the terminating character normally; never bypass sanitization.
+        }
         if c == '\u{9c}' {
             self.mode = Ground;
             return;
@@ -2831,6 +2891,9 @@ impl Sanitizer {
             Csi => match c {
                 '\u{1b}' => self.mode = Escape,
                 '@'..='~' => {
+                    if c == 'K' && self.csi_valid && self.csi == "0" {
+                        self.section = Some(std::string::String::new());
+                    }
                     if c == 'm'
                         && self.csi_valid
                         && let Some(params) = crate::ansi::normalize_sgr(&self.csi)
@@ -6189,6 +6252,108 @@ mod tests {
                 .to_string()
                 .contains("compressed trace")
         );
+    }
+
+    #[test]
+    fn sanitizer_preserves_only_validated_section_metadata_at_every_boundary() {
+        let input = "\x1b[0Ksection_start:100:build[collapsed=true]\r\x1b[0K\x1b[32mBuild\nbody\n\x1b[0Ksection_end:165:build\r\x1b[0K\n";
+        for split in 0..=input.len() {
+            let mut sanitizer = Sanitizer::default();
+            let mut text = sanitizer.feed(&input.as_bytes()[..split]);
+            text.push_str(&sanitizer.feed(&input.as_bytes()[split..]));
+            let mut trace = crate::ui::Trace::default();
+            trace.append(&text, false);
+            assert_eq!(trace.line_count(), 2, "split {split}: {text:?}");
+            assert_eq!(trace.plain_line(0), "Build");
+            assert_eq!(trace.section(0).unwrap().duration, Some(65));
+        }
+        let mut sanitizer = Sanitizer::default();
+        assert_eq!(
+            sanitizer.feed(b"\x1b[0Ksection_start:no:bad\r\x1b[2Jtext\n"),
+            "section_start:no:badtext\n"
+        );
+        assert_eq!(sanitizer.feed(b"\x1b[0Kordinary\rtext"), "ordinarytext");
+        assert!(
+            sanitizer
+                .feed(format!("\x1b[0Ksection_start:1:{}", "x".repeat(5000)).as_bytes())
+                .len()
+                > 4096
+        );
+        assert!(sanitizer.section.is_none());
+    }
+
+    #[test]
+    fn inline_section_frames_survive_incremental_sanitizer_ingestion() {
+        for prefix in ["\x1b[32m", "prefix", "prefix\x1b[32m"] {
+            let input = format!(
+                "{prefix}\x1b[0Ksection_start:1:build[collapsed=true]\r\x1b[0KHeader\nbody\n\x1b[0Ksection_end:3:build\r\x1b[0K"
+            );
+            for split in 0..=input.len() {
+                let mut sanitizer = Sanitizer::default();
+                let mut trace = crate::ui::Trace::default();
+                trace.append(&sanitizer.feed(&input.as_bytes()[..split]), false);
+                trace.append(&sanitizer.feed(&input.as_bytes()[split..]), false);
+                let header = usize::from(prefix.starts_with("prefix"));
+                assert_eq!(
+                    trace.plain_line(header),
+                    "Header",
+                    "prefix={prefix:?} split={split}"
+                );
+                assert_eq!(trace.section(header).unwrap().duration, Some(2));
+                assert_eq!(
+                    crate::ui::LogView::default().visible_rows(&trace).len(),
+                    header + 1
+                );
+                assert_eq!(
+                    trace.line_spans(header, "")[0].style.fg,
+                    if prefix.contains("\x1b[32m") {
+                        tui_lipan::prelude::Style::new()
+                            .fg(tui_lipan::prelude::Color::Green)
+                            .fg
+                    } else {
+                        None
+                    }
+                );
+                if header > 0 {
+                    assert_eq!(trace.plain_line(0), "prefix");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn completed_eof_flushes_candidate_text_but_live_eof_keeps_it() {
+        for tail in ["sec", "section_start:1:build", "section_end:"] {
+            let body = format!("before\n\x1b[0K{tail}").into_bytes();
+            let mock = Mock::new(move |_| Reply::bytes(200, body.clone()));
+            let client = mock.legacy_trace_client();
+            let first = client.trace_for_job(7, 42, 0, false).unwrap();
+            assert_eq!(first.text, "before\n");
+            let live_eof = client
+                .trace_for_job(7, 42, first.next_offset, false)
+                .unwrap();
+            assert_eq!(live_eof.text, "");
+            let completed_eof = client
+                .trace_for_job(7, 42, first.next_offset, true)
+                .unwrap();
+            assert_eq!(completed_eof.text, tail);
+            assert_eq!(completed_eof.next_offset, first.next_offset);
+            assert!(!completed_eof.reset);
+            assert_eq!(
+                client
+                    .trace_for_job(7, 42, first.next_offset, true)
+                    .unwrap()
+                    .text,
+                ""
+            );
+        }
+        let mut sanitizer = Sanitizer::default();
+        sanitizer.feed(b"\x1b[0Ksec");
+        assert_eq!(
+            sanitizer.feed(b"tion_start:1:build\rHeader\n"),
+            "\x1b[0Ksection_start:1:build\rHeader\n"
+        );
+        assert_eq!(sanitizer.finish(), "");
     }
 
     #[test]

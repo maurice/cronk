@@ -3,7 +3,16 @@
 //! sized layout tree. Fetched history is kept in memory until its route is discarded.
 use super::Trace;
 use crate::ansi::{SgrState, csi_end};
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range};
+
+#[derive(Clone, Debug)]
+pub(crate) struct Section {
+    pub row: usize,
+    pub end: Option<usize>,
+    pub timestamp: u64,
+    pub duration: Option<u64>,
+    pub collapsed: bool,
+}
 use tui_lipan::{
     prelude::*,
     style::{RowStylePolicy, ansi::parse_ansi},
@@ -15,24 +24,20 @@ const OTHER_MATCH_BG: Color = Color::Rgb(225, 211, 150);
 #[derive(Default)]
 pub struct TraceIndex {
     bytes: usize,
-    starts: Vec<usize>,
     scanned: usize,
     sgr: SgrState,
-    // Sparse start-of-line checkpoints: unchanged styles consume no extra space.
+    // Sparse SGR checkpoints also preserve styles across inline section frames.
     styles: Vec<(usize, String)>,
+    rows: Vec<Range<usize>>,
+    sections: Vec<Section>,
+    open: HashMap<String, Vec<usize>>,
+    section_scanned: usize,
+    pending_row: bool,
+    marked_line: bool,
 }
 
 impl TraceIndex {
-    fn append(&mut self, text: &str, from: usize) {
-        if self.starts.is_empty() && !text.is_empty() {
-            self.starts.push(0);
-        }
-        self.starts.extend(
-            text.as_bytes()[from..]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, b)| (*b == b'\n').then_some(from + i + 1)),
-        );
+    fn append(&mut self, text: &str) {
         let mut cursor = self.scanned;
         while cursor < text.len() {
             let byte = text.as_bytes()[cursor];
@@ -45,20 +50,91 @@ impl TraceIndex {
                 };
                 if text.as_bytes()[end - 1] == b'm' {
                     self.sgr.apply(&text[cursor + 2..end - 1]);
+                    let prefix = self.sgr.prefix();
+                    if self.styles.last().map_or("", |(_, value)| value.as_str()) != prefix {
+                        self.styles.push((end, prefix));
+                    }
                 }
                 cursor = end;
                 continue;
-            }
-            if byte == b'\n' {
-                let prefix = self.sgr.prefix();
-                if self.styles.last().map_or("", |(_, value)| value.as_str()) != prefix {
-                    self.styles.push((cursor + 1, prefix));
-                }
             }
             cursor += 1;
         }
         self.scanned = cursor;
         self.bytes = text.len();
+        if self.pending_row {
+            self.rows.pop();
+            self.pending_row = false;
+        }
+        loop {
+            let rest = &text[self.section_scanned..];
+            if rest.is_empty() {
+                break;
+            }
+            if let Some(value) = rest.strip_prefix(crate::log_sections::PREFIX) {
+                if let Some((value, _)) = value.split_once('\r')
+                    && let Some(marker) = crate::log_sections::marker(value)
+                {
+                    self.marked_line = true;
+                    self.section_scanned += crate::log_sections::PREFIX.len() + value.len() + 1;
+                    if marker.start {
+                        let id = self.sections.len();
+                        self.open.entry(marker.name.into()).or_default().push(id);
+                        self.sections.push(Section {
+                            row: self.rows.len(),
+                            end: None,
+                            timestamp: marker.timestamp,
+                            duration: None,
+                            collapsed: marker.collapsed,
+                        });
+                    } else if let Some(id) = self.open.get_mut(marker.name).and_then(Vec::pop) {
+                        let section = &mut self.sections[id];
+                        section.end = Some(self.rows.len());
+                        section.duration = marker.timestamp.checked_sub(section.timestamp);
+                    }
+                    continue;
+                }
+                if value.starts_with("section_") || "section_".starts_with(value) {
+                    break;
+                }
+                // Raw/demo traces may retain the marker's trailing clear.
+                if self.marked_line {
+                    self.section_scanned += crate::log_sections::PREFIX.len();
+                    continue;
+                }
+            } else if crate::log_sections::PREFIX.starts_with(rest) {
+                break;
+            }
+            let newline = rest.find('\n').unwrap_or(rest.len());
+            // Frames may follow color changes or output without a final newline.
+            // Keep ordinary output as its own row; style-only prefixes use the
+            // SGR checkpoints rather than creating an empty displayed row.
+            if let Some(frame) = rest[..newline].find(crate::log_sections::PREFIX)
+                && frame > 0
+            {
+                let end = self.section_scanned + frame;
+                if parse_ansi(&text[self.section_scanned..end])
+                    .iter()
+                    .any(|s| !s.content.is_empty())
+                {
+                    self.rows.push(self.section_scanned..end);
+                }
+                self.section_scanned = end;
+                continue;
+            }
+            if let Some(length) = rest.find('\n') {
+                let end = self.section_scanned + length;
+                if length > 0 || !self.marked_line {
+                    self.rows.push(self.section_scanned..end);
+                }
+                self.section_scanned = end + 1;
+                self.marked_line = false;
+            } else {
+                self.rows.push(self.section_scanned..text.len());
+                self.pending_row = true;
+                break;
+            }
+        }
     }
 }
 
@@ -69,26 +145,32 @@ impl Trace {
             *self.index.get_mut() = TraceIndex::default();
         }
         self.ensure_index();
-        let from = self.text.len();
         self.text.push_str(text);
-        self.index.get_mut().append(&self.text, from);
+        self.index.get_mut().append(&self.text);
     }
 
     fn ensure_index(&self) {
         let mut index = self.index.borrow_mut();
         if index.bytes != self.text.len() {
             *index = TraceIndex::default();
-            index.append(&self.text, 0);
+            index.append(&self.text);
         }
     }
 
     pub fn line_count(&self) -> usize {
         self.ensure_index();
         let index = self.index.borrow();
+        index.rows.len()
+    }
+
+    pub(crate) fn section(&self, row: usize) -> Option<Section> {
+        self.ensure_index();
+        let index = self.index.borrow();
         index
-            .starts
-            .len()
-            .saturating_sub(usize::from(index.starts.last() == Some(&self.text.len())))
+            .sections
+            .binary_search_by_key(&row, |s| s.row)
+            .ok()
+            .map(|i| index.sections[i].clone())
     }
 
     pub fn plain_line(&self, row: usize) -> String {
@@ -111,7 +193,7 @@ impl Trace {
         self.ensure_index();
         let prefix = {
             let index = self.index.borrow();
-            let start = index.starts.get(row).copied().unwrap_or(self.text.len());
+            let start = index.rows.get(row).map_or(self.text.len(), |r| r.start);
             let checkpoint = index.styles.partition_point(|(offset, _)| *offset <= start);
             checkpoint
                 .checked_sub(1)
@@ -125,15 +207,10 @@ impl Trace {
     pub fn line(&self, row: usize) -> &str {
         self.ensure_index();
         let index = self.index.borrow();
-        let Some(&start) = index.starts.get(row) else {
+        let Some(range) = index.rows.get(row) else {
             return "";
         };
-        let end = index
-            .starts
-            .get(row + 1)
-            .copied()
-            .unwrap_or(self.text.len());
-        self.text[start..end].trim_end_matches(['\n', '\r'])
+        self.text[range.clone()].trim_end_matches(['\n', '\r'])
     }
 }
 
@@ -222,6 +299,45 @@ fn highlight(spans: Vec<Span>, query: &str, current: bool) -> Vec<Span> {
     result
 }
 
+/// Sparse folded intervals, never one entry per source line. Section-free logs
+/// allocate nothing; lookups are logarithmic in the number of folded intervals.
+pub(crate) struct RowMap {
+    total: usize,
+    hidden: Vec<(Range<usize>, usize)>,
+    removed: usize,
+}
+
+impl RowMap {
+    pub(crate) fn len(&self) -> usize {
+        self.total - self.removed
+    }
+
+    pub(crate) fn source_at(&self, position: usize) -> Option<usize> {
+        if position >= self.len() {
+            return None;
+        }
+        let i = self
+            .hidden
+            .partition_point(|(range, before)| range.start - before <= position);
+        let removed = i.checked_sub(1).map_or(0, |i| {
+            let (range, before) = &self.hidden[i];
+            before + range.len()
+        });
+        Some(position + removed)
+    }
+
+    fn position_at(&self, source: usize) -> usize {
+        let i = self
+            .hidden
+            .partition_point(|(range, _)| range.start < source);
+        let removed = i.checked_sub(1).map_or(0, |i| {
+            let (range, before) = &self.hidden[i];
+            before + source.min(range.end) - range.start
+        });
+        source.min(self.total) - removed
+    }
+}
+
 pub struct LogView {
     pub offset: usize,
     pub follow: bool,
@@ -230,6 +346,7 @@ pub struct LogView {
     pub current_match: Option<usize>,
     pub drag_grab: Option<usize>,
     pub wheel_epoch: u64,
+    pub(crate) section_choices: HashMap<usize, bool>,
 }
 
 impl Default for LogView {
@@ -242,11 +359,84 @@ impl Default for LogView {
             current_match: None,
             drag_grab: None,
             wheel_epoch: 0,
+            section_choices: HashMap::new(),
         }
     }
 }
 
 impl LogView {
+    pub(crate) fn collapsed(&self, section: &Section) -> bool {
+        self.section_choices
+            .get(&section.row)
+            .copied()
+            .unwrap_or(section.collapsed)
+    }
+
+    pub(crate) fn row_map(&self, trace: &Trace) -> RowMap {
+        trace.ensure_index();
+        let index = trace.index.borrow();
+        let total = index.rows.len();
+        let mut map = RowMap {
+            total,
+            hidden: Vec::new(),
+            removed: 0,
+        };
+        let mut end = 0;
+        for section in &index.sections {
+            if section.row < end || section.row >= total || !self.collapsed(section) {
+                continue;
+            }
+            let start = section.row + 1;
+            end = section.end.unwrap_or(total).max(start).min(total);
+            if start < end {
+                map.hidden.push((start..end, map.removed));
+                map.removed += end - start;
+            }
+        }
+        map
+    }
+
+    /// Materialize rows only for callers explicitly requesting the full list.
+    /// Rendering and navigation use the sparse map instead.
+    pub fn visible_rows(&self, trace: &Trace) -> Vec<usize> {
+        let map = self.row_map(trace);
+        (0..map.len())
+            .filter_map(|position| map.source_at(position))
+            .collect()
+    }
+
+    pub fn visible_count(&self, trace: &Trace) -> usize {
+        trace.ensure_index();
+        let index = trace.index.borrow();
+        let total = index.rows.len();
+        let mut removed = 0;
+        let mut end = 0;
+        for section in &index.sections {
+            if section.row < end || section.row >= total || !self.collapsed(section) {
+                continue;
+            }
+            let start = section.row + 1;
+            end = section.end.unwrap_or(total).max(start).min(total);
+            removed += end - start;
+        }
+        total - removed
+    }
+
+    pub fn toggle_section(&mut self, trace: &Trace, row: usize, height: usize) {
+        let Some(section) = trace.section(row) else {
+            return;
+        };
+        let old = self.row_map(trace);
+        let anchor = old.source_at(self.position(old.len(), height)).unwrap_or(0);
+        self.section_choices.insert(row, !self.collapsed(&section));
+        let rows = self.row_map(trace);
+        self.offset = rows
+            .position_at(anchor)
+            .min(rows.len().saturating_sub(height.max(1)));
+        self.drag_grab = None;
+        self.wheel_epoch = self.wheel_epoch.wrapping_add(1);
+    }
+
     pub fn position(&self, total: usize, height: usize) -> usize {
         let max = total.saturating_sub(height.max(1));
         if self.follow {
@@ -288,7 +478,10 @@ impl LogView {
             self.current_match = None;
             return;
         }
-        let position = self.position(trace.line_count(), height);
+        let rows = self.row_map(trace);
+        let position = rows
+            .source_at(self.position(rows.len(), height))
+            .unwrap_or(0);
         let index = match self.current_match {
             Some(i) if backwards => (i + self.matches.len() - 1) % self.matches.len(),
             Some(i) => (i + 1) % self.matches.len(),
@@ -304,8 +497,17 @@ impl LogView {
                 .unwrap_or(0),
         };
         self.current_match = Some(index);
-        self.offset = self.matches[index].min(trace.line_count().saturating_sub(height.max(1)));
-        self.follow = self.offset == trace.line_count().saturating_sub(height.max(1));
+        let matched = self.matches[index];
+        let total = trace.line_count();
+        for section in &trace.index.borrow().sections {
+            if section.row < matched && matched < section.end.unwrap_or(total) {
+                self.section_choices.insert(section.row, false);
+            }
+        }
+        let rows = self.row_map(trace);
+        let max = rows.len().saturating_sub(height.max(1));
+        self.offset = rows.position_at(matched).min(max);
+        self.follow = self.offset == max;
     }
 
     pub fn reset(&mut self) {
@@ -313,6 +515,7 @@ impl LogView {
         self.follow = true;
         self.current_match = None;
         self.matches.clear();
+        self.section_choices.clear();
         self.drag_grab = None;
     }
 }
@@ -337,6 +540,117 @@ pub(super) fn scrollbar(total: usize, height: usize, offset: usize) -> (usize, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_row_map_matches_reference_and_scales_with_folds_not_lines() {
+        for total in 0..40 {
+            for start in 0..total {
+                for end in start..=total {
+                    let map = RowMap {
+                        total,
+                        hidden: vec![(start..end, 0)],
+                        removed: end - start,
+                    };
+                    let expected: Vec<_> =
+                        (0..total).filter(|r| !(start..end).contains(r)).collect();
+                    assert_eq!(map.len(), expected.len());
+                    for position in 0..=expected.len() {
+                        assert_eq!(map.source_at(position), expected.get(position).copied());
+                    }
+                    for source in 0..=total {
+                        assert_eq!(
+                            map.position_at(source),
+                            expected.partition_point(|&r| r < source)
+                        );
+                    }
+                }
+            }
+        }
+        let mut trace = Trace::default();
+        trace.append(&"line\n".repeat(1_000_000), false);
+        let view = LogView::default();
+        let map = view.row_map(&trace);
+        assert_eq!(map.len(), 1_000_000);
+        assert_eq!(view.visible_count(&trace), map.len());
+        assert_eq!(
+            map.hidden.capacity(),
+            0,
+            "section-free history has no mapping allocation"
+        );
+        assert_eq!(map.source_at(999_999), Some(999_999));
+        trace.append("\x1b[0Ksection_start:1:fold[collapsed=true]\rFold\n", false);
+        trace.append(&"hidden\n".repeat(10_000), false);
+        trace.append("\x1b[0Ksection_end:3:fold\r\nlast\n", false);
+        let map = view.row_map(&trace);
+        assert_eq!(map.hidden.len(), 1);
+        assert_eq!(map.len(), 1_000_002);
+        assert_eq!(map.source_at(1_000_001), Some(1_010_001));
+    }
+
+    #[test]
+    fn multiple_sparse_folds_update_with_streaming_and_choices() {
+        let mut trace = Trace::default();
+        trace.append("before\n\x1b[0Ksection_start:1:a[collapsed=true]\rA\na1\na2\n\x1b[0Ksection_end:2:a\r\x1b[0Ksection_start:3:b[collapsed=true]\rB\nb1\n", false);
+        let mut view = LogView::default();
+        assert_eq!(view.visible_rows(&trace), vec![0, 1, 4]);
+        trace.append("b2\n\x1b[0Ksection_end:5:b\rafter\n", false);
+        let map = view.row_map(&trace);
+        assert_eq!(map.hidden.len(), 2);
+        assert_eq!(view.visible_count(&trace), map.len());
+        let expected = [0, 1, 4, 7];
+        for (position, &source) in expected.iter().enumerate() {
+            assert_eq!(map.source_at(position), Some(source));
+        }
+        for source in 0..=8 {
+            assert_eq!(
+                map.position_at(source),
+                expected.partition_point(|&r| r < source)
+            );
+        }
+        view.toggle_section(&trace, 1, 1);
+        assert_eq!(view.visible_rows(&trace), vec![0, 1, 2, 3, 4, 7]);
+    }
+
+    #[test]
+    fn sections_handle_streaming_nested_repeated_names_and_search() {
+        let text = "\x1b[0Ksection_start:100:outer[collapsed=true]\r\x1b[0KOuter\n\x1b[0Ksection_start:101:inner\r\x1b[0KInner\nneedle\n\x1b[0Ksection_end:103:inner\r\x1b[0Ksection_end:165:outer\r\x1b[0Ksection_start:200:outer\r\x1b[0KAgain\nlast\n\x1b[0Ksection_end:199:outer\r\x1b[0K";
+        for split in 0..=text.len() {
+            let mut trace = Trace::default();
+            trace.append(&text[..split], false);
+            trace.append(&text[split..], false);
+            assert_eq!(trace.line_count(), 5, "split {split}");
+            assert_eq!(trace.plain_line(0), "Outer");
+            assert_eq!(trace.plain_line(3), "Again");
+            assert_eq!(trace.section(0).unwrap().duration, Some(65));
+            assert_eq!(trace.section(1).unwrap().duration, Some(2));
+            assert_eq!(trace.section(3).unwrap().duration, None);
+            let mut view = LogView {
+                query: "needle".into(),
+                ..LogView::default()
+            };
+            assert_eq!(view.visible_rows(&trace), vec![0, 3, 4]);
+            view.find(&trace, 1, false);
+            assert_eq!(view.offset, 2);
+            assert_eq!(view.visible_rows(&trace), vec![0, 1, 2, 3, 4]);
+            view.toggle_section(&trace, 0, 1);
+            assert_eq!(view.visible_rows(&trace), vec![0, 3, 4]);
+            trace.append("replacement\n", true);
+            view.reset();
+            assert_eq!(view.visible_rows(&trace), vec![0]);
+            assert!(trace.section(0).is_none());
+        }
+    }
+
+    #[test]
+    fn live_section_header_and_duration_update_without_a_final_newline() {
+        let mut trace = Trace::default();
+        trace.append("\x1b[0Ksection_start:1:live\rHeader", false);
+        assert_eq!(trace.plain_line(0), "Header");
+        assert_eq!(trace.section(0).unwrap().duration, None);
+        trace.append("\nbody\n\x1b[0Ksection_end:4:live\r", false);
+        assert_eq!(trace.section(0).unwrap().duration, Some(3));
+        assert_eq!(trace.line_count(), 2);
+    }
 
     #[test]
     fn trace_index_matches_source_lines_at_every_chunk_boundary() {

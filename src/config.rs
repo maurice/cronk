@@ -31,7 +31,7 @@ pub const THEMES: [&str; 11] = [
 ];
 
 use crate::filter::Query;
-use crate::fsx::{private_dir, restrict, sync_dir};
+use crate::fsx::{private_dir, restrict_handle, sync_dir};
 use crate::model::{ItemKey, ItemKind, LookupOption, Project, User};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -349,7 +349,7 @@ impl Config {
 
         let mut temporary =
             NamedTempFile::new_in(parent).context("create config temporary file")?;
-        restrict(temporary.path(), 0o600).context("restrict config permissions")?;
+        restrict_handle(temporary.as_file(), 0o600).context("restrict config permissions")?;
         temporary
             .write_all(source.as_bytes())
             .context("write config temporary file")?;
@@ -1052,6 +1052,25 @@ mod tests {
         } else {
             assert!(default_path().is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_symlinked_config_directory_keeps_working() {
+        // A dotfiles layout symlinking ~/.config/cronk at a real directory is
+        // ordinary, so the config writer must follow it rather than refuse.
+        // The content cache and navigation stores deliberately do the opposite.
+        use std::os::unix::fs::symlink;
+        let root = tempdir().unwrap();
+        let real = root.path().join("dotfiles/cronk");
+        fs::create_dir_all(&real).unwrap();
+        let linked = root.path().join("cronk");
+        symlink(&real, &linked).unwrap();
+
+        let path = linked.join("config.toml");
+        Config::default().save(&path).unwrap();
+        assert!(path.is_file());
+        assert!(fs::read_to_string(&path).unwrap().contains("gitlab_url"));
     }
 
     #[cfg(unix)]

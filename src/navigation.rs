@@ -5,7 +5,7 @@
 mod tests;
 use crate::{
     config::{Config, NAVIGATION_KEYS, TabState},
-    fsx::{hex_sha256, private_dir, private_file, reject_symlink},
+    fsx::{hex_sha256, private_dir, private_file, reject_symlink, sync_dir},
     model::ItemKey,
 };
 use anyhow::{Context, Result, bail};
@@ -214,18 +214,29 @@ pub(crate) fn database_path(workspace: &Path, installation: &str, demo: bool) ->
         .join(format!("{}.sqlite3", namespace(installation, demo)))
 }
 
+fn reject_navigation_symlink(path: &Path) -> Result<()> {
+    reject_symlink(path).with_context(|| {
+        format!(
+            "Navigation state path must not be a symlink: {}",
+            path.display()
+        )
+    })
+}
+
 fn open_database(path: &Path) -> Result<Connection> {
     let directory = path.parent().unwrap();
     // As with the content cache, restrict the private directory and database.
-    private_dir(directory)?;
-    reject_symlink(path)
-        .with_context(|| format!("Prepare navigation database {}", path.display()))?;
+    reject_navigation_symlink(directory)?;
+    private_dir(directory)
+        .with_context(|| format!("Prepare navigation directory {}", directory.display()))?;
+    reject_navigation_symlink(path)?;
     for suffix in ["-journal", "-wal", "-shm"] {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
-        reject_symlink(Path::new(&sidecar))?;
+        reject_navigation_symlink(Path::new(&sidecar))?;
     }
-    private_file(path)?;
+    private_file(path)
+        .with_context(|| format!("Prepare navigation database {}", path.display()))?;
     let mut db = Connection::open(path).context("open navigation database")?;
     db.busy_timeout(Duration::from_millis(250))?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -348,8 +359,7 @@ impl Writer {
                 // Both the database entry and a newly created .state directory
                 // must be durable before replacing the recoverable legacy file.
                 for directory in [directory, parent] {
-                    fs::File::open(directory)
-                        .and_then(|file| file.sync_all())
+                    sync_dir(directory)
                         .context("sync navigation directories before legacy cleanup")?;
                 }
             }

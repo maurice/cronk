@@ -41,9 +41,15 @@ pub(crate) fn reject_symlink(path: &Path) -> io::Result<()> {
 ///
 /// The mode is applied at creation and set again afterwards, so a permissive
 /// process umask cannot leave the directory group- or world-accessible even
-/// briefly. Existing permissions are tightened, never widened.
+/// briefly. `restrict` sets the mode outright rather than narrowing it, so a
+/// directory the owner deliberately made read-only (0500) becomes writable
+/// again; that is the intent here, since Cronk owns these directories.
+///
+/// Does not reject a symlink. Callers that must not follow one — the stores
+/// that live in a fixed location beside the workspace — call `reject_symlink`
+/// first. The config writer deliberately does not, so that a dotfiles layout
+/// symlinking the config directory keeps working.
 pub(crate) fn private_dir(directory: &Path) -> io::Result<()> {
-    reject_symlink(directory)?;
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -85,11 +91,32 @@ pub(crate) fn restrict(path: &Path, mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Owner-only permissions on an open handle. Preferable to `restrict` when the
+/// handle is already open, because it cannot be redirected by a symlink swapped
+/// in between the two calls.
+pub(crate) fn restrict_handle(file: &File, mode: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (file, mode);
+    Ok(())
+}
+
 /// Flush `directory` so a rename into it survives a crash.
+///
+/// Unix-only: opening a directory for sync is not portable, so elsewhere this
+/// is a no-op rather than a failure.
 pub(crate) fn sync_dir(directory: &Path) -> Result<()> {
+    #[cfg(unix)]
     File::open(directory)
         .and_then(|handle| handle.sync_all())
-        .with_context(|| format!("sync directory {}", directory.display()))
+        .with_context(|| format!("sync directory {}", directory.display()))?;
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -151,24 +178,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_paths_are_refused_and_their_targets_untouched() {
+    fn private_file_refuses_a_symlinked_path() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("secret"), "private original").unwrap();
-
-        let linked_dir = dir.path().join("linked-dir");
-        symlink(&target, &linked_dir).unwrap();
-        assert!(private_dir(&linked_dir).is_err());
+        fs::write(&target, "private original").unwrap();
 
         let linked_file = dir.path().join("linked-file");
-        symlink(target.join("secret"), &linked_file).unwrap();
+        symlink(&target, &linked_file).unwrap();
         assert!(private_file(&linked_file).is_err());
 
-        assert_eq!(
-            fs::read_to_string(target.join("secret")).unwrap(),
-            "private original"
+        assert_eq!(fs::read_to_string(&target).unwrap(), "private original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_dir_is_idempotent_and_restricts_missing_intermediates() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b");
+        private_dir(&nested).unwrap();
+        // Recreating an existing directory is not an error, and the mode holds.
+        private_dir(&nested).unwrap();
+        assert_eq!(mode(&nested), 0o700);
+        assert_eq!(mode(&dir.path().join("a")), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_handle_matches_restrict_on_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        let file = private_file(&path).unwrap();
+        restrict_handle(&file, 0o600).unwrap();
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn sync_dir_accepts_a_directory_and_reports_the_path_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        sync_dir(dir.path()).unwrap();
+
+        let missing = dir.path().join("absent");
+        let error = sync_dir(&missing).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("absent"),
+            "error should name the directory: {error:#}"
         );
     }
 

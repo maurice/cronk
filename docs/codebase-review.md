@@ -236,9 +236,19 @@ independently implement: symlink rejection → recursive mkdir 0700 →
 `navigation.rs:237` ("As with the content cache, restrict the private directory
 and database") is the code admitting it.
 
-One `src/fsx.rs` exporting `open_private_dir`, `open_private_file`,
-`private_tempfile` collapses it. The same file can host the duplicated
+One `src/fsx.rs` exporting `private_dir`, `private_file`, `restrict`,
+`sync_dir` and `hex_sha256` collapses it. The same file hosts the duplicated
 hex-SHA256 (`cache.rs:35` and `navigation.rs:47` are byte-identical).
+
+**One caveat, learned the hard way while landing this.** The three sites are
+not identical: `cache.rs` and `navigation.rs` reject a symlinked directory,
+but `config.rs` never did and must not — the config path is the one
+user-supplied path in the crate, so a dotfiles layout symlinking
+`~/.config/cronk` at a real directory is ordinary, and refusing it would break
+saving entirely. The shared helper therefore does *not* reject symlinks; the
+two stores that need it call `reject_symlink` first. Likewise, the directory
+fsync is `#[cfg(unix)]` in the helper, because opening a directory for sync is
+not portable and must stay a no-op elsewhere rather than becoming an error.
 
 ---
 
@@ -489,7 +499,7 @@ every PR is independently reviewable and reversible.
 
 | # | PR | Risk | Touches | Approx. effect |
 |---|---|---|---|---|
-| 1 | **Extract private-file + hash helpers** (`src/fsx.rs`) | Low | `cache.rs`, `navigation.rs`, `config.rs` | Deletes ~120 duplicated lines; host for hex-SHA256 |
+| 1 | **Extract private-file + hash helpers** (`src/fsx.rs`) — *done, #55* | Low | `cache.rs`, `navigation.rs`, `config.rs` | Deletes ~120 duplicated lines; host for hex-SHA256 |
 | 2 | **Extract test harness** (`tests/support/`) | Low | `tests/*.rs` (19 files) | Deletes several hundred duplicated lines; de-drifts tests |
 | 3 | **Extract `ui/format.rs` + `ui/theme.rs`**, unify `THEMES` | Low | `ui/view.rs`, `config.rs`, `model.rs` | ~750 lines become unit-testable; closes the theme footgun |
 | 4 | **Extract `gitlab/sanitizer.rs`** | Very low | `gitlab.rs` | ~190 lines out of the worst file; zero coupling |

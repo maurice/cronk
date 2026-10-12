@@ -1,6 +1,6 @@
 //! Private, credential-isolated SQLite content cache. No credentials or trace bodies are stored.
 use crate::{
-    fsx::{hex_sha256, private_dir, private_file},
+    fsx::{hex_sha256, private_dir, private_file, reject_symlink},
     model::{Details, ItemKey, ItemKind, WorkItem},
 };
 use anyhow::{Context, Result, bail};
@@ -36,6 +36,7 @@ impl ContentCache {
         // Changing tokens intentionally creates a cold cache. Never persist the token.
         let fingerprint = hex_sha256(format!("{installation}\0{token}"));
         let directory = workspace.with_extension("cache");
+        reject_symlink(&directory).context("Cache directory must not be a symlink")?;
         private_dir(&directory)
             .with_context(|| format!("Prepare cache directory {}", directory.display()))?;
         let path = directory.join(format!("{fingerprint}.sqlite3"));

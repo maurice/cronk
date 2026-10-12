@@ -5,12 +5,12 @@
 mod tests;
 use crate::{
     config::{Config, NAVIGATION_KEYS, TabState},
+    fsx::{hex_sha256, private_dir, private_file, reject_symlink},
     model::ItemKey,
 };
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -44,13 +44,6 @@ struct SavedTab {
     selection: Option<Selection>,
 }
 
-fn hash(value: impl AsRef<[u8]>) -> String {
-    Sha256::digest(value)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn identity(config: &Config, index: usize) -> String {
     if index < 4 {
         format!("builtin:{index}")
@@ -58,7 +51,7 @@ fn identity(config: &Config, index: usize) -> String {
         let view = &config.views[index - 4];
         format!(
             "view:{}",
-            hash(
+            hex_sha256(
                 serde_json::to_vec(&(view.name.as_str(), view.kind, view.query.as_str())).unwrap()
             )
         )
@@ -84,7 +77,7 @@ fn context(config: &Config, index: usize) -> String {
         .map(|p| (p.id, p.visible, p.issues_visible, p.merge_requests_visible))
         .collect();
     projects.sort_unstable();
-    hash(serde_json::to_vec(&(query, projects)).unwrap())
+    hex_sha256(serde_json::to_vec(&(query, projects)).unwrap())
 }
 
 impl Snapshot {
@@ -212,7 +205,7 @@ impl Snapshot {
 }
 
 fn namespace(installation: &str, demo: bool) -> String {
-    hash(format!("{}\0{demo}", installation.trim_end_matches('/')))
+    hex_sha256(format!("{}\0{demo}", installation.trim_end_matches('/')))
 }
 
 pub(crate) fn database_path(workspace: &Path, installation: &str, demo: bool) -> PathBuf {
@@ -221,52 +214,18 @@ pub(crate) fn database_path(workspace: &Path, installation: &str, demo: bool) ->
         .join(format!("{}.sqlite3", namespace(installation, demo)))
 }
 
-fn reject_symlink(path: &Path) -> Result<()> {
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!(
-            "Navigation state path must not be a symlink: {}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 fn open_database(path: &Path) -> Result<Connection> {
     let directory = path.parent().unwrap();
-    reject_symlink(directory)?;
     // As with the content cache, restrict the private directory and database.
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-    }
-    reject_symlink(path)?;
+    private_dir(directory)?;
+    reject_symlink(path)
+        .with_context(|| format!("Prepare navigation database {}", path.display()))?;
     for suffix in ["-journal", "-wal", "-shm"] {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
         reject_symlink(Path::new(&sidecar))?;
     }
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
+    private_file(path)?;
     let mut db = Connection::open(path).context("open navigation database")?;
     db.busy_timeout(Duration::from_millis(250))?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;

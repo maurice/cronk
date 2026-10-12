@@ -1,10 +1,12 @@
 //! Private, credential-isolated SQLite content cache. No credentials or trace bodies are stored.
-use crate::model::{Details, ItemKey, ItemKind, WorkItem};
+use crate::{
+    fsx::{hex_sha256, private_dir, private_file},
+    model::{Details, ItemKey, ItemKind, WorkItem},
+};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
-use sha2::{Digest, Sha256};
-use std::{fs, path::Path, sync::Mutex};
+use std::{path::Path, sync::Mutex};
 
 pub(crate) struct ContentCache(Mutex<Connection>);
 
@@ -32,37 +34,13 @@ impl ContentCache {
     pub fn open(workspace: &Path, installation: &str, token: &str) -> Result<Self> {
         // A credential fingerprint also isolates different scopes for the same user.
         // Changing tokens intentionally creates a cold cache. Never persist the token.
-        let fingerprint: String = Sha256::digest(format!("{installation}\0{token}"))
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let fingerprint = hex_sha256(format!("{installation}\0{token}"));
         let directory = workspace.with_extension("cache");
-        if fs::symlink_metadata(&directory).is_ok_and(|m| m.file_type().is_symlink()) {
-            bail!("Cache directory must not be a symlink");
-        }
-        fs::create_dir_all(&directory)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-        }
+        private_dir(&directory)
+            .with_context(|| format!("Prepare cache directory {}", directory.display()))?;
         let path = directory.join(format!("{fingerprint}.sqlite3"));
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-            bail!("Cache database must not be a symlink");
-        }
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options.open(&path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        }
+        private_file(&path)
+            .with_context(|| format!("Prepare cache database {}", path.display()))?;
         let connection = Connection::open(&path).context("Open content cache")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -383,6 +361,7 @@ impl ContentCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn credential_fingerprint_preserves_existing_cache_filename() {

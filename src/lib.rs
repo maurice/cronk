@@ -5,6 +5,7 @@ pub mod config;
 mod dates;
 pub mod demo;
 pub mod filter;
+mod fsx;
 pub mod gitlab;
 mod log_sections;
 pub mod model;

@@ -31,6 +31,7 @@ pub const THEMES: [&str; 11] = [
 ];
 
 use crate::filter::Query;
+use crate::fsx::{private_dir, restrict, sync_dir};
 use crate::model::{ItemKey, ItemKind, LookupOption, Project, User};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -343,27 +344,12 @@ impl Config {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
 
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(parent)
+        private_dir(parent)
             .with_context(|| format!("create config directory {}", parent.display()))?;
 
         let mut temporary =
             NamedTempFile::new_in(parent).context("create config temporary file")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            temporary
-                .as_file()
-                .set_permissions(fs::Permissions::from_mode(0o600))
-                .context("restrict config permissions")?;
-        }
+        restrict(temporary.path(), 0o600).context("restrict config permissions")?;
         temporary
             .write_all(source.as_bytes())
             .context("write config temporary file")?;
@@ -374,10 +360,7 @@ impl Config {
         temporary
             .persist(path)
             .with_context(|| format!("replace config {}", path.display()))?;
-        #[cfg(unix)]
-        fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| format!("sync config directory {}", parent.display()))?;
+        sync_dir(parent)?;
         Ok(())
     }
 

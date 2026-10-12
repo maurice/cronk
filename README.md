@@ -313,4 +313,6 @@ Module layout:
 - `tests/scrollbars.rs`: scrollbar geometry, dragging, scrolling, resize/refresh, and dialog-focus regression tests.
 - `src/ui/completion.rs`, `tests/autocomplete.rs`: comma-aware identity resolution, lookup scheduling, and autocomplete regression tests.
 
+An in-depth review of this layout — proposed reorganisation of the large modules and a list of Rust conventions to tighten — is in [docs/codebase-review.md](docs/codebase-review.md). It is a proposal, not a description of the current state.
+
 Licensed under Apache-2.0. tui-lipan is a separate MPL-2.0 dependency; using it does not change this application's license.

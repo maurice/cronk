@@ -5,7 +5,7 @@
 mod tests;
 use crate::{
     config::{Config, NAVIGATION_KEYS, TabState},
-    fsx::{hex_sha256, private_dir, private_file, reject_symlink, sync_dir},
+    fsx::{hex_sha256, owned_dir, private_file, reject_symlink, sync_dir},
     model::ItemKey,
 };
 use anyhow::{Context, Result, bail};
@@ -215,26 +215,21 @@ pub(crate) fn database_path(workspace: &Path, installation: &str, demo: bool) ->
 }
 
 fn reject_navigation_symlink(path: &Path) -> Result<()> {
-    reject_symlink(path).with_context(|| {
-        format!(
-            "Navigation state path must not be a symlink: {}",
-            path.display()
-        )
-    })
+    reject_symlink(path).context("Navigation state path")
 }
 
 fn open_database(path: &Path) -> Result<Connection> {
     let directory = path.parent().unwrap();
     // As with the content cache, restrict the private directory and database.
     reject_navigation_symlink(directory)?;
-    private_dir(directory)
+    owned_dir(directory)
         .with_context(|| format!("Prepare navigation directory {}", directory.display()))?;
-    reject_navigation_symlink(path)?;
     for suffix in ["-journal", "-wal", "-shm"] {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
         reject_navigation_symlink(Path::new(&sidecar))?;
     }
+    // private_file refuses a symlinked database itself, so no separate check.
     private_file(path)
         .with_context(|| format!("Prepare navigation database {}", path.display()))?;
     let mut db = Connection::open(path).context("open navigation database")?;

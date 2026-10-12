@@ -236,19 +236,27 @@ independently implement: symlink rejection → recursive mkdir 0700 →
 `navigation.rs:237` ("As with the content cache, restrict the private directory
 and database") is the code admitting it.
 
-One `src/fsx.rs` exporting `private_dir`, `private_file`, `restrict`,
-`sync_dir` and `hex_sha256` collapses it. The same file hosts the duplicated
-hex-SHA256 (`cache.rs:35` and `navigation.rs:47` are byte-identical).
+One `src/fsx.rs` exporting `reject_symlink`, `private_dir`, `owned_dir`,
+`private_file`, `restrict_handle`, `sync_dir` and `hex_sha256` collapses it.
+The same file hosts the duplicated hex-SHA256 (`cache.rs:35` and
+`navigation.rs:47` are byte-identical).
 
 **One caveat, learned the hard way while landing this.** The three sites are
-not identical: `cache.rs` and `navigation.rs` reject a symlinked directory,
-but `config.rs` never did and must not — the config path is the one
-user-supplied path in the crate, so a dotfiles layout symlinking
-`~/.config/cronk` at a real directory is ordinary, and refusing it would break
-saving entirely. The shared helper therefore does *not* reject symlinks; the
-two stores that need it call `reject_symlink` first. Likewise, the directory
-fsync is `#[cfg(unix)]` in the helper, because opening a directory for sync is
-not portable and must stay a no-op elsewhere rather than becoming an error.
+not the same, and flattening them into one helper introduces two regressions:
+
+- `cache.rs` and `navigation.rs` reject a symlinked directory and re-apply 0700
+  to one that already exists. `config.rs` does **neither** — and must not. The
+  config path is the one user-supplied path in the crate: a dotfiles layout
+  symlinking `~/.config/cronk` is ordinary, and `--config config.toml` resolves
+  its parent to the *working directory*. Re-permissioning either would change
+  something the user owns. Hence two helpers: `owned_dir` (Cronk-owned, enforce
+  0700) and `private_dir` (caller-supplied, create 0700 but leave an existing
+  directory alone), with symlink rejection left to the caller.
+- The directory fsync was `#[cfg(unix)]` at the call site, guard and `?`
+  included. Opening a directory for sync is not portable, so on Windows the
+  original *skipped* the step; hoisting it into an unguarded helper turned a
+  skip into an error and would have failed every config save. The guard has to
+  travel with the code.
 
 ---
 

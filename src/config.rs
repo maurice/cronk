@@ -1056,6 +1056,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn saving_does_not_repermission_an_existing_parent_directory() {
+        // `--config config.toml` resolves its parent to the working directory,
+        // and `--config /shared/cronk.toml` to a directory the user may share.
+        // Neither belongs to Cronk, so neither may be re-permissioned.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+
+        Config::default()
+            .save(&shared.join("workspace.toml"))
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn saving_through_a_symlinked_config_directory_keeps_working() {
         // A dotfiles layout symlinking ~/.config/cronk at a real directory is
         // ordinary, so the config writer must follow it rather than refuse.

@@ -3954,7 +3954,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
     } else {
         body
     };
-    Element::from(
+    let modal = Element::from(
         Modal::new()
             .title(dialog.title.clone())
             .width(Length::Px(ctx.viewport().w.saturating_sub(4).clamp(1, 88)))
@@ -3969,7 +3969,11 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             .on_close(ctx.link().callback(|_| Msg::CloseDialog))
             .child(body),
     )
-    .key("dialog")
+    .key("dialog");
+    // The root portal's node carries no rectangle of its own, and tui-lipan treats a
+    // passthrough layer's siblings as covering its scrollbar. Without a sized layer here,
+    // the dialog body's scrollbar stops accepting drags and page clicks.
+    Frame::new().child(modal).into()
 }
 
 fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: Colors) -> Element {

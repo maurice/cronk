@@ -3970,10 +3970,12 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             .child(body),
     )
     .key("dialog");
-    // The root portal's node carries no rectangle of its own, and tui-lipan treats a
-    // passthrough layer's siblings as covering its scrollbar. Without a sized layer here,
-    // the dialog body's scrollbar stops accepting drags and page clicks.
-    Frame::new().child(modal).into()
+    // The root portal's placeholder node is reconciled with `Rect::default()`, so the
+    // scrollbar zone walk treats the dialog as not covering its own scrollbar column and
+    // the body scrollbar stops accepting drags and page clicks. This sized, invisible layer
+    // gives the walk an ancestor that really does contain the column. `Frame` defaults to a
+    // border, which would draw a box around the whole app, so it is switched off here.
+    Frame::new().border(false).child(modal).into()
 }
 
 fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: Colors) -> Element {

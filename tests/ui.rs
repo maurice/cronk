@@ -409,6 +409,9 @@ fn numbered_views_config(count: usize) -> Config {
     }
 }
 
+// `alt_side` stays Unknown on purpose. Cronk reads only the aggregate flags, so the
+// physical Alt side cannot change any of these outcomes; enumerating it would triple
+// the runtime of two already-slow sweeps for no added assertion.
 fn modifier_combinations() -> impl Iterator<Item = KeyMods> {
     (0..16).map(|bits| KeyMods {
         ctrl: bits & 1 != 0,

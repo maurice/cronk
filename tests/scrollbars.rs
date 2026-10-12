@@ -13,6 +13,8 @@ use tui_lipan::{
     prelude::*,
 };
 
+type Frame = tui_lipan::capture::CapturedFrame;
+
 type Ui = TestBackend<Cronk>;
 
 const THEMES: [&str; 3] = ["midnight", "dracula", "light"];
@@ -1607,8 +1609,7 @@ fn detail_discussion_click_focuses_the_correct_inline_thread_for_reply_and_resol
 
 // Modal is a portal, so locate its actual rounded frame rather than assuming that
 // rect_of_key("dialog") is the inner viewport. Cronk uses one border and one padding cell.
-fn dialog_body(ui: &Ui) -> Rect {
-    let frame = ui.capture_frame();
+fn modal_frame(frame: &Frame) -> Rect {
     let (left, top) = (0..frame.height)
         .find_map(|y| {
             (0..frame.width)
@@ -1623,10 +1624,50 @@ fn dialog_body(ui: &Ui) -> Rect {
         .find(|&y| frame.cell(right, y).symbol == "╯")
         .unwrap();
     Rect {
-        x: (left + 2) as i16,
-        y: (top + 2) as i16,
-        w: right - left - 3,
-        h: bottom - top - 3,
+        x: left as i16,
+        y: top as i16,
+        w: right - left + 1,
+        h: bottom - top + 1,
+    }
+}
+
+fn dialog_body(ui: &Ui) -> Rect {
+    let modal = modal_frame(&ui.capture_frame());
+    Rect {
+        x: modal.x + 2,
+        y: modal.y + 2,
+        w: modal.w - 4,
+        h: modal.h - 4,
+    }
+}
+
+#[test]
+fn opening_a_dialog_leaves_the_workspace_chrome_untouched() {
+    let mut ui = mount(config(2, "midnight"), 100, 24);
+    let before: Vec<Vec<String>> = (0..24)
+        .map(|y| {
+            (0..100)
+                .map(|x| ui.capture_frame().cell(x, y).symbol.clone())
+                .collect()
+        })
+        .collect();
+    key(&mut ui, KeyCode::Char(':'));
+    let frame = ui.capture_frame();
+    let modal = modal_frame(&frame);
+    // The dialog reaches the pointer through a sized, invisible layer so its scrollbar
+    // stays targetable. A styled or bordered layer would repaint the whole terminal.
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            if modal.contains(x as i16, y as i16) {
+                continue;
+            }
+            assert_eq!(
+                frame.cell(x, y).symbol,
+                before[y as usize][x as usize],
+                "cell ({x},{y}) changed outside the modal:\n{}",
+                frame.plain_text()
+            );
+        }
     }
 }
 

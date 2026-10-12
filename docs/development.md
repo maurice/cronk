@@ -42,3 +42,9 @@ CI (`.github/workflows/ci.yml`) uses `.github/actions/setup` (just, mise tools, 
 - Prefer `check --lib` for compile feedback, and batch edits before testing.
 - Keep build flags and profiles stable; switching them or running `cargo clean` forces rebuilds.
 - `[profile.dev] debug = 1` keeps line-number backtraces with less debug data to generate and link.
+
+## Codebase review
+
+[codebase-review.md](codebase-review.md) is a one-off review of the source layout: how to reorganise the large modules (`gitlab.rs`, `ui/view.rs`, `ui/controller.rs`) so a given aspect of the app is easy to locate, plus a list of Rust/TUI conventions worth tightening. It ends with a table of suggested self-contained PR slices.
+
+It is a proposal, not a description of the current state, and it is not a to-do list that must be worked through in order.

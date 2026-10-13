@@ -377,6 +377,80 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn opening_creates_a_private_directory_and_database() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace.toml");
+        let cache = ContentCache::open(&workspace, "https://example.test", "secret").unwrap();
+        let directory = workspace.with_extension("cache");
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let db = fs::read_dir(&directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::metadata(&db).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(cache);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_refuses_a_symlinked_directory_or_database() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace.toml");
+        let target = dir.path().join("do-not-touch");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("secret"), "private original").unwrap();
+
+        // A symlinked cache directory is refused outright. Assert the reason,
+        // not merely that it failed: following the link instead would fail
+        // later with an unrelated SQLite error and still look like success here.
+        symlink(&target, workspace.with_extension("cache")).unwrap();
+        let error = ContentCache::open(&workspace, "https://example.test", "secret")
+            .err()
+            .expect("a symlinked cache directory must be refused");
+        assert!(
+            format!("{error:#}").contains("symlink"),
+            "expected a symlink refusal, got: {error:#}"
+        );
+
+        // So is a symlinked database, named by its real fingerprint.
+        fs::remove_file(workspace.with_extension("cache")).unwrap();
+        ContentCache::open(&workspace, "https://example.test", "secret").unwrap();
+        for entry in fs::read_dir(workspace.with_extension("cache")).unwrap() {
+            fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        symlink(
+            target.join("secret"),
+            workspace
+                .with_extension("cache")
+                .join("67034df2a0443843676e092f86f89219c2ffc1ff8014f6af6a6c22641702e2ed.sqlite3"),
+        )
+        .unwrap();
+        let error = ContentCache::open(&workspace, "https://example.test", "secret")
+            .err()
+            .expect("a symlinked cache database must be refused");
+        assert!(
+            format!("{error:#}").contains("symlink"),
+            "expected a symlink refusal, got: {error:#}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(target.join("secret")).unwrap(),
+            "private original"
+        );
+    }
+
     fn item(iid: u64) -> WorkItem {
         WorkItem {
             key: ItemKey {

@@ -31,7 +31,7 @@ pub const THEMES: [&str; 11] = [
 ];
 
 use crate::filter::Query;
-use crate::fsx::{private_dir, restrict_handle, sync_dir};
+use crate::fsx::{is_symlink, private_dir, set_mode_handle, sync_dir};
 use crate::model::{ItemKey, ItemKind, LookupOption, Project, User};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -311,8 +311,7 @@ impl Config {
             document.remove(key);
         }
         if !migrated {
-            let destination_symlink =
-                fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+            let destination_symlink = is_symlink(path);
             match fs::read_to_string(path) {
                 Ok(source) => {
                     // Replacing a symlink never modifies its target. Preserve
@@ -349,7 +348,7 @@ impl Config {
 
         let mut temporary =
             NamedTempFile::new_in(parent).context("create config temporary file")?;
-        restrict_handle(temporary.as_file(), 0o600).context("restrict config permissions")?;
+        set_mode_handle(temporary.as_file(), 0o600).context("restrict config permissions")?;
         temporary
             .write_all(source.as_bytes())
             .context("write config temporary file")?;
@@ -360,7 +359,7 @@ impl Config {
         temporary
             .persist(path)
             .with_context(|| format!("replace config {}", path.display()))?;
-        sync_dir(parent)?;
+        sync_dir(parent).with_context(|| format!("sync config directory {}", parent.display()))?;
         Ok(())
     }
 

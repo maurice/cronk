@@ -9,11 +9,15 @@
 //! and an attacker cannot redirect them.
 //!
 //! The config path is neither owned nor private by contract: it is whatever
-//! `--config` names. Its directory is created owner-only if missing but an
+//! `--config` names. Its directory is created owner-only if missing, but an
 //! existing one keeps the permissions its owner gave it, and a symlinked
-//! directory or file is followed rather than refused, so that a dotfiles
-//! layout keeps working.
-use anyhow::{Context, Result};
+//! directory is followed so that a dotfiles layout keeps working. A symlinked
+//! destination *file* is different again: the atomic rename replaces the link
+//! rather than writing through it, leaving whatever it pointed at untouched.
+//!
+//! `hex_sha256` lives here rather than with the other models because it is what
+//! names these stores on disk: the value must stay stable or every existing
+//! cache is silently abandoned.
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -30,14 +34,18 @@ pub(crate) fn hex_sha256(value: impl AsRef<[u8]>) -> String {
         .collect()
 }
 
+/// Whether `path` is itself a symlink. Missing paths are not.
+pub(crate) fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
 /// Reject a path that is a symlink, so creating or opening it cannot write
-/// through to a target someone else chose. Missing paths are fine: this guards
-/// creation, not existence.
+/// through to a target someone else chose.
 ///
 /// The message names the rule and the path but not the kind of store; callers
 /// add that as context so it appears once.
 pub(crate) fn reject_symlink(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+    if is_symlink(path) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("must not be a symlink: {}", path.display()),
@@ -48,10 +56,12 @@ pub(crate) fn reject_symlink(path: &Path) -> io::Result<()> {
 
 /// Create `directory` and any missing parents with mode 0700.
 ///
-/// An existing directory keeps the permissions its owner gave it — only newly
-/// created components get 0700. Use this for a caller-supplied path such as
-/// the config parent, which Cronk does not own and must not re-permission.
-/// Use `owned_dir` for directories Cronk created and is responsible for.
+/// Every level created along the way gets 0700, not just the leaf, so a
+/// world-traversable ancestor cannot expose a store created beneath it.
+///
+/// An existing directory keeps the permissions its owner gave it. Use this for
+/// a caller-supplied path such as the config parent, which Cronk does not own
+/// and must not re-permission. Use `owned_dir` for directories Cronk owns.
 ///
 /// Does not reject a symlink.
 pub(crate) fn private_dir(directory: &Path) -> io::Result<()> {
@@ -65,28 +75,24 @@ pub(crate) fn private_dir(directory: &Path) -> io::Result<()> {
     builder.create(directory)
 }
 
-/// Create `directory` and any missing parents, owner-only (0700), and enforce
+/// Create `directory` and any missing parents as `owned_dir` does, and enforce
 /// 0700 even if the directory already existed.
 ///
 /// This is for directories Cronk owns, where an earlier run or a stray tool may
-/// have left the mode wider than intended. `restrict` sets the mode outright
-/// rather than narrowing it, so a directory the owner deliberately made
-/// read-only (0500) becomes writable again.
-///
-/// Does not reject a symlink; callers that need that call `reject_symlink`
-/// first.
+/// have left the mode wider than intended.
 pub(crate) fn owned_dir(directory: &Path) -> io::Result<()> {
     private_dir(directory)?;
-    restrict(directory, 0o700)
+    set_mode(directory, 0o700)
 }
 
-/// Open `path` for writing without truncating it, owner-only (0600), creating
-/// it if absent. The mode is applied at creation and set again afterwards so
-/// an existing file with wider permissions is tightened.
+/// Create `path` if absent and make it owner-only (0600), without truncating
+/// what is already there.
 ///
 /// Refuses a symlink, so it is safe for the SQLite databases that name
-/// themselves from a fingerprint. Does not validate the directory.
-pub(crate) fn private_file(path: &Path) -> io::Result<File> {
+/// themselves from a fingerprint. The mode is set on the open handle rather
+/// than by path, so it cannot be redirected by a link swapped in between. Does
+/// not validate the containing directory.
+pub(crate) fn private_file(path: &Path) -> io::Result<()> {
     reject_symlink(path)?;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false);
@@ -96,14 +102,13 @@ pub(crate) fn private_file(path: &Path) -> io::Result<File> {
         options.mode(0o600);
     }
     let file = options.open(path)?;
-    restrict(path, 0o600)?;
-    Ok(file)
+    set_mode_handle(&file, 0o600)
 }
 
-/// Owner-only permissions on `path`: 0700 for directories, 0600 for files.
-/// Sets the mode outright rather than narrowing it. A no-op off unix, where
-/// these modes do not exist.
-fn restrict(path: &Path, mode: u32) -> io::Result<()> {
+/// Set `path`'s mode outright — this does not narrow it, so a file the owner
+/// deliberately made read-only (0400) becomes writable again. That is the
+/// intent for files Cronk owns. A no-op off unix, where modes do not exist.
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -114,10 +119,9 @@ fn restrict(path: &Path, mode: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// Owner-only permissions on an open handle. Preferable to `restrict` when the
-/// handle is already open, because it cannot be redirected by a symlink swapped
-/// in between the two calls.
-pub(crate) fn restrict_handle(file: &File, mode: u32) -> io::Result<()> {
+/// Owner-only permissions on an open handle: 0700 for directories, 0600 for
+/// files. Sets the mode outright, as `set_mode` does.
+pub(crate) fn set_mode_handle(file: &File, mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -131,12 +135,10 @@ pub(crate) fn restrict_handle(file: &File, mode: u32) -> io::Result<()> {
 /// Flush `directory` so a rename into it survives a crash.
 ///
 /// Unix-only: opening a directory for sync is not portable, so elsewhere this
-/// is a no-op rather than a failure.
-pub(crate) fn sync_dir(directory: &Path) -> Result<()> {
+/// is a no-op rather than a failure, and callers must not depend on it.
+pub(crate) fn sync_dir(directory: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    File::open(directory)
-        .and_then(|handle| handle.sync_all())
-        .with_context(|| format!("sync directory {}", directory.display()))?;
+    File::open(directory)?.sync_all()?;
     #[cfg(not(unix))]
     let _ = directory;
     Ok(())
@@ -145,6 +147,7 @@ pub(crate) fn sync_dir(directory: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
 
     #[test]
     fn hex_sha256_is_stable_and_matches_the_known_digest() {
@@ -163,16 +166,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn private_dir_and_file_are_owner_only() {
+    fn private_dir_creates_every_missing_level_at_0700() {
         let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join("a").join("b");
+        let nested = dir.path().join("a").join("b").join("c");
         private_dir(&nested).unwrap();
+        assert_eq!(mode(&dir.path().join("a")), 0o700);
+        assert_eq!(mode(&dir.path().join("a/b")), 0o700);
         assert_eq!(mode(&nested), 0o700);
-
-        let path = nested.join("state");
-        private_file(&path).unwrap();
-        assert_eq!(mode(&path), 0o600);
-        assert!(path.is_file());
+        // Recreating an existing directory is not an error.
+        private_dir(&nested).unwrap();
     }
 
     #[cfg(unix)]
@@ -180,10 +182,11 @@ mod tests {
     fn owned_dir_tightens_wider_existing_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("state")).unwrap();
-        fs::set_permissions(dir.path().join("state"), fs::Permissions::from_mode(0o777)).unwrap();
-        owned_dir(&dir.path().join("state")).unwrap();
-        assert_eq!(mode(&dir.path().join("state")), 0o700);
+        let state = dir.path().join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o777)).unwrap();
+        owned_dir(&state).unwrap();
+        assert_eq!(mode(&state), 0o700);
     }
 
     #[cfg(unix)]
@@ -216,38 +219,42 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn private_file_refuses_a_symlinked_path() {
+    fn private_file_refuses_a_symlinked_path_and_leaves_the_link() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         fs::write(&target, "private original").unwrap();
 
-        let linked_file = dir.path().join("linked-file");
-        symlink(&target, &linked_file).unwrap();
-        assert!(private_file(&linked_file).is_err());
+        let linked = dir.path().join("linked-file");
+        symlink(&target, &linked).unwrap();
 
+        let error = private_file(&linked).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("linked-file"), "{error}");
+        // The link itself survives, so the refusal is recoverable.
+        assert!(is_symlink(&linked));
         assert_eq!(fs::read_to_string(&target).unwrap(), "private original");
     }
 
     #[cfg(unix)]
     #[test]
-    fn private_dir_is_idempotent_and_restricts_missing_intermediates() {
-        let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join("a").join("b");
-        private_dir(&nested).unwrap();
-        // Recreating an existing directory is not an error, and the mode holds.
-        private_dir(&nested).unwrap();
-        assert_eq!(mode(&nested), 0o700);
-        assert_eq!(mode(&dir.path().join("a")), 0o700);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn restrict_handle_matches_restrict_on_the_same_file() {
+    fn set_mode_handle_matches_set_mode() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state");
-        let file = private_file(&path).unwrap();
-        restrict_handle(&file, 0o600).unwrap();
+
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        set_mode_handle(&file, 0o600).unwrap();
+        assert_eq!(mode(&path), 0o600);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        set_mode(&path, 0o600).unwrap();
         assert_eq!(mode(&path), 0o600);
     }
 
@@ -258,11 +265,7 @@ mod tests {
         sync_dir(dir.path()).unwrap();
 
         let missing = dir.path().join("absent");
-        let error = sync_dir(&missing).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("absent"),
-            "error should name the directory: {error:#}"
-        );
+        assert!(sync_dir(&missing).is_err());
     }
 
     #[cfg(not(unix))]

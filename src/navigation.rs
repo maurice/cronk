@@ -224,12 +224,14 @@ fn open_database(path: &Path) -> Result<Connection> {
     reject_navigation_symlink(directory)?;
     owned_dir(directory)
         .with_context(|| format!("Prepare navigation directory {}", directory.display()))?;
+    reject_navigation_symlink(path)?;
     for suffix in ["-journal", "-wal", "-shm"] {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
         reject_navigation_symlink(Path::new(&sidecar))?;
     }
-    // private_file refuses a symlinked database itself, so no separate check.
+    // private_file re-checks the database symlink itself; this keeps the
+    // reported culprit the database rather than the first sidecar.
     private_file(path)
         .with_context(|| format!("Prepare navigation database {}", path.display()))?;
     let mut db = Connection::open(path).context("open navigation database")?;

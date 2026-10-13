@@ -228,35 +228,38 @@ disappears.
 
 ## 1e. Consolidate the "private file" helper
 
-This is the clearest piece of textual duplication in the repo.
-`cache.rs:39–65`, `navigation.rs:236–269`, and `config.rs:346–380` each
-independently implement: symlink rejection → recursive mkdir 0700 →
-`set_permissions(0700)` → `OpenOptions` mode 0600 → `set_permissions(0600)` →
-`user_version` gate → PRAGMAs. ~120 lines, three times. The comment at
-`navigation.rs:237` ("As with the content cache, restrict the private directory
-and database") is the code admitting it.
+This is the clearest piece of textual duplication in the repo. `cache.rs` and
+`navigation.rs` each independently implemented the same chain: reject a
+symlink → create the directory 0700 → re-apply `set_permissions(0700)` → open
+the database with `OpenOptions` mode 0600 → re-apply `set_permissions(0600)`.
+`config.rs` shares the first three steps. The comment in `navigation.rs` ("As
+with the content cache, restrict the private directory and database") is the
+code admitting it. The two hand-rolled hex-SHA-256 helpers were byte-identical.
 
-One `src/fsx.rs` exporting `reject_symlink`, `private_dir`, `owned_dir`,
-`private_file`, `restrict_handle`, `sync_dir` and `hex_sha256` collapses it.
-The same file hosts the duplicated hex-SHA256 (`cache.rs:35` and
-`navigation.rs:47` are byte-identical).
+One `src/fsx.rs` — exporting `is_symlink`, `reject_symlink`, `private_dir`,
+`owned_dir`, `private_file`, `set_mode_handle`, `sync_dir` and `hex_sha256` —
+collapses the first five steps of that chain. It does **not** collapse the
+`user_version` gate and PRAGMA block, which `cache.rs` and `navigation.rs`
+still duplicate verbatim; that is the natural follow-up if these are ever
+unified further.
 
-**One caveat, learned the hard way while landing this.** The three sites are
-not the same, and flattening them into one helper introduces two regressions:
+**Caveat, learned the hard way while landing this.** The three sites are not
+the same, and flattening them into one helper introduces real regressions:
 
 - `cache.rs` and `navigation.rs` reject a symlinked directory and re-apply 0700
   to one that already exists. `config.rs` does **neither** — and must not. The
   config path is the one user-supplied path in the crate: a dotfiles layout
   symlinking `~/.config/cronk` is ordinary, and `--config config.toml` resolves
-  its parent to the *working directory*. Re-permissioning either would change
-  something the user owns. Hence two helpers: `owned_dir` (Cronk-owned, enforce
-  0700) and `private_dir` (caller-supplied, create 0700 but leave an existing
-  directory alone), with symlink rejection left to the caller.
+  its parent to the *working directory*. Re-permissioning or refusing either
+  would change something the user owns. Hence two helpers: `owned_dir`
+  (Cronk-owned, enforce 0700) and `private_dir` (caller-supplied, create 0700
+  but leave an existing directory alone), with symlink rejection left to the
+  caller.
 - The directory fsync was `#[cfg(unix)]` at the call site, guard and `?`
   included. Opening a directory for sync is not portable, so on Windows the
   original *skipped* the step; hoisting it into an unguarded helper turned a
   skip into an error and would have failed every config save. The guard has to
-  travel with the code.
+  travel with the code — including into any test that asserts its behaviour.
 
 ---
 

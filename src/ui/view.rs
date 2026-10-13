@@ -3954,7 +3954,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
     } else {
         body
     };
-    Element::from(
+    let modal = Element::from(
         Modal::new()
             .title(dialog.title.clone())
             .width(Length::Px(ctx.viewport().w.saturating_sub(4).clamp(1, 88)))
@@ -3969,7 +3969,14 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             .on_close(ctx.link().callback(|_| Msg::CloseDialog))
             .child(body),
     )
-    .key("dialog")
+    .key("dialog");
+    // Keep a full-viewport anchor for the RootPortal so layered hit-testing does not
+    // treat the shell underneath as the top interactive sibling over dialog scrollbars.
+    Center::new()
+        .width(Size::Percent(100))
+        .height(Size::Percent(100))
+        .child(modal)
+        .into()
 }
 
 fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: Colors) -> Element {

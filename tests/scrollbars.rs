@@ -14,6 +14,7 @@ use tui_lipan::{
 };
 
 type Frame = tui_lipan::capture::CapturedFrame;
+type Cell = tui_lipan::capture::CapturedCell;
 
 type Ui = TestBackend<Cronk>;
 
@@ -1644,10 +1645,11 @@ fn dialog_body(ui: &Ui) -> Rect {
 #[test]
 fn opening_a_dialog_leaves_the_workspace_chrome_untouched() {
     let mut ui = mount(config(2, "midnight"), 100, 24);
-    let before: Vec<Vec<String>> = (0..24)
+    let baseline = ui.capture_frame();
+    let before: Vec<Vec<Cell>> = (0..baseline.height)
         .map(|y| {
-            (0..100)
-                .map(|x| ui.capture_frame().cell(x, y).symbol.clone())
+            (0..baseline.width)
+                .map(|x| baseline.cell(x, y).clone())
                 .collect()
         })
         .collect();
@@ -1655,15 +1657,16 @@ fn opening_a_dialog_leaves_the_workspace_chrome_untouched() {
     let frame = ui.capture_frame();
     let modal = modal_frame(&frame);
     // The dialog reaches the pointer through a sized, invisible layer so its scrollbar
-    // stays targetable. A styled or bordered layer would repaint the whole terminal.
+    // stays targetable. Anything that made that layer paint - a border, or a background -
+    // would repaint the whole terminal, so compare the styled cell, not just its glyph.
     for y in 0..frame.height {
         for x in 0..frame.width {
             if modal.contains(x as i16, y as i16) {
                 continue;
             }
             assert_eq!(
-                frame.cell(x, y).symbol,
-                before[y as usize][x as usize],
+                frame.cell(x, y),
+                &before[y as usize][x as usize],
                 "cell ({x},{y}) changed outside the modal:\n{}",
                 frame.plain_text()
             );

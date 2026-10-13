@@ -3970,11 +3970,13 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             .child(body),
     )
     .key("dialog");
-    // The root portal's placeholder node is reconciled with `Rect::default()`, so the
-    // scrollbar zone walk treats the dialog as not covering its own scrollbar column and
-    // the body scrollbar stops accepting drags and page clicks. This sized, invisible layer
-    // gives the walk an ancestor that really does contain the column. `Frame` defaults to a
-    // border, which would draw a box around the whole app, so it is switched off here.
+    // Since tui-lipan 0.18.3, a scrollbar under a layered container is only reachable when it is
+    // the topmost child covering that cell. The root portal's placeholder is reconciled with
+    // `Rect::default()`, so it can never win that comparison and the body scrollbar stops
+    // accepting drags and page clicks. This layer takes the portal's place in the walk: it is
+    // the dialog's last layer, so it is also the last entry matched by the reversed scan, and
+    // adding another layer after the dialog would let that one win instead. Keep the dialog
+    // last. `Frame` defaults to a border and would draw a box around the whole app.
     Frame::new().border(false).child(modal).into()
 }
 

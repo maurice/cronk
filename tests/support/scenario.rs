@@ -73,7 +73,9 @@ impl Drop for StepGuard {
     }
 }
 
-/// Run one isolated story inside a normal `#[test]`.
+/// Run one complete story inside a normal `#[test]`, including all assertions
+/// about its outcome. Returns no value: fixtures returned by Given belong
+/// inside this story, with outcome checks in Then/And rather than afterwards.
 #[track_caller]
 pub fn scenario(description: &str, body: impl FnOnce()) {
     CURRENT.with(|current| {

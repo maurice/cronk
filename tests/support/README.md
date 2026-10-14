@@ -21,8 +21,10 @@ Rust's `tests/` directory contains separate test binaries; it is not a promise
 that every test there is functional or end-to-end. For example,
 `pipeline_refresh_cadence_defaults_to_twice_the_list_cadence` stays a plain
 configuration test even though it shares a file with pipeline UI scenarios.
-The tests in `tests/scenarios.rs` are plain unit-style tests of the step helpers
-themselves; their calls to the helpers are the code under test.
+The tests in `tests/scenario_helpers.rs` are plain unit-style tests of the step
+helpers themselves; their calls to the helpers are the code under test. Tests
+of deliberately failing scenarios check the caught panic afterwards—this tests
+the helper's failure handling, not a pattern for functional scenarios.
 
 The current UI scenarios run the integrated app in a fake terminal with demo
 data. They are headless functional tests, not full end-to-end tests against
@@ -78,6 +80,9 @@ temporary directory. Keep temporary directories alive for the whole scenario.
 - Put the starting conditions in `given`, the behaviour under test in `when`,
   and ordinary assertions in `then` and `and`. Setup assertions are welcome
   when they verify an important precondition.
+- A functional `scenario` contains **all assertions about its outcome**. Do
+  not export a result or fixture to check after the scenario ends. `scenario`
+  returns nothing; values returned by `given` are used inside the story.
 - Several assertions can describe the consequences of one action. Do not add
   another unrelated action after checking the first result: write another test.
 - `and` extends the current phase. It can add setup, another part of the same
@@ -123,7 +128,7 @@ scenario.
 
 ```sh
 just test --test starred -E 'test(starring_an_issue_reveals_the_starred_tab)'
-just test --test pipelines --test starred --test job_logs --test scenarios
+just test --test pipelines --test starred --test job_logs --test scenario_helpers
 ```
 
 This first slice shares mechanics across those three UI suites and converts

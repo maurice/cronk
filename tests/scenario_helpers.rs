@@ -1,6 +1,9 @@
 //! Plain unit-style tests of the scenario helpers; no fake terminal required.
 //! Calls to Given/When/Then here exercise the API under test, not a convention
-//! for writing unit tests.
+//! for writing unit tests. Failure tests intentionally assert outside the
+//! failing scenario: they verify its panic, which cannot be checked inside the
+//! scenario that has just unwound. Functional scenarios keep all outcome
+//! assertions inside Then/And.
 
 mod support;
 
@@ -35,12 +38,12 @@ fn closures_capture_borrow_move_and_return_values_once() {
         and("the fixture is still available", || {
             executions.push("And Then");
             assert!(!value.is_empty());
+            assert_eq!(
+                executions,
+                ["Given", "And Given", "When", "And When", "Then", "And Then"]
+            );
         });
     });
-    assert_eq!(
-        executions,
-        ["Given", "And Given", "When", "And When", "Then", "And Then"]
-    );
 }
 
 fn complete_scenario() {

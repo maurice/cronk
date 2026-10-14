@@ -304,6 +304,8 @@ are interchangeable. Closure-based `scenario`, `given`, `when`, `then` and
 `and` helpers add executable steps, runtime phase checks and failure context
 while keeping ordinary assertions and nextest. Eight functional UI scenarios
 use this style, with mixed behaviours split into independently runnable tests.
+A functional scenario includes all its outcome assertions in Then/And, not
+checks after the scenario ends.
 It is **not** a project-wide test syntax: unit, property-based, performance and
 other non-functional tests keep their natural Rust styles, including those
 located in `tests/`. Shared helper reuse does not require scenario steps; wider

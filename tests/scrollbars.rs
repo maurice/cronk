@@ -1644,8 +1644,7 @@ fn dialog_body(ui: &Ui) -> Rect {
 fn opening_command_palette_leaves_workspace_chrome_untouched() {
     let mut ui = mount(config(2, "midnight"), 100, 24);
     let before = ui.capture_frame();
-    ui.dispatch(Msg::Palette).unwrap();
-    ui.render();
+    key(&mut ui, KeyCode::Char(':'));
     let after = ui.capture_frame();
     let modal = modal_frame(&after);
 

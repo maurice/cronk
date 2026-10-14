@@ -635,6 +635,8 @@ pub(super) fn view(ctx: &Context<Cronk>) -> Element {
         );
     }
     if let Some(dialog) = &state.dialog {
+        // Keep the dialog last: this viewport-sized anchor stands in for its root-portal
+        // placeholder during the passthrough ZStack's top-child scan for scrollbar zones.
         layers = layers.child(dialog_view(ctx, dialog, colors));
     }
     ThemeProvider::new(colors.theme()).child(layers).into()
@@ -3954,7 +3956,7 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
     } else {
         body
     };
-    Element::from(
+    let modal = Element::from(
         Modal::new()
             .title(dialog.title.clone())
             .width(Length::Px(ctx.viewport().w.saturating_sub(4).clamp(1, 88)))
@@ -3969,7 +3971,14 @@ fn dialog_view(ctx: &Context<Cronk>, dialog: &Dialog, colors: Colors) -> Element
             .on_close(ctx.link().callback(|_| Msg::CloseDialog))
             .child(body),
     )
-    .key("dialog")
+    .key("dialog");
+    // The RootPortal placeholder has a zero-sized rect. This viewport-sized Center gives its
+    // branch a real containing rect in the passthrough ZStack's layered scrollbar hit test.
+    Center::new()
+        .width(Size::Percent(100))
+        .height(Size::Percent(100))
+        .child(modal)
+        .into()
 }
 
 fn completion_view(ctx: &Context<Cronk>, index: usize, c: &Completion, colors: Colors) -> Element {

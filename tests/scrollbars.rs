@@ -1607,8 +1607,7 @@ fn detail_discussion_click_focuses_the_correct_inline_thread_for_reply_and_resol
 
 // Modal is a portal, so locate its actual rounded frame rather than assuming that
 // rect_of_key("dialog") is the inner viewport. Cronk uses one border and one padding cell.
-fn dialog_body(ui: &Ui) -> Rect {
-    let frame = ui.capture_frame();
+fn modal_frame(frame: &tui_lipan::CapturedFrame) -> Rect {
     let (left, top) = (0..frame.height)
         .find_map(|y| {
             (0..frame.width)
@@ -1623,10 +1622,44 @@ fn dialog_body(ui: &Ui) -> Rect {
         .find(|&y| frame.cell(right, y).symbol == "╯")
         .unwrap();
     Rect {
-        x: (left + 2) as i16,
-        y: (top + 2) as i16,
-        w: right - left - 3,
-        h: bottom - top - 3,
+        x: left as i16,
+        y: top as i16,
+        w: right - left + 1,
+        h: bottom - top + 1,
+    }
+}
+
+fn dialog_body(ui: &Ui) -> Rect {
+    let frame = ui.capture_frame();
+    let modal = modal_frame(&frame);
+    Rect {
+        x: modal.x + 2,
+        y: modal.y + 2,
+        w: modal.w - 4,
+        h: modal.h - 4,
+    }
+}
+
+#[test]
+fn opening_command_palette_leaves_workspace_chrome_untouched() {
+    let mut ui = mount(config(2, "midnight"), 100, 24);
+    let before = ui.capture_frame();
+    key(&mut ui, KeyCode::Char(':'));
+    let after = ui.capture_frame();
+    let modal = modal_frame(&after);
+
+    for y in 0..after.height {
+        for x in 0..after.width {
+            if modal.contains(x as i16, y as i16) {
+                continue;
+            }
+            assert_eq!(
+                after.cell(x, y),
+                before.cell(x, y),
+                "opening a dialog changed chrome at ({x},{y}):\n{}",
+                after.plain_text()
+            );
+        }
     }
 }
 

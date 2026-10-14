@@ -415,6 +415,7 @@ fn modifier_combinations() -> impl Iterator<Item = KeyMods> {
         alt: bits & 2 != 0,
         shift: bits & 4 != 0,
         super_key: bits & 8 != 0,
+        ..KeyMods::NONE
     })
 }
 

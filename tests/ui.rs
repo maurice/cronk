@@ -1,3 +1,5 @@
+mod support;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -11,75 +13,25 @@ use cronk::{
     model::{CurrentIteration, DetailPart, ItemKey, ItemKind, Mutation, TraceChunk, User},
     ui::{Confirmation, Cronk, Dialog, DialogKind, JobSource, Msg, Scope, State},
 };
+use support::ui::{self, Ui, demo_config as config, key, modified_key as modified, type_text};
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-type Ui = TestBackend<Cronk>;
-
-fn config() -> Config {
-    Config {
-        projects: demo::projects(),
-        onboarding: false,
-        ..Config::default()
-    }
-}
-
 fn mount(config: Config, path: Option<&Path>) -> Ui {
-    mount_with_viewport(
-        config,
-        path,
-        Rect {
-            x: 0,
-            y: 0,
-            w: 80,
-            h: 24,
-        },
-    )
+    mount_with_viewport(config, path, ui::viewport(80, 24))
 }
 
 fn mount_with_viewport(config: Config, path: Option<&Path>, viewport: Rect) -> Ui {
-    // Test workspace setup is a deliberate config save, not a navigation event.
-    if let Some(path) = path.filter(|path| !path.exists()) {
-        config.save(path).unwrap();
-    }
-    let app = App::new().focus_policy(FocusPolicy::Manual);
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        app,
-        Cronk {
-            config,
-            path: path.map(Path::to_path_buf),
-            api: None,
-            demo: true,
-        },
-        (),
-        viewport,
-    );
-    ui.pump().unwrap();
-    ui.render();
+    let mut ui = ui::mount_demo(config, path, viewport);
+    ui::pump_render(&mut ui, 1);
     ui
 }
 
 fn settle_layout(ui: &mut Ui) {
     // Rendering queues viewport callbacks; drain them before checking persisted scroll offsets.
-    ui.render();
-    ui.pump().unwrap();
-}
-
-fn key(ui: &mut Ui, code: KeyCode) {
-    modified(ui, code, KeyMods::NONE);
-}
-
-fn modified(ui: &mut Ui, code: KeyCode, mods: KeyMods) {
-    ui.send_key(KeyEvent { code, mods }).unwrap();
-}
-
-fn type_text(ui: &mut Ui, text: &str) {
-    for ch in text.chars() {
-        key(ui, KeyCode::Char(ch));
-    }
+    ui::render_pump(ui, 1);
 }
 
 fn dialog(ui: &Ui) -> &Dialog {

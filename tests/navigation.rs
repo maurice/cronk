@@ -1,11 +1,13 @@
 //! Navigation persistence contracts use explicit flushes and deterministic
 //! hydration messages, not sleeps or latency thresholds.
+mod support;
+
 use cronk::{
     config::{Config, SavedView, TabState},
     demo,
     gitlab::GitLab,
     model::{ItemKey, ItemKind, WorkItem},
-    ui::{Action, Confirmation, Cronk, DialogKind, Msg, Scope},
+    ui::{Action, Confirmation, DialogKind, Msg, Scope},
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -13,35 +15,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tui_lipan::{TestBackend, prelude::*};
-
-type Ui = TestBackend<Cronk>;
-
-fn config() -> Config {
-    Config {
-        onboarding: false,
-        projects: demo::projects(),
-        ..Config::default()
-    }
-}
+use support::ui::{self, Ui, demo_config as config};
 
 fn mount(config: Config, path: Option<&Path>, demo: bool) -> Box<Ui> {
-    let mut ui = Box::new(TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: path.map(Path::to_path_buf),
-            api: None,
-            demo,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 80,
-            h: 24,
-        },
-    ));
+    let mut ui = Box::new(ui::mount_at(config, path, None, demo, ui::viewport(80, 24)));
     ui.pump().unwrap();
     ui
 }

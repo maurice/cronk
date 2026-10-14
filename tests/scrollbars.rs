@@ -1,3 +1,5 @@
+mod support;
+
 use std::time::Duration;
 
 use cronk::{
@@ -5,21 +7,16 @@ use cronk::{
     demo,
     model::{Details, Diff, Discussion, ItemKind, Job, Note, Pipeline},
     scroll::{BoundaryScroll, reveal_span},
-    ui::{Cronk, DialogKind, Msg, Scope, Trace, list_height_for_tab, list_row_height},
+    ui::{DialogKind, Msg, Scope, Trace, list_height_for_tab, list_row_height},
 };
+use support::ui::{self, REPRESENTATIVE_THEMES as THEMES, Ui, element_rect as rect, mouse};
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-type Ui = TestBackend<Cronk>;
-
-const THEMES: [&str; 3] = ["midnight", "dracula", "light"];
-
 fn config(tab: usize, theme: &str) -> Config {
     Config {
-        projects: demo::projects(),
         views: vec![SavedView {
             name: "Saved issues".into(),
             kind: ItemKind::Issue,
@@ -27,28 +24,12 @@ fn config(tab: usize, theme: &str) -> Config {
         }],
         active_tab: tab,
         theme: theme.into(),
-        onboarding: false,
-        ..Config::default()
+        ..ui::demo_config()
     }
 }
 
 fn mount(config: Config, width: u16, height: u16) -> Ui {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: None,
-            api: None,
-            demo: true,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: width,
-            h: height,
-        },
-    );
+    let mut ui = ui::mount_demo(config, None, ui::viewport(width, height));
     settle(&mut ui);
     ui
 }
@@ -57,44 +38,18 @@ fn mount(config: Config, width: u16, height: u16) -> Ui {
 // handler moved the widget. Do not accept an intermediate, widget-only scroll as success.
 fn settle(ui: &mut Ui) {
     ui.advance(Duration::from_millis(250));
-    for _ in 0..3 {
-        ui.pump().unwrap();
-        ui.render();
-    }
+    ui::pump_render(ui, 3);
 }
 
 fn key(ui: &mut Ui, code: KeyCode) {
-    ui.send_key(KeyEvent {
-        code,
-        mods: KeyMods::NONE,
-    })
-    .unwrap();
+    ui::key(ui, code);
     settle(ui);
-}
-
-fn mouse(ui: &mut Ui, x: u16, y: u16, kind: MouseKind) {
-    ui.send_mouse(MouseEvent {
-        x,
-        y,
-        kind,
-        mods: KeyMods::NONE,
-    })
-    .unwrap();
 }
 
 fn click(ui: &mut Ui, x: u16, y: u16) {
     mouse(ui, x, y, MouseKind::Down(MouseButton::Left));
     mouse(ui, x, y, MouseKind::Up(MouseButton::Left));
     settle(ui);
-}
-
-fn rect(ui: &Ui, key: &str) -> Rect {
-    ui.rect_of_key(&key.to_owned().into()).unwrap_or_else(|| {
-        panic!(
-            "missing viewport {key:?}:\n{}",
-            ui.capture_frame().plain_text()
-        )
-    })
 }
 
 fn right(rect: Rect) -> u16 {

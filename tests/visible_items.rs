@@ -1,34 +1,15 @@
 //! `visible_item_at` and `visible_position` must agree with `visible_items()`
 //! for every index and key, including ties and duplicate keys.
+mod support;
+
 use cronk::{
-    config::Config,
     demo,
     model::{ItemKey, ItemKind, WorkItem},
-    ui::Cronk,
 };
-use tui_lipan::{TestBackend, prelude::*};
+use support::ui::{self, Ui};
 
-fn ui_with_tied_items() -> TestBackend<Cronk> {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: Config {
-                projects: demo::projects(),
-                onboarding: false,
-                ..Config::default()
-            },
-            path: None,
-            api: None,
-            demo: true,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 80,
-            h: 24,
-        },
-    );
+fn ui_with_tied_items() -> Ui {
+    let mut ui = ui::mount_demo(ui::demo_config(), None, ui::viewport(80, 24));
     ui.pump().unwrap();
     let template = demo::items().remove(0);
     let projects: Vec<u64> = demo::projects().iter().map(|p| p.id).collect();

@@ -278,7 +278,8 @@ the same, and flattening them into one helper introduces real regressions:
 
 ## 1g. Tests: extract the harness
 
-14,395 lines across 19 files with **zero shared support**. Ten copies of:
+The original review found 14,395 lines across 19 files with **zero shared
+support**. Ten copies of:
 
 ```rust
 fn settle(ui: &mut Ui) { for _ in 0..3 { ui.pump().unwrap(); ui.render(); } }
@@ -297,19 +298,26 @@ A `tests/support/mod.rs` with `settle`, `mount`, `key`, `mouse`, `text`,
 `rect`, `demo_config`, and `Ui` would delete several hundred lines and — more
 importantly — make every integration test start from the same definitions.
 
-**First slice:** shared mechanics now live in `tests/support/ui.rs`, used by
-the pipelines, starred-item and job-log suites. Update order and round counts
-remain explicit; extraction does not assume the differing `settle` functions
-are interchangeable. Closure-based `scenario`, `given`, `when`, `then` and
-`and` helpers add executable steps, runtime phase checks and failure context
-while keeping ordinary assertions and nextest. Eight functional UI scenarios
-use this style, with mixed behaviours split into independently runnable tests.
+**Implemented in #58:** shared mechanics now live in `tests/support/ui.rs`,
+used by all sixteen headless test targets and the CLI's in-process database
+fixture. Constructors and the `Ui` type are centralized; local wrappers retain
+feature-specific setup. Update order, round counts, fake-clock advances,
+pump-only persistence boundaries and measured performance loops stay explicit.
+The default-viewport-then-resize path, default app/focus options and no-pre-save
+onboarding/migration fixtures are preserved rather than flattened into the
+demo convenience helper. The three-theme visual sample is shared separately
+from the production theme catalogue.
+
+Closure-based `scenario`, `given`, `when`, `then` and `and` helpers add executable
+steps, runtime phase checks and failure context while keeping ordinary
+assertions and nextest. Eight functional UI scenarios use this style, with mixed
+behaviours split into independently runnable tests. Both the scenario language
+and shared UI mechanics have dedicated, plain unit-style contract tests.
 A functional scenario includes all its outcome assertions in Then/And, not
 checks after the scenario ends.
 It is **not** a project-wide test syntax: unit, property-based, performance and
 other non-functional tests keep their natural Rust styles, including those
-located in `tests/`. Shared helper reuse does not require scenario steps; wider
-helper extraction is follow-up work. See the
+located in `tests/`. Shared helper reuse does not require scenario steps. See the
 [scenario writing guide](../tests/support/README.md).
 
 ---
@@ -526,7 +534,7 @@ every PR is independently reviewable and reversible.
 | # | PR | Risk | Touches | Approx. effect |
 |---|---|---|---|---|
 | 1 | **Extract private-file + hash helpers** (`src/fsx.rs`) — *done, #55* | Low | `cache.rs`, `navigation.rs`, `config.rs` | Deletes ~120 duplicated lines; host for hex-SHA256 |
-| 2 | **Extract test harness + functional scenario pilot** (`tests/support/`) — *first slice implemented; wider helper extraction remains* | Low | `tests/*.rs` | Shares setup/input, preserves update timing, splits mixed behaviours; unit tests stay conventional |
+| 2 | **Extract test harness + functional scenario support** (`tests/support/`) — *implemented, #58* | Low | `tests/*.rs` | Centralizes headless setup/input, preserves timing and persistence contracts, splits mixed behaviours; unit tests stay conventional |
 | 3 | **Extract `ui/format.rs` + `ui/theme.rs`**, unify `THEMES` | Low | `ui/view.rs`, `config.rs`, `model.rs` | ~750 lines become unit-testable; closes the theme footgun |
 | 4 | **Extract `gitlab/sanitizer.rs`** | Very low | `gitlab.rs` | ~190 lines out of the worst file; zero coupling |
 | 5 | **Extract `ui/keys.rs`**, generate `HELP` + README table | Medium | `ui/view.rs`, `ui/controller.rs`, README | Fixes inverted dependency; removes 6 hand-written binding copies |
@@ -545,9 +553,10 @@ every PR is independently reviewable and reversible.
   `PIPELINE_PAGE` in the first place.
 - **#11 and #12 are cheap and independent** — they can land any time and don't
   block anything.
-- **#1 removes duplicated filesystem mechanics. #2 starts with shared test
-  mechanics and a small scenario pilot**, rather than rewriting every suite at
-  once. Preserve setup and event-timing differences while extracting helpers.
+- **#1 removes duplicated filesystem mechanics. #2 shares test mechanics
+  across the headless targets**, with readable scenario steps for functional
+  stories. Preserve setup and event-timing differences; sharing support does
+  not require converting unit or performance tests to scenario syntax.
 
 ---
 

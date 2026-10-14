@@ -1,4 +1,4 @@
-# Writing readable UI scenarios
+# Shared UI test support and readable scenarios
 
 Functional tests should tell one story: the starting conditions, one behaviour,
 and its expected consequences. The helpers here execute ordinary Rust closures;
@@ -103,10 +103,26 @@ Nextest captures this output and shows it for failed tests.
 
 ## Drawing and processing updates are different
 
-`mount_demo` creates a manually focused demo app with an explicit viewport. A
-supplied workspace path is saved if absent; an existing config is left alone.
-It does **not** pump updates or render. Input helpers also do not settle,
-advance time, or sleep implicitly.
+The framework's mount constructor initializes the application and draws its
+first frame. Shared mount helpers do not add extra pump/render rounds after
+that constructor. Input helpers likewise add no settling, fake-clock advances
+or sleeps beyond the framework's own event dispatch.
+
+Choose the mount contract deliberately:
+
+| Helper | Workspace and initial-layout contract |
+| --- | --- |
+| `mount_demo(config, path, viewport)` | Manual-focus demo fixture. Saves a supplied config path **only if absent** before mounting. |
+| `mount_at(config, path, api, demo, viewport)` | Manual focus and explicit initial viewport; does **not** save a missing config. Use for onboarding, migration and no-write contracts. |
+| `mount_default(config, path, api, demo)` | Manual focus and the framework's default initial viewport; no preliminary config save. Resizing afterwards preserves the original two-stage layout. |
+| `mount_default_with_app(app, config, path, api, demo)` | Preserves supplied app options, including focus policy, at the default initial viewport; no preliminary config save. |
+
+These helpers do not bypass application initialization or suppress its normal
+storage effects. An onboarding test must not use the saving convenience helper
+just because it happens to run in demo mode. A latency fixture with an absent
+workspace likewise keeps its original no-pre-save behaviour. Autocomplete keeps
+its original default-viewport mount followed by resize; the CLI database fixture
+keeps the framework's default app/focus configuration.
 
 | Helper | What it does |
 | --- | --- |
@@ -115,6 +131,7 @@ advance time, or sleep implicitly.
 | `frame_text(ui)` | Read the last drawn frame without doing more work. |
 | `render_text(ui)` | Draw a fresh frame and read it, without draining callbacks. |
 | `key` / `modified_key` / `mouse` | Send an input event, without additional settling. |
+| `type_text` | Send unmodified character keys, including Unicode, without extra settling. |
 | `element_rect(ui, key)` | Find a mounted element, with its key in the failure message if missing. |
 
 Small local wrappers such as `settle` and `key` can preserve a suite's existing
@@ -122,15 +139,30 @@ timing convention. Pipelines use three draw/process rounds, starred items use
 three process/draw rounds, and job logs use four process/draw rounds. Do not
 flatten these differences during extraction or add extra rounds just to make a
 failure disappear. Advance the fake clock explicitly when time is part of the
-scenario.
+scenario. In particular, scrollbar tests keep their explicit 250 ms reconciliation
+advance, and navigation tests retain their pump-only/flush boundaries.
+
+`REPRESENTATIVE_THEMES` is the deliberate three-theme light/dark sample shared
+by costly visual interaction tests, not a duplicate catalogue. Tests covering
+all themes import `cronk::config::THEMES` directly. Helper unit tests verify the
+sample contains distinct supported themes.
 
 ## Run a scenario
 
 ```sh
 just test --test starred -E 'test(starring_an_issue_reveals_the_starred_tab)'
 just test --test pipelines --test starred --test job_logs --test scenario_helpers
+just test --test ui_helpers
 ```
 
-This first slice shares mechanics across those three UI suites and converts
-eight functional scenarios. Wider helper extraction is follow-up work; adopting
-the scenario style is a separate, opt-in choice for suitable functional tests.
+All sixteen headless test targets share mounting/type definitions, including
+visual snapshots, persistence, indexed lookup and performance fixtures. The CLI
+suite also shares its in-process database fixture. Process-only TLS and release
+metadata tests have no fake terminal to extract. Feature-specific setup and
+assertions remain in their suites; measured performance loops remain untouched.
+
+Eight functional scenarios establish the closure-based writing convention.
+Using that convention is a separate choice from sharing the harness: there is
+no unfinished framework feature or requirement to rewrite non-functional tests.
+`tests/ui_helpers.rs` and `tests/scenario_helpers.rs` directly test the shared
+mechanics and scenario language with ordinary Rust unit-style assertions.

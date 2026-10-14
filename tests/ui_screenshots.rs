@@ -1,17 +1,11 @@
+mod support;
+
 use std::{fs, path::PathBuf};
 
-use cronk::{
-    config::Config,
-    demo,
-    ui::{Cronk, Msg},
-};
+use cronk::{config::Config, ui::Msg};
 use sha2::{Digest, Sha256};
-use tui_lipan::{
-    App, CapturedFrame, PngOptions, PngTextRenderer, TestBackend,
-    prelude::{FocusPolicy, Rect},
-};
-
-type Ui = TestBackend<Cronk>;
+use support::ui::{self, Ui};
+use tui_lipan::{CapturedFrame, PngOptions, PngTextRenderer};
 
 const WIDTH: u16 = 100;
 const HEIGHT: u16 = 24;
@@ -19,35 +13,17 @@ const SNAPSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/.snapshots/visu
 
 fn config(active_tab: usize) -> Config {
     Config {
-        projects: demo::projects(),
         active_tab,
         theme: "midnight".into(),
-        onboarding: false,
         animations: false,
-        ..Config::default()
+        ..ui::demo_config()
     }
 }
 
 fn mount(config: Config) -> Ui {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: None,
-            api: None,
-            demo: true,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: WIDTH,
-            h: HEIGHT,
-        },
-    );
+    let mut ui = ui::mount_demo(config, None, ui::viewport(WIDTH, HEIGHT));
     ui.state_mut().tick = 12;
-    ui.pump().unwrap();
-    ui.render();
+    ui::pump_render(&mut ui, 1);
     ui
 }
 

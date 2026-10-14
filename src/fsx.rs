@@ -4,13 +4,15 @@
 //! The workspace keeps two stores beside the config file — the content cache
 //! and the navigation database each own a SQLite database — and the config
 //! itself is replaced through a temporary file. The two stores are Cronk's own:
-//! they are created private, tightened if an earlier run left them wider, and
-//! refused outright if they are symlinks, so a shared machine cannot read them
-//! and an attacker cannot redirect them.
+//! on Unix they are created owner-only and tightened if an earlier run left
+//! them wider. Their directory and database paths are refused if they are
+//! symlinks when checked. These checks are not atomic with opening, and SQLite
+//! later reopens each database by path, so they do not protect against concurrent
+//! path replacement. The containing directory tree must be trusted.
 //!
 //! The config path is neither owned nor private by contract: it is whatever
-//! `--config` names. Its directory is created owner-only if missing, but an
-//! existing one keeps the permissions its owner gave it, and a symlinked
+//! `--config` names. On Unix its directory is created owner-only if missing, but
+//! an existing one keeps the permissions its owner gave it, and a symlinked
 //! directory is followed so that a dotfiles layout keeps working. A symlinked
 //! destination *file* is different again: the atomic rename replaces the link
 //! rather than writing through it, leaving whatever it pointed at untouched.
@@ -39,8 +41,9 @@ pub(crate) fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
-/// Reject a path that is a symlink, so creating or opening it cannot write
-/// through to a target someone else chose.
+/// Reject a path that is a symlink at the time of the check.
+///
+/// Does not validate ancestors or prevent path replacement before later I/O.
 ///
 /// The message names the rule and the path but not the kind of store; callers
 /// add that as context so it appears once.
@@ -54,10 +57,10 @@ pub(crate) fn reject_symlink(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Create `directory` and any missing parents with mode 0700.
+/// Create `directory` and any missing parents with mode 0700 on Unix, subject
+/// to the process umask.
 ///
-/// Every level created along the way gets 0700, not just the leaf, so a
-/// world-traversable ancestor cannot expose a store created beneath it.
+/// The mode applies to every missing level, not just the leaf.
 ///
 /// An existing directory keeps the permissions its owner gave it. Use this for
 /// a caller-supplied path such as the config parent, which Cronk does not own
@@ -75,8 +78,8 @@ pub(crate) fn private_dir(directory: &Path) -> io::Result<()> {
     builder.create(directory)
 }
 
-/// Create `directory` and any missing parents as `owned_dir` does, and enforce
-/// 0700 even if the directory already existed.
+/// Create `directory` and any missing parents as `private_dir` does, and enforce
+/// 0700 on Unix even if the directory already existed.
 ///
 /// This is for directories Cronk owns, where an earlier run or a stray tool may
 /// have left the mode wider than intended.
@@ -85,13 +88,14 @@ pub(crate) fn owned_dir(directory: &Path) -> io::Result<()> {
     set_mode(directory, 0o700)
 }
 
-/// Create `path` if absent and make it owner-only (0600), without truncating
-/// what is already there.
+/// Create `path` if absent, without truncating what is already there, and make
+/// it owner-only (0600) on Unix.
 ///
-/// Refuses a symlink, so it is safe for the SQLite databases that name
-/// themselves from a fingerprint. The mode is set on the open handle rather
-/// than by path, so it cannot be redirected by a link swapped in between. Does
-/// not validate the containing directory.
+/// Checks for a symlink before opening, but the check and open are not atomic.
+/// Setting the mode on the open handle prevents the permission update from
+/// following a path replaced after opening; it does not protect the open itself
+/// or a caller's subsequent path-based I/O. Does not validate the containing
+/// directory.
 pub(crate) fn private_file(path: &Path) -> io::Result<()> {
     reject_symlink(path)?;
     let mut options = OpenOptions::new();

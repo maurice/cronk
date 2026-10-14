@@ -31,6 +31,7 @@ pub const THEMES: [&str; 11] = [
 ];
 
 use crate::filter::Query;
+use crate::fsx::{is_symlink, private_dir, set_mode_handle, sync_dir};
 use crate::model::{ItemKey, ItemKind, LookupOption, Project, User};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -310,8 +311,7 @@ impl Config {
             document.remove(key);
         }
         if !migrated {
-            let destination_symlink =
-                fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+            let destination_symlink = is_symlink(path);
             match fs::read_to_string(path) {
                 Ok(source) => {
                     // Replacing a symlink never modifies its target. Preserve
@@ -343,27 +343,12 @@ impl Config {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
 
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(parent)
+        private_dir(parent)
             .with_context(|| format!("create config directory {}", parent.display()))?;
 
         let mut temporary =
             NamedTempFile::new_in(parent).context("create config temporary file")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            temporary
-                .as_file()
-                .set_permissions(fs::Permissions::from_mode(0o600))
-                .context("restrict config permissions")?;
-        }
+        set_mode_handle(temporary.as_file(), 0o600).context("restrict config permissions")?;
         temporary
             .write_all(source.as_bytes())
             .context("write config temporary file")?;
@@ -374,10 +359,7 @@ impl Config {
         temporary
             .persist(path)
             .with_context(|| format!("replace config {}", path.display()))?;
-        #[cfg(unix)]
-        fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| format!("sync config directory {}", parent.display()))?;
+        sync_dir(parent).with_context(|| format!("sync config directory {}", parent.display()))?;
         Ok(())
     }
 
@@ -1069,6 +1051,47 @@ mod tests {
         } else {
             assert!(default_path().is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_does_not_repermission_an_existing_parent_directory() {
+        // `--config config.toml` resolves its parent to the working directory,
+        // and `--config /shared/cronk.toml` to a directory the user may share.
+        // Neither belongs to Cronk, so neither may be re-permissioned.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+
+        Config::default()
+            .save(&shared.join("workspace.toml"))
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_symlinked_config_directory_keeps_working() {
+        // A dotfiles layout symlinking ~/.config/cronk at a real directory is
+        // ordinary, so the config writer must follow it rather than refuse.
+        // The content cache and navigation stores deliberately do the opposite.
+        use std::os::unix::fs::symlink;
+        let root = tempdir().unwrap();
+        let real = root.path().join("dotfiles/cronk");
+        fs::create_dir_all(&real).unwrap();
+        let linked = root.path().join("cronk");
+        symlink(&real, &linked).unwrap();
+
+        let path = linked.join("config.toml");
+        Config::default().save(&path).unwrap();
+        assert!(path.is_file());
+        assert!(fs::read_to_string(&path).unwrap().contains("gitlab_url"));
     }
 
     #[cfg(unix)]

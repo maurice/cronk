@@ -1,43 +1,34 @@
 //! Project pipelines: visibility gating, window paging, drill-in and the list indicator.
+mod support;
+
 use cronk::{
     config::Config,
     demo,
     gitlab::{PIPELINE_PAGE, Pipelines},
     model::{ItemKind, Job, Pipeline, Project},
-    ui::{Cronk, Msg, Scope},
+    ui::{Msg, Scope},
+};
+use support::{
+    scenario::{and, given, scenario, then, when},
+    ui::{self, Ui, render_text as text},
 };
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-type Ui = TestBackend<Cronk>;
-
 const PROJECT: u64 = 9001;
 
 fn mount_projects(projects: Vec<Project>, height: u16) -> Ui {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: Config {
-                projects,
-                active_tab: 1,
-                onboarding: false,
-                animations: false,
-                ..Config::default()
-            },
-            path: None,
-            api: None,
-            demo: true,
+    let mut ui = ui::mount_demo(
+        Config {
+            projects,
+            active_tab: 1,
+            animations: false,
+            ..ui::demo_config()
         },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 120,
-            h: height,
-        },
+        None,
+        ui::viewport(120, height),
     );
     settle(&mut ui);
     ui
@@ -47,19 +38,18 @@ fn mount(height: u16) -> Ui {
     mount_projects(demo::projects(), height)
 }
 
+fn mount_without_merge_request_sync(height: u16) -> Ui {
+    let mut projects = demo::projects();
+    projects[0].merge_requests_visible = false;
+    mount_projects(projects, height)
+}
+
 fn settle(ui: &mut Ui) {
-    for _ in 0..3 {
-        ui.render();
-        ui.pump().unwrap();
-    }
+    ui::render_pump(ui, 3);
 }
 
 fn key(ui: &mut Ui, code: KeyCode) {
-    ui.send_key(KeyEvent {
-        code,
-        mods: KeyMods::NONE,
-    })
-    .unwrap();
+    ui::key(ui, code);
     settle(ui);
 }
 
@@ -70,25 +60,14 @@ fn open_pipelines(ui: &mut Ui) {
     assert_eq!(ui.state().section_name(), "Pipelines");
 }
 
-fn text(ui: &mut Ui) -> String {
-    ui.render();
-    ui.capture_frame().plain_text()
-}
-
 fn click(ui: &mut Ui, key: &str) {
     settle(ui);
-    let rect = ui.rect_of_key(&key.to_owned().into()).unwrap();
+    let rect = ui::element_rect(ui, key);
     for kind in [
         MouseKind::Down(MouseButton::Left),
         MouseKind::Up(MouseButton::Left),
     ] {
-        ui.send_mouse(MouseEvent {
-            kind,
-            x: rect.x as u16 + 6,
-            y: rect.y as u16,
-            mods: KeyMods::NONE,
-        })
-        .unwrap();
+        ui::mouse(ui, rect.x as u16 + 6, rect.y as u16, kind);
     }
     settle(ui);
 }
@@ -237,45 +216,86 @@ fn project_pipeline_refresh_groups_active_upcoming_completed_and_manual_jobs() {
 }
 
 #[test]
-fn pipelines_follow_merge_request_visibility() {
-    let mut hidden = demo::projects();
-    hidden[0].merge_requests_visible = false;
-    let mut ui = mount_projects(hidden, 40);
-    key(&mut ui, KeyCode::Enter);
-    assert_eq!(
-        ui.state().sections(),
-        &["Fields", "Forget this project"],
-        "no Pipelines section without merge request sync"
-    );
-    assert!(
-        !ui.state().project_pipelines.contains_key(&PROJECT),
-        "hidden projects make no pipeline requests"
-    );
-    let shown = text(&mut ui);
-    assert!(shown.contains("pipelines not synced"), "{shown}");
-    assert!(!shown.contains("Pipelines ─"), "{shown}");
+fn pipelines_are_hidden_without_merge_request_sync() {
+    scenario("Pipelines are hidden without merge-request sync", || {
+        let mut ui = given("a project with merge-request sync disabled", || {
+            mount_without_merge_request_sync(40)
+        });
 
-    // Toggling merge requests on from Fields adds the section and starts syncing.
-    key(&mut ui, KeyCode::Enter);
-    ui.dispatch(Msg::Move(3)).unwrap();
-    key(&mut ui, KeyCode::Char(' '));
-    assert_eq!(ui.state().sections().len(), 3);
-    assert!(ui.state().project_pipelines.contains_key(&PROJECT));
-    assert!(text(&mut ui).contains("also syncs pipelines"));
+        when("I open the project details", || {
+            key(&mut ui, KeyCode::Enter);
+        });
 
-    // Toggling it off again while on the Pipelines heading re-clamps the cursor.
-    key(&mut ui, KeyCode::Esc);
-    key(&mut ui, KeyCode::Down);
-    assert_eq!(ui.state().section_name(), "Pipelines");
-    ui.dispatch(Msg::ToggleProjectKind(ItemKind::MergeRequest))
-        .unwrap();
-    assert_eq!(ui.state().sections().len(), 2);
-    assert_eq!(
-        ui.state().section_cursor,
-        0,
-        "never slide onto Forget this project"
-    );
-    assert!(ui.state().drilled.is_none());
+        then("there is no Pipelines section", || {
+            assert_eq!(ui.state().sections(), &["Fields", "Forget this project"]);
+            let shown = text(&mut ui);
+            assert!(shown.contains("pipelines not synced"), "{shown}");
+            assert!(!shown.contains("Pipelines ─"), "{shown}");
+        });
+        and("the project has no pipeline window", || {
+            assert!(!ui.state().project_pipelines.contains_key(&PROJECT));
+        });
+    });
+}
+
+#[test]
+fn enabling_merge_request_sync_makes_pipelines_available() {
+    scenario("Enabling sync makes pipelines available", || {
+        let mut ui = given("project fields with merge-request sync disabled", || {
+            let mut ui = mount_without_merge_request_sync(40);
+            key(&mut ui, KeyCode::Enter);
+            key(&mut ui, KeyCode::Enter);
+            ui.dispatch(Msg::Move(3)).unwrap();
+            ui
+        });
+
+        when("I enable merge-request sync with Space", || {
+            key(&mut ui, KeyCode::Char(' '));
+        });
+
+        then("the Pipelines section becomes available", || {
+            assert_eq!(ui.state().sections().len(), 3);
+            assert!(ui.state().sections().contains(&"Pipelines"));
+            assert!(text(&mut ui).contains("also syncs pipelines"));
+        });
+        and("the project starts loading its pipelines", || {
+            assert!(ui.state().project_pipelines.contains_key(&PROJECT));
+        });
+    });
+}
+
+#[test]
+fn disabling_merge_request_sync_moves_selection_off_pipelines() {
+    scenario("Removing Pipelines keeps selection safe", || {
+        let mut ui = given(
+            "Pipelines selected after enabling merge-request sync",
+            || {
+                let mut ui = mount_without_merge_request_sync(40);
+                key(&mut ui, KeyCode::Enter);
+                key(&mut ui, KeyCode::Enter);
+                ui.dispatch(Msg::Move(3)).unwrap();
+                key(&mut ui, KeyCode::Char(' '));
+                key(&mut ui, KeyCode::Esc);
+                key(&mut ui, KeyCode::Down);
+                assert_eq!(ui.state().section_name(), "Pipelines");
+                ui
+            },
+        );
+
+        when("merge-request sync is disabled", || {
+            ui.dispatch(Msg::ToggleProjectKind(ItemKind::MergeRequest))
+                .unwrap();
+        });
+
+        then("Pipelines disappears and Fields is selected", || {
+            assert_eq!(ui.state().sections(), &["Fields", "Forget this project"]);
+            assert_eq!(ui.state().section_cursor, 0);
+            assert_eq!(ui.state().section_name(), "Fields");
+        });
+        and("no pipeline remains drilled into", || {
+            assert!(ui.state().drilled.is_none());
+        });
+    });
 }
 
 #[test]
@@ -823,17 +843,7 @@ fn tab_visits_restore_the_drilled_pipeline_and_job() {
     // Restart: the saved tab state brings the cursor back to the same job once
     // the (memory-only) window has loaded again.
     let config = ui.state().config.clone();
-    let mut restarted = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: None,
-            api: None,
-            demo: true,
-        },
-        (),
-        ui.viewport(),
-    );
+    let mut restarted = ui::mount_demo(config, None, ui.viewport());
     settle(&mut restarted);
     assert_eq!(restarted.state().section_name(), "Pipelines");
     assert_eq!(restarted.state().drilled, Some(drilled));

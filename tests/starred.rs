@@ -1,59 +1,33 @@
 //! Starred items: toggling, the right-aligned tab, ordering, and persistence.
+mod support;
+
 use cronk::{
     config::Config,
     demo,
     model::{ItemKey, ItemKind},
-    ui::{Cronk, DialogKind, Scope},
+    ui::{DialogKind, Scope},
+};
+use support::{
+    scenario::{and, given, scenario, then, when},
+    ui::{self, Ui, demo_config as config, frame_text as text},
 };
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-type Ui = TestBackend<Cronk>;
-
 fn mount(config: Config, path: Option<&std::path::Path>) -> Ui {
-    if let Some(path) = path.filter(|p| !p.exists()) {
-        config.save(path).unwrap();
-    }
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: path.map(std::path::Path::to_path_buf),
-            api: None,
-            demo: true,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 110,
-            h: 40,
-        },
-    );
+    let mut ui = ui::mount_demo(config, path, ui::viewport(110, 40));
     settle(&mut ui);
     ui
 }
 
-fn config() -> Config {
-    Config {
-        projects: demo::projects(),
-        onboarding: false,
-        ..Config::default()
-    }
-}
-
 fn settle(ui: &mut Ui) {
-    for _ in 0..3 {
-        ui.pump().unwrap();
-        ui.render();
-    }
+    ui::pump_render(ui, 3);
 }
 
 fn press(ui: &mut Ui, code: KeyCode, mods: KeyMods) {
-    ui.send_key(KeyEvent { code, mods }).unwrap();
+    ui::modified_key(ui, code, mods);
     settle(ui);
 }
 
@@ -62,13 +36,7 @@ fn key(ui: &mut Ui, code: KeyCode) {
 }
 
 fn mouse(ui: &mut Ui, x: u16, y: u16, kind: MouseKind) {
-    ui.send_mouse(MouseEvent {
-        x,
-        y,
-        kind,
-        mods: KeyMods::NONE,
-    })
-    .unwrap();
+    ui::mouse(ui, x, y, kind);
     settle(ui);
 }
 
@@ -76,10 +44,6 @@ fn click_at(ui: &mut Ui, x: u16, y: u16) {
     mouse(ui, x, y, MouseKind::Moved);
     mouse(ui, x, y, MouseKind::Down(MouseButton::Left));
     mouse(ui, x, y, MouseKind::Up(MouseButton::Left));
-}
-
-fn text(ui: &Ui) -> String {
-    ui.capture_frame().plain_text()
 }
 
 fn selected(ui: &Ui) -> ItemKey {
@@ -92,25 +56,59 @@ fn star(ui: &mut Ui) {
 }
 
 #[test]
-fn s_toggles_the_selected_item_and_the_starred_tab_follows() {
-    let mut ui = mount(config(), None);
-    key(&mut ui, KeyCode::Char('I'));
-    assert!(ui.state().config.starred_tab().is_none());
-    assert!(!text(&ui).contains("Starred"));
-    let first = selected(&ui);
-    star(&mut ui);
-    assert!(ui.state().config.is_starred(&first));
-    assert_eq!(ui.state().config.starred.len(), 1);
-    assert_eq!(ui.state().config.starred_tab(), Some(4));
-    assert!(text(&ui).contains("★ Starred"));
-    // The tab hugs the right edge of the tab strip.
-    let rect = ui
-        .rect_of_key(&"workspace-tab-4".to_owned().into())
-        .unwrap();
-    assert!(rect.x as u16 + rect.w >= 108, "{rect:?}");
-    star(&mut ui);
-    assert!(ui.state().config.starred.is_empty());
-    assert!(!text(&ui).contains("Starred"));
+fn starring_an_issue_reveals_the_starred_tab() {
+    scenario("Starring an issue reveals the Starred tab", || {
+        let (mut ui, issue) = given("an issue list with no starred items", || {
+            let mut ui = mount(config(), None);
+            key(&mut ui, KeyCode::Char('I'));
+            assert!(ui.state().config.starred_tab().is_none());
+            assert!(!text(&ui).contains("Starred"));
+            let issue = selected(&ui);
+            (ui, issue)
+        });
+
+        when("I press s on the selected issue", || {
+            star(&mut ui);
+        });
+
+        then("the issue is starred exactly once", || {
+            assert!(ui.state().config.is_starred(&issue));
+            assert_eq!(ui.state().config.starred.len(), 1);
+        });
+        and("the Starred tab appears at the right edge", || {
+            assert_eq!(ui.state().config.starred_tab(), Some(4));
+            assert!(text(&ui).contains("★ Starred"));
+            let rect = ui::element_rect(&ui, "workspace-tab-4");
+            assert!(rect.x as u16 + rect.w >= 108, "{rect:?}");
+        });
+    });
+}
+
+#[test]
+fn unstarring_the_only_issue_removes_the_starred_tab() {
+    scenario("Unstarring the only issue removes the Starred tab", || {
+        let (mut ui, issue) = given("an issue list with its selected issue starred", || {
+            let mut ui = mount(config(), None);
+            key(&mut ui, KeyCode::Char('I'));
+            let issue = selected(&ui);
+            star(&mut ui);
+            assert_eq!(ui.state().config.starred.len(), 1);
+            (ui, issue)
+        });
+
+        when("I press s on that issue", || {
+            star(&mut ui);
+        });
+
+        then("there are no starred items", || {
+            assert!(!ui.state().config.is_starred(&issue));
+            assert!(ui.state().config.starred.is_empty());
+        });
+        and("the Starred tab disappears", || {
+            assert!(ui.state().config.starred_tab().is_none());
+            assert!(!text(&ui).contains("Starred"));
+        });
+    });
 }
 
 #[test]
@@ -472,11 +470,25 @@ fn unstarring_the_last_item_from_its_open_details_leaves_the_vanished_tab() {
 
 #[test]
 fn s_in_a_dialog_is_just_text() {
-    let mut ui = mount(config(), None);
-    key(&mut ui, KeyCode::Char('I'));
-    press(&mut ui, KeyCode::Char('p'), KeyMods::CTRL);
-    key(&mut ui, KeyCode::Char('s'));
-    assert!(ui.state().config.starred.is_empty());
+    scenario("Typing s in a dialog does not star an issue", || {
+        let mut ui = given("the command palette is open above an issue list", || {
+            let mut ui = mount(config(), None);
+            key(&mut ui, KeyCode::Char('I'));
+            press(&mut ui, KeyCode::Char('p'), KeyMods::CTRL);
+            ui
+        });
+
+        when("I type s", || {
+            key(&mut ui, KeyCode::Char('s'));
+        });
+
+        then("s is entered in the dialog", || {
+            assert_eq!(ui.state().dialog.as_ref().unwrap().fields[0].value(), "s");
+        });
+        and("no issue is starred", || {
+            assert!(ui.state().config.starred.is_empty());
+        });
+    });
 }
 
 /// Last column of row `y` whose background is the row's selection fill.
@@ -577,22 +589,7 @@ fn details_keep_a_one_cell_gap_before_the_scrollbar_or_the_pane_edge() {
 }
 
 fn mount_tall() -> Ui {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: config(),
-            path: None,
-            api: None,
-            demo: true,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 110,
-            h: 200,
-        },
-    );
+    let mut ui = ui::mount_demo(config(), None, ui::viewport(110, 200));
     settle(&mut ui);
     ui
 }

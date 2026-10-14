@@ -1,71 +1,50 @@
+mod support;
+
 use cronk::{
     config::Config,
     demo,
     model::{ItemKey, ItemKind, LookupKind, LookupOption},
-    ui::{Completion, Cronk, Msg},
+    ui::{Completion, Msg},
 };
 use std::time::Duration;
+use support::ui::{self, Ui};
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-type Ui = TestBackend<Cronk>;
 fn mount(kind: ItemKind, field: usize) -> Ui {
-    let mut ui = TestBackend::new_with_app(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: Config {
-                projects: demo::projects(),
-                active_tab: if kind == ItemKind::Issue { 2 } else { 3 },
-                route: Some(ItemKey {
-                    project: 9001,
-                    iid: if kind == ItemKind::Issue { 1 } else { 101 },
-                    kind,
-                }),
-                section: Some(0),
-                field,
-                onboarding: false,
-                ..Config::default()
-            },
-            path: None,
-            api: None,
-            demo: true,
+    let mut ui = ui::mount_default(
+        Config {
+            active_tab: if kind == ItemKind::Issue { 2 } else { 3 },
+            route: Some(ItemKey {
+                project: 9001,
+                iid: if kind == ItemKind::Issue { 1 } else { 101 },
+                kind,
+            }),
+            section: Some(0),
+            field,
+            ..ui::demo_config()
         },
-        (),
+        None,
+        None,
+        true,
     );
-    ui.set_viewport(Rect {
-        x: 0,
-        y: 0,
-        w: 100,
-        h: 30,
-    });
+    ui.set_viewport(ui::viewport(100, 30));
     settle(&mut ui);
     key(&mut ui, KeyCode::Enter);
     ui
 }
 fn settle(ui: &mut Ui) {
-    for _ in 0..3 {
-        ui.pump().unwrap();
-        ui.render();
-    }
+    ui::pump_render(ui, 3);
 }
 fn key(ui: &mut Ui, code: KeyCode) {
-    ui.send_key(KeyEvent {
-        code,
-        mods: KeyMods::NONE,
-    })
-    .unwrap();
+    ui::key(ui, code);
     settle(ui);
 }
 fn replace(ui: &mut Ui, text: &str) {
     key(ui, KeyCode::Home);
-    ui.send_key(KeyEvent {
-        code: KeyCode::End,
-        mods: KeyMods::SHIFT,
-    })
-    .unwrap();
+    ui::modified_key(ui, KeyCode::End, KeyMods::SHIFT);
     if text.is_empty() {
         key(ui, KeyCode::Backspace);
     } else {

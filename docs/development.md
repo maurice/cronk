@@ -23,6 +23,17 @@ just validate                     # fmt, lint, all tests, doctests
 
 Agents must use these tasks, not raw `cargo test`. `just doc` is the only exception because nextest cannot run doctests. Choose a test **target** before a name filter: a filter alone doesn't stop Cargo building every test binary. Avoid `--no-capture` (nextest then runs serially).
 
+## Readable UI tests
+
+Shared fake-terminal helpers and executable, closure-based Given/When/Then
+steps live in `tests/support/`. See the [scenario writing guide](../tests/support/README.md)
+for a complete example, the single-behaviour convention, and the distinction
+between drawing frames and processing queued updates. Scenario syntax is an
+opt-in convention for functional behaviour tests, **not** a requirement for
+unit, property-based, performance or every integration test. Shared helpers can
+be used without scenario steps. Each scenario remains a normal Rust `#[test]`
+run by nextest; no separate Gherkin runner is required.
+
 ## Concurrency: deliberately no locking
 
 Each worktree has its own `target/`, and nothing takes a cross-worktree lock, so one session can never block another. Sessions share only sccache's disk cache (set via `RUSTC_WRAPPER` for local runs; skipped when `CI` is set), which lets a fresh worktree reuse compiled dependencies. If the machine is oversubscribed, cap an individual run yourself, e.g. `CARGO_BUILD_JOBS=4 just lint`, `just test --test-threads 2`.

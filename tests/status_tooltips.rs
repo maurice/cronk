@@ -1,67 +1,35 @@
+mod support;
+
 use cronk::{
     config::Config,
-    demo,
     model::{ItemKey, ItemKind, User},
-    ui::{Cronk, Msg, Scope},
+    ui::{Msg, Scope},
 };
-use tui_lipan::{
-    TestBackend,
-    core::event::{MouseButton, MouseKind},
-    prelude::*,
-};
-
-type Ui = TestBackend<Cronk>;
-const THEMES: [&str; 3] = ["midnight", "dracula", "light"];
+use support::ui::{self, REPRESENTATIVE_THEMES as THEMES, Ui, element_rect as rect};
+use tui_lipan::core::event::{MouseButton, MouseKind};
 
 fn mount(theme: &str, tab: usize, route: Option<ItemKey>) -> Ui {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: Config {
-                projects: demo::projects(),
-                theme: theme.into(),
-                active_tab: tab,
-                route,
-                onboarding: false,
-                ..Config::default()
-            },
-            path: None,
-            api: None,
-            demo: true,
+    let mut ui = ui::mount_demo(
+        Config {
+            theme: theme.into(),
+            active_tab: tab,
+            route,
+            ..ui::demo_config()
         },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 160,
-            h: 300,
-        },
+        None,
+        ui::viewport(160, 300),
     );
     settle(&mut ui);
     ui
 }
 
 fn settle(ui: &mut Ui) {
-    for _ in 0..3 {
-        ui.pump().unwrap();
-        ui.render();
-    }
+    ui::pump_render(ui, 3);
 }
 
 fn mouse(ui: &mut Ui, x: u16, y: u16, kind: MouseKind) {
-    ui.send_mouse(MouseEvent {
-        x,
-        y,
-        kind,
-        mods: KeyMods::NONE,
-    })
-    .unwrap();
+    ui::mouse(ui, x, y, kind);
     settle(ui);
-}
-
-fn rect(ui: &Ui, key: &str) -> Rect {
-    ui.rect_of_key(&key.to_owned().into())
-        .unwrap_or_else(|| panic!("missing {key}"))
 }
 
 fn assert_closed(ui: &Ui) {

@@ -1,7 +1,9 @@
+mod support;
+
 use cronk::{
     config::Config,
     demo,
-    ui::{Action, Cronk, DialogKind, Msg},
+    ui::{Action, DialogKind, Msg},
 };
 use std::{
     io::{Read, Write},
@@ -9,41 +11,23 @@ use std::{
     path::Path,
     time::Duration,
 };
-use tui_lipan::{TestBackend, prelude::*};
+use support::ui::{self, Ui};
+use tui_lipan::prelude::*;
 
-type Ui = TestBackend<Cronk>;
 fn mount(config: Config, path: &Path, demo: bool) -> Ui {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: Some(path.to_owned()),
-            api: None,
-            demo,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 110,
-            h: 38,
-        },
-    );
+    let mut ui = ui::mount_at(config, Some(path), None, demo, ui::viewport(110, 38));
     settle(&mut ui);
     ui
 }
 fn settle(ui: &mut Ui) {
-    for _ in 0..3 {
-        ui.pump().unwrap();
-        ui.render();
-    }
+    ui::pump_render(ui, 3);
 }
 fn send(ui: &mut Ui, msg: Msg) {
     ui.dispatch(msg).unwrap();
     settle(ui);
 }
 fn key(ui: &mut Ui, code: KeyCode, mods: KeyMods) {
-    ui.send_key(KeyEvent { code, mods }).unwrap();
+    ui::modified_key(ui, code, mods);
     settle(ui);
 }
 fn replace(ui: &mut Ui, field: usize, text: &str) {

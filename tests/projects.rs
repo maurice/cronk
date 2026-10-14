@@ -1,66 +1,48 @@
 //! Project visibility, shared detail presentation, and settings navigation.
+mod support;
+
 use cronk::{
     config::{Config, SavedView, StarredItem, THEMES},
     demo,
     model::{ItemKey, ItemKind, Project, WorkItem},
-    ui::{Confirmation, Cronk, DialogKind, Msg, Scope},
+    ui::{Confirmation, DialogKind, Msg, Scope},
 };
+use support::ui::{self, Ui};
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-fn mount(project: Project, height: u16) -> TestBackend<Cronk> {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: Config {
-                projects: vec![project],
-                active_tab: 1,
-                onboarding: false,
-                animations: false,
-                ..Config::default()
-            },
-            path: None,
-            api: None,
-            demo: true,
+fn mount(project: Project, height: u16) -> Ui {
+    let mut ui = ui::mount_demo(
+        Config {
+            projects: vec![project],
+            active_tab: 1,
+            onboarding: false,
+            animations: false,
+            ..Config::default()
         },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 120,
-            h: height,
-        },
+        None,
+        ui::viewport(120, height),
     );
     settle(&mut ui);
     ui
 }
 
-fn settle(ui: &mut TestBackend<Cronk>) {
-    for _ in 0..3 {
-        ui.render();
-        ui.pump().unwrap();
-    }
+fn settle(ui: &mut Ui) {
+    ui::render_pump(ui, 3);
 }
 
-fn click(ui: &mut TestBackend<Cronk>, key: &str) {
+fn click(ui: &mut Ui, key: &str) {
     settle(ui);
-    let rect = ui.rect_of_key(&key.to_owned().into()).unwrap();
+    let rect = ui::element_rect(ui, key);
     let x = rect.x as u16 + rect.w / 2;
     let y = rect.y as u16 + rect.h / 2;
     for kind in [
         MouseKind::Down(MouseButton::Left),
         MouseKind::Up(MouseButton::Left),
     ] {
-        ui.send_mouse(MouseEvent {
-            kind,
-            x,
-            y,
-            mods: KeyMods::NONE,
-        })
-        .unwrap();
+        ui::mouse(ui, x, y, kind);
     }
     settle(ui);
 }

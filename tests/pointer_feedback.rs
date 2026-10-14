@@ -1,73 +1,43 @@
+mod support;
+
 use std::time::Duration;
 
 use cronk::{
-    config::Config,
-    demo,
+    config::{Config, THEMES},
     model::{ItemKey, ItemKind},
-    ui::{Action, Cronk, Msg, Scope},
+    ui::{Action, Msg, Scope},
 };
+use support::ui::{self, Ui};
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-type Ui = TestBackend<Cronk>;
-const THEMES: [&str; 11] = cronk::config::THEMES;
-
 fn mount(config: Config) -> Ui {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: None,
-            api: None,
-            demo: true,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 110,
-            h: 44,
-        },
-    );
+    let mut ui = ui::mount_demo(config, None, ui::viewport(110, 44));
     settle(&mut ui);
     ui
 }
 
 fn config(theme: &str, tab: usize) -> Config {
     Config {
-        projects: demo::projects(),
         theme: theme.into(),
         active_tab: tab,
-        onboarding: false,
-        ..Config::default()
+        ..ui::demo_config()
     }
 }
 
 fn settle(ui: &mut Ui) {
-    for _ in 0..3 {
-        ui.pump().unwrap();
-        ui.render();
-    }
+    ui::pump_render(ui, 3);
 }
 
 fn mouse(ui: &mut Ui, x: u16, y: u16, kind: MouseKind) {
-    ui.send_mouse(MouseEvent {
-        x,
-        y,
-        kind,
-        mods: KeyMods::NONE,
-    })
-    .unwrap();
+    ui::mouse(ui, x, y, kind);
     settle(ui);
 }
 
 fn point(ui: &Ui, key: &str) -> (u16, u16) {
-    let rect = ui
-        .rect_of_key(&key.to_owned().into())
-        .unwrap_or_else(|| panic!("missing {key}"));
+    let rect = ui::element_rect(ui, key);
     assert!(
         rect.y >= 0 && rect.y < ui.viewport().h as i16,
         "{key} is offscreen: {rect:?}"

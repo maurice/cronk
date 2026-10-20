@@ -1,52 +1,37 @@
+mod support;
+
 use cronk::{
     config::Config,
-    demo,
     model::{ItemKey, ItemKind},
-    ui::Cronk,
 };
-use tui_lipan::{TestBackend, prelude::*};
+use support::ui::{self, Ui};
+use tui_lipan::prelude::*;
 
-fn mount(kind: ItemKind, section: usize, theme: &str) -> TestBackend<Cronk> {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: Config {
-                projects: demo::projects(),
-                active_tab: if kind == ItemKind::Issue { 2 } else { 3 },
-                route: Some(ItemKey {
-                    project: 9001,
-                    iid: if kind == ItemKind::Issue { 1 } else { 102 },
-                    kind,
-                }),
-                section: Some(section),
-                theme: theme.into(),
-                onboarding: false,
-                ..Config::default()
-            },
-            path: None,
-            api: None,
-            demo: true,
+fn mount(kind: ItemKind, section: usize, theme: &str) -> Ui {
+    let mut ui = ui::mount_demo(
+        Config {
+            active_tab: if kind == ItemKind::Issue { 2 } else { 3 },
+            route: Some(ItemKey {
+                project: 9001,
+                iid: if kind == ItemKind::Issue { 1 } else { 102 },
+                kind,
+            }),
+            section: Some(section),
+            theme: theme.into(),
+            ..ui::demo_config()
         },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 80,
-            h: 60,
-        },
+        None,
+        ui::viewport(80, 60),
     );
     settle(&mut ui);
     ui
 }
 
-fn settle(ui: &mut TestBackend<Cronk>) {
-    for _ in 0..3 {
-        ui.pump().unwrap();
-        ui.render();
-    }
+fn settle(ui: &mut Ui) {
+    ui::pump_render(ui, 3);
 }
 
-fn point(ui: &TestBackend<Cronk>, needle: &str) -> (u16, u16) {
+fn point(ui: &Ui, needle: &str) -> (u16, u16) {
     let lines = ui.capture_frame().to_lines();
     let (y, line) = lines
         .iter()

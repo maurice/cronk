@@ -20,21 +20,21 @@
 //!
 //! `render` and `pump` run unconditionally after every dispatch (in `sample`), even when the
 //! message did not make the UI dirty, so a no-op message still pays for a full frame.
+mod support;
+
 use std::time::{Duration, Instant};
 
 use cronk::{
     config::Config,
     demo,
     model::{ItemKey, ItemKind, Label, Pipeline, User, WorkItem},
-    ui::{Action, Cronk, Msg},
+    ui::{Action, Msg},
 };
+use support::ui::{self, Ui};
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
-
-type Ui = TestBackend<Cronk>;
 
 const PROJECT_COUNT: usize = 5;
 const PAGE_SIZE: usize = 100;
@@ -406,41 +406,27 @@ fn mount(scenario: Scenario, items: Vec<WorkItem>) -> (Box<Ui>, Option<tempfile:
         .path_backed
         .then(|| tempfile::tempdir().expect("temporary workspace"));
     let mut config = Config {
-        projects: demo::projects(),
         active_tab: scenario.tab,
-        onboarding: false,
-        ..Config::default()
+        ..ui::demo_config()
     };
     if !scenario.query.is_empty() {
         config
             .filters
             .insert(scenario.tab.to_string(), scenario.query.into());
     }
-    let mut ui = Box::new(TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: directory
-                .as_ref()
-                .map(|dir| dir.path().join("workspace.toml")),
-            api: None,
-            demo: true,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 100,
-            h: 68,
-        },
+    let path = directory
+        .as_ref()
+        .map(|dir| dir.path().join("workspace.toml"));
+    let mut ui = Box::new(ui::mount_at(
+        config,
+        path.as_deref(),
+        true,
+        ui::viewport(100, 68),
     ));
     ui.pump().unwrap();
     ui.state_mut().items = items;
     ui.dispatch(Msg::Select(0)).unwrap();
-    for _ in 0..3 {
-        ui.render();
-        ui.pump().unwrap();
-    }
+    ui::render_pump(&mut ui, 3);
     (ui, directory)
 }
 

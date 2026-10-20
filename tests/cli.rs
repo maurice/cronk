@@ -1,7 +1,10 @@
+mod support;
+
 use std::{fs, path::Path, process::Command};
 
-use cronk::{build_info, config::Config, demo, model::ItemKind, ui::Cronk};
-use tui_lipan::TestBackend;
+use cronk::{build_info, demo, model::ItemKind};
+use support::ui::{demo_config, mount_default_with_app};
+use tui_lipan::App;
 
 #[test]
 fn version_flags_match_the_tui_build_version_without_loading_the_workspace() {
@@ -47,14 +50,6 @@ fn snapshot(config: &Path, output: &Path) {
     assert!(result.status.success(), "snapshot failed: {result:?}");
     assert!(result.stderr.is_empty(), "{result:?}");
     assert!(!fs::read(output).unwrap().is_empty());
-}
-
-fn demo_config() -> Config {
-    Config {
-        onboarding: false,
-        projects: demo::projects(),
-        ..Config::default()
-    }
 }
 
 #[test]
@@ -106,12 +101,7 @@ fn demo_snapshot_does_not_restore_or_change_existing_database_or_migrate_legacy_
             .unwrap()
             .key,
     );
-    let backend = TestBackend::new(Cronk {
-        config,
-        path: Some(path.clone()),
-        api: None,
-        demo: true,
-    });
+    let backend = mount_default_with_app(App::new(), config, Some(&path), true);
     backend.state().flush_navigation().unwrap();
     drop(backend);
     let state_dir = path.with_extension("state");

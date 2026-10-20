@@ -23,8 +23,9 @@ that every test there is functional or end-to-end. For example,
 configuration test even though it shares a file with pipeline UI scenarios.
 The tests in `tests/scenario_helpers.rs` are plain unit-style tests of the step
 helpers themselves; their calls to the helpers are the code under test. Tests
-of deliberately failing scenarios check the caught panic afterwards—this tests
-the helper's failure handling, not a pattern for functional scenarios.
+of deliberately failing scenarios inspect caught panics or captured subprocess
+output afterwards—this tests the helper's failure handling, not a pattern for
+functional scenarios.
 
 The current UI scenarios run the integrated app in a fake terminal with demo
 data. They are headless functional tests, not full end-to-end tests against
@@ -100,6 +101,9 @@ Failure output includes the executed steps, the failed step and the scenario
 name. The original assertion panic, source location and backtrace are preserved:
 the helpers do not catch or replace the panic or install a global panic hook.
 Nextest captures this output and shows it for failed tests.
+The regression test exercises uncaught failures in Given, When, Then and And
+in isolated subprocesses, checking both reporting labels and the original
+assertion details/location without changing the parent's panic hook or environment.
 
 ## Drawing and processing updates are different
 
@@ -113,9 +117,9 @@ Choose the mount contract deliberately:
 | Helper | Workspace and initial-layout contract |
 | --- | --- |
 | `mount_demo(config, path, viewport)` | Manual-focus demo fixture. Saves a supplied config path **only if absent** before mounting. |
-| `mount_at(config, path, api, demo, viewport)` | Manual focus and explicit initial viewport; does **not** save a missing config. Use for onboarding, migration and no-write contracts. |
-| `mount_default(config, path, api, demo)` | Manual focus and the framework's default initial viewport; no preliminary config save. Resizing afterwards preserves the original two-stage layout. |
-| `mount_default_with_app(app, config, path, api, demo)` | Preserves supplied app options, including focus policy, at the default initial viewport; no preliminary config save. |
+| `mount_at(config, path, demo, viewport)` | Manual focus and explicit initial viewport; does **not** save a missing config. Use for onboarding, migration and no-write contracts. |
+| `mount_default(config, path, demo)` | Manual focus and the framework's default initial viewport; no preliminary config save. Resizing afterwards preserves the original two-stage layout. |
+| `mount_default_with_app(app, config, path, demo)` | Preserves supplied app options, including focus policy, at the default initial viewport; no preliminary config save. |
 
 These helpers do not bypass application initialization or suppress its normal
 storage effects. An onboarding test must not use the saving convenience helper

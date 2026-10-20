@@ -18,7 +18,7 @@ use std::{
 use support::ui::{self, Ui, demo_config as config};
 
 fn mount(config: Config, path: Option<&Path>, demo: bool) -> Box<Ui> {
-    let mut ui = Box::new(ui::mount_at(config, path, None, demo, ui::viewport(80, 24)));
+    let mut ui = Box::new(ui::mount_at(config, path, demo, ui::viewport(80, 24)));
     ui.pump().unwrap();
     ui
 }

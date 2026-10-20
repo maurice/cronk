@@ -1,13 +1,15 @@
 //! Plain unit-style tests of the scenario helpers; no fake terminal required.
 //! Calls to Given/When/Then here exercise the API under test, not a convention
-//! for writing unit tests. Failure tests intentionally assert outside the
-//! failing scenario: they verify its panic, which cannot be checked inside the
-//! scenario that has just unwound. Functional scenarios keep all outcome
-//! assertions inside Then/And.
+//! for writing unit tests. Failure tests intentionally inspect caught panics
+//! or subprocess output outside the failing scenario. Functional scenarios
+//! keep all outcome assertions inside Then/And.
 
 mod support;
 
-use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind, panic_any},
+    process::Command,
+};
 use support::scenario::{and, given, scenario, then, when};
 
 #[test]
@@ -96,6 +98,83 @@ fn assertion_failures_keep_the_original_message() {
     assert!(message.contains("expected total"), "{message}");
     assert!(message.contains("left: 1"), "{message}");
     assert!(message.contains("right: 2"), "{message}");
+}
+
+#[test]
+fn failure_output_includes_scenario_step_and_original_assertion() {
+    const TEST: &str = "failure_output_includes_scenario_step_and_original_assertion";
+    const FAILURE_PHASE: &str = "CRONK_SCENARIO_HELPER_FAILURE_PHASE";
+    const STORY: &str = "A failed step retains its diagnostics";
+
+    // An assertion helper reports its caller's location. Include that expected
+    // file/line/column in the message rather than hard-coding source positions.
+    #[track_caller]
+    fn fail_at(phase: &str, step: &str) {
+        assert_ne!(
+            phase,
+            step,
+            "original assertion detail at {}",
+            std::panic::Location::caller()
+        );
+    }
+
+    // Re-enter only this test in a child process so its real, uncaught failure
+    // exercises the default panic hook and both reporting guards. Set the probe
+    // flag on the child only; never mutate the parallel parent's environment.
+    if let Ok(phase) = std::env::var(FAILURE_PHASE) {
+        scenario(STORY, || {
+            given("the starting conditions", || fail_at(&phase, "Given"));
+            when("an action happens", || fail_at(&phase, "When"));
+            then("the result is checked", || fail_at(&phase, "Then"));
+            and("another result is checked", || fail_at(&phase, "And"));
+        });
+        panic!("the {phase} failure fixture unexpectedly completed");
+    }
+
+    for (phase, failed_step) in [
+        ("Given", "Given the starting conditions"),
+        ("When", "When an action happens"),
+        ("Then", "Then the result is checked"),
+        ("And", "And another result is checked"),
+    ] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            // Only this failing child disables libtest capture, so its stderr
+            // can be asserted. The parent test still runs normally in nextest.
+            .args(["--exact", TEST, "--nocapture"])
+            .env(FAILURE_PHASE, phase)
+            .env("RUST_BACKTRACE", "0")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(101),
+            "{phase} fixture must fail, not skip or abort:\n{stdout}\n{stderr}"
+        );
+        for expected in [
+            format!("Scenario: {STORY}"),
+            format!("Failed step: {failed_step}"),
+            format!("Failed scenario: {STORY}"),
+            format!("left: \"{phase}\""),
+            format!("right: \"{phase}\""),
+        ] {
+            assert!(
+                stderr.contains(&expected),
+                "{phase} fixture missing {expected:?}:\n{stderr}"
+            );
+        }
+        let location = stderr
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("assertion `left != right` failed: original assertion detail at ")
+            })
+            .unwrap_or_else(|| panic!("{phase} fixture lost the original assertion:\n{stderr}"));
+        assert!(
+            stderr.contains(&format!("panicked at {location}:")),
+            "{phase} fixture changed the assertion's source location:\n{stderr}"
+        );
+    }
 }
 
 #[test]

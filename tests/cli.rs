@@ -101,7 +101,7 @@ fn demo_snapshot_does_not_restore_or_change_existing_database_or_migrate_legacy_
             .unwrap()
             .key,
     );
-    let backend = mount_default_with_app(App::new(), config, Some(&path), None, true);
+    let backend = mount_default_with_app(App::new(), config, Some(&path), true);
     backend.state().flush_navigation().unwrap();
     drop(backend);
     let state_dir = path.with_extension("state");

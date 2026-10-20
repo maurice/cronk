@@ -15,7 +15,7 @@ use support::ui::{self, Ui};
 use tui_lipan::prelude::*;
 
 fn mount(config: Config, path: &Path, demo: bool) -> Ui {
-    let mut ui = ui::mount_at(config, Some(path), None, demo, ui::viewport(110, 38));
+    let mut ui = ui::mount_at(config, Some(path), demo, ui::viewport(110, 38));
     settle(&mut ui);
     ui
 }

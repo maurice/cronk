@@ -1,7 +1,7 @@
 //! Fake-terminal setup and input. Helpers do not implicitly settle the UI:
 //! each suite chooses its update order and number of rounds explicitly.
 
-use cronk::{config::Config, demo, gitlab::GitLab, ui::Cronk};
+use cronk::{config::Config, demo, ui::Cronk};
 use std::path::Path;
 use tui_lipan::{TestBackend, core::event::MouseKind, prelude::*};
 
@@ -36,23 +36,17 @@ pub fn mount_demo(config: Config, path: Option<&Path>, viewport: Rect) -> Ui {
     if let Some(path) = path.filter(|path| !path.exists()) {
         config.save(path).unwrap();
     }
-    mount_at(config, path, None, true, viewport)
+    mount_at(config, path, true, viewport)
 }
 
 /// Mount at an explicit initial viewport with manual focus. Unlike mount_demo,
 /// this does not save a missing config: onboarding and migration tests must
 /// retain control of workspace creation. The application can still initialize
 /// its own storage normally; this helper does not suppress those side effects.
-pub fn mount_at(
-    config: Config,
-    path: Option<&Path>,
-    api: Option<GitLab>,
-    demo: bool,
-    viewport: Rect,
-) -> Ui {
+pub fn mount_at(config: Config, path: Option<&Path>, demo: bool, viewport: Rect) -> Ui {
     TestBackend::new_with_app_and_viewport(
         App::new().focus_policy(FocusPolicy::Manual),
-        application(config, path, api, demo),
+        application(config, path, demo),
         (),
         viewport,
     )
@@ -61,33 +55,26 @@ pub fn mount_at(
 /// Mount using the framework's default initial viewport and manual focus.
 /// Resizing afterwards is intentionally distinct from mount_at: initial layout
 /// can update state and enqueue viewport callbacks before the resize.
-pub fn mount_default(config: Config, path: Option<&Path>, api: Option<GitLab>, demo: bool) -> Ui {
+pub fn mount_default(config: Config, path: Option<&Path>, demo: bool) -> Ui {
     mount_default_with_app(
         App::new().focus_policy(FocusPolicy::Manual),
         config,
         path,
-        api,
         demo,
     )
 }
 
 /// Preserve a caller's app options, including its focus policy, at the default
 /// initial viewport. Does not save a missing config or perform extra rounds.
-pub fn mount_default_with_app(
-    app: App,
-    config: Config,
-    path: Option<&Path>,
-    api: Option<GitLab>,
-    demo: bool,
-) -> Ui {
-    TestBackend::new_with_app(app, application(config, path, api, demo), ())
+pub fn mount_default_with_app(app: App, config: Config, path: Option<&Path>, demo: bool) -> Ui {
+    TestBackend::new_with_app(app, application(config, path, demo), ())
 }
 
-fn application(config: Config, path: Option<&Path>, api: Option<GitLab>, demo: bool) -> Cronk {
+fn application(config: Config, path: Option<&Path>, demo: bool) -> Cronk {
     Cronk {
         config,
         path: path.map(Path::to_path_buf),
-        api,
+        api: None,
         demo,
     }
 }

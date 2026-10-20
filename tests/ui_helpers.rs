@@ -39,13 +39,7 @@ fn demo_configuration_and_representative_themes_are_valid() {
 fn raw_mount_keeps_onboarding_in_control_of_config_creation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("workspace.toml");
-    let ui = ui::mount_at(
-        Config::default(),
-        Some(&path),
-        None,
-        true,
-        ui::viewport(110, 38),
-    );
+    let ui = ui::mount_at(Config::default(), Some(&path), true, ui::viewport(110, 38));
     assert!(!path.exists());
     assert_eq!(ui.viewport(), ui::viewport(110, 38));
     assert!(matches!(
@@ -83,7 +77,7 @@ fn demo_mount_does_not_replace_an_existing_config() {
 
 #[test]
 fn default_mount_can_be_resized_after_its_initial_frame() {
-    let mut ui = ui::mount_default(ui::demo_config(), None, None, true);
+    let mut ui = ui::mount_default(ui::demo_config(), None, true);
     let initial = ui.viewport();
     let resized = ui::viewport(initial.w + 10, initial.h + 10);
     ui.set_viewport(resized);

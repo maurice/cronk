@@ -420,7 +420,6 @@ fn mount(scenario: Scenario, items: Vec<WorkItem>) -> (Box<Ui>, Option<tempfile:
     let mut ui = Box::new(ui::mount_at(
         config,
         path.as_deref(),
-        None,
         true,
         ui::viewport(100, 68),
     ));

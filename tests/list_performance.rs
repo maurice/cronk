@@ -1,39 +1,23 @@
 //! Reproducible headless scrolling workload; timings are informational, not CI thresholds.
+mod support;
+
 use std::time::Instant;
 
-use cronk::{
-    config::Config,
-    demo,
-    model::ItemKind,
-    ui::{Cronk, Msg},
-};
+use cronk::{config::Config, demo, model::ItemKind, ui::Msg};
+use support::ui::{self, Ui};
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-fn large_list(count: usize) -> TestBackend<Cronk> {
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: Config {
-                projects: demo::projects(),
-                active_tab: 3,
-                onboarding: false,
-                ..Config::default()
-            },
-            path: None,
-            api: None,
-            demo: true,
+fn large_list(count: usize) -> Ui {
+    let mut ui = ui::mount_demo(
+        Config {
+            active_tab: 3,
+            ..ui::demo_config()
         },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 100,
-            h: 68,
-        },
+        None,
+        ui::viewport(100, 68),
     );
     ui.pump().unwrap();
     let template = demo::items()
@@ -49,8 +33,7 @@ fn large_list(count: usize) -> TestBackend<Cronk> {
         })
         .collect();
     ui.dispatch(Msg::Select(0)).unwrap();
-    ui.render();
-    ui.pump().unwrap();
+    ui::render_pump(&mut ui, 1);
     ui
 }
 
@@ -102,10 +85,7 @@ fn large_list_scrollbar_drag_and_wheel_reach_real_rows() {
         ui.render();
         ui.pump().unwrap();
     }
-    for _ in 0..3 {
-        ui.render();
-        ui.pump().unwrap();
-    }
+    ui::render_pump(&mut ui, 3);
     assert_eq!(ui.state().scroll.offset, 2_980);
     let tail = ui.state().visible_items().last().unwrap().title.clone();
     assert!(ui.capture_frame().plain_text().contains(&tail));
@@ -116,10 +96,7 @@ fn large_list_scrollbar_drag_and_wheel_reach_real_rows() {
         mods: KeyMods::NONE,
     })
     .unwrap();
-    for _ in 0..3 {
-        ui.render();
-        ui.pump().unwrap();
-    }
+    ui::render_pump(&mut ui, 3);
     assert!(ui.state().scroll.offset < 2_980);
     let offset = ui.state().scroll.offset;
     let title = ui.state().visible_items()[offset].title.clone();

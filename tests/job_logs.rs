@@ -1,25 +1,26 @@
+mod support;
+
 use std::time::Duration;
 
 use cronk::{
     config::Config,
     demo,
     model::{ItemKind, Job, TraceChunk},
-    ui::{Cronk, JobSource, Msg, Scope, Trace},
+    ui::{JobSource, Msg, Scope, Trace},
+};
+use support::{
+    scenario::{and, given, scenario, then, when},
+    ui::{self, Ui, frame_text as text},
 };
 use tui_lipan::{
-    TestBackend,
     core::event::{MouseButton, MouseKind},
     prelude::*,
 };
 
-type Ui = TestBackend<Cronk>;
 const JOB: u64 = 900_001;
 
 fn settle(ui: &mut Ui) {
-    for _ in 0..4 {
-        ui.pump().unwrap();
-        ui.render();
-    }
+    ui::pump_render(ui, 4);
 }
 
 fn mount(theme: &str) -> Ui {
@@ -38,22 +39,7 @@ fn mount(theme: &str) -> Ui {
         onboarding: false,
         ..Config::default()
     };
-    let mut ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: None,
-            api: None,
-            demo: true,
-        },
-        (),
-        Rect {
-            x: 0,
-            y: 0,
-            w: 100,
-            h: 30,
-        },
-    );
+    let mut ui = ui::mount_demo(config, None, ui::viewport(100, 30));
     settle(&mut ui);
     ui.state_mut().details.as_mut().unwrap().jobs = vec![
         Job {
@@ -120,20 +106,11 @@ fn key(ui: &mut Ui, code: KeyCode) {
     modified(ui, code, KeyMods::NONE);
 }
 fn modified(ui: &mut Ui, code: KeyCode, mods: KeyMods) {
-    ui.send_key(KeyEvent { code, mods }).unwrap();
+    ui::modified_key(ui, code, mods);
     settle(ui);
 }
-fn text(ui: &Ui) -> String {
-    ui.capture_frame().plain_text()
-}
 fn mouse(ui: &mut Ui, x: u16, y: u16, kind: MouseKind) {
-    ui.send_mouse(MouseEvent {
-        x,
-        y,
-        kind,
-        mods: KeyMods::NONE,
-    })
-    .unwrap();
+    ui::mouse(ui, x, y, kind);
     settle(ui);
 }
 fn append(ui: &mut Ui, value: &str, reset: bool) {
@@ -654,26 +631,66 @@ fn search_jumps_between_matches_and_escape_unwinds_one_level() {
 
 #[test]
 fn wheel_scrolls_focused_logs_without_moving_the_detail_document() {
-    let mut ui = mount("midnight");
-    key(&mut ui, KeyCode::Char('z'));
-    let rect = ui.rect_of_key(&format!("log-window-{JOB}").into()).unwrap();
-    let before = position(&ui);
-    mouse(
-        &mut ui,
-        rect.x as u16 + 1,
-        rect.y as u16 + 1,
-        MouseKind::ScrollUp,
-    );
-    assert_eq!(position(&ui), before - 3);
-    assert!(text(&ui).contains(&format!("LINE_{:03}", before - 3)));
-    mouse(
-        &mut ui,
-        rect.x as u16 + 1,
-        rect.y as u16 + 1,
-        MouseKind::ScrollDown,
-    );
-    assert!(ui.state().log_views[&JOB].follow);
-    assert!(text(&ui).contains("LINE_099"));
+    scenario("Scrolling logs leaves details in place", || {
+        let (mut ui, rect, before, detail_offset) = given("zoomed logs at the tail", || {
+            let mut ui = mount("midnight");
+            key(&mut ui, KeyCode::Char('z'));
+            let rect = ui::element_rect(&ui, &format!("log-window-{JOB}"));
+            let before = position(&ui);
+            let detail_offset = ui.state().content_offset;
+            (ui, rect, before, detail_offset)
+        });
+
+        when("I scroll up inside the logs", || {
+            mouse(
+                &mut ui,
+                rect.x as u16 + 1,
+                rect.y as u16 + 1,
+                MouseKind::ScrollUp,
+            );
+        });
+
+        then("the logs move up three lines", || {
+            assert_eq!(position(&ui), before - 3);
+            assert!(text(&ui).contains(&format!("LINE_{:03}", before - 3)));
+        });
+        and("the detail document has not moved", || {
+            assert_eq!(ui.state().content_offset, detail_offset);
+        });
+    });
+}
+
+#[test]
+fn scrolling_logs_back_to_the_tail_resumes_following() {
+    scenario("Scrolling back to the log tail resumes following", || {
+        let (mut ui, rect) = given("zoomed logs paused just above the tail", || {
+            let mut ui = mount("midnight");
+            key(&mut ui, KeyCode::Char('z'));
+            let rect = ui::element_rect(&ui, &format!("log-window-{JOB}"));
+            mouse(
+                &mut ui,
+                rect.x as u16 + 1,
+                rect.y as u16 + 1,
+                MouseKind::ScrollUp,
+            );
+            assert!(!ui.state().log_views[&JOB].follow);
+            (ui, rect)
+        });
+
+        when("I scroll down to the tail", || {
+            mouse(
+                &mut ui,
+                rect.x as u16 + 1,
+                rect.y as u16 + 1,
+                MouseKind::ScrollDown,
+            );
+        });
+
+        then("the logs follow the tail again", || {
+            assert!(ui.state().log_views[&JOB].follow);
+            assert!(text(&ui).contains("LINE_099"));
+        });
+    });
 }
 
 #[test]
@@ -726,17 +743,7 @@ fn collapsed_choices_round_trip_and_tab_visits_restore_log_positions() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("workspace.toml");
     ui.state().config.save(&path).unwrap();
-    let persisted_ui = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config: ui.state().config.clone(),
-            path: Some(path.clone()),
-            api: None,
-            demo: true,
-        },
-        (),
-        ui.viewport(),
-    );
+    let persisted_ui = ui::mount_demo(ui.state().config.clone(), Some(&path), ui.viewport());
     persisted_ui.state().flush_navigation().unwrap();
     drop(persisted_ui);
     let config = Config::load(&path).unwrap();
@@ -744,17 +751,7 @@ fn collapsed_choices_round_trip_and_tab_visits_restore_log_positions() {
         config.tab_states.is_empty(),
         "job choices belong in local SQLite, not TOML"
     );
-    let mut restarted = TestBackend::new_with_app_and_viewport(
-        App::new().focus_policy(FocusPolicy::Manual),
-        Cronk {
-            config,
-            path: Some(path.clone()),
-            api: None,
-            demo: true,
-        },
-        (),
-        ui.viewport(),
-    );
+    let mut restarted = ui::mount_demo(config, Some(&path), ui.viewport());
     settle(&mut restarted);
     assert!(restarted.state().collapsed.contains(&JOB));
     // Restore a completed fixture so offline polling cannot replace the source.
